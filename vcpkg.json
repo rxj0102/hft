@@ -1,0 +1,9 @@
+{
+  "name": "hft",
+  "version": "0.0.1",
+  "builtin-baseline": "REPLACE_WITH_VCPKG_COMMIT_SHA",
+  "dependencies": [
+    "gtest",
+    "benchmark"
+  ]
+}
