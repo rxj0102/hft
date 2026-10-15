@@ -202,3 +202,87 @@ Frame: u16 length, then body: type u8, seq u64, payload (all big-endian). Types:
 - No heartbeats, logon or retransmission: a gap is a kill, not a recovery. Real sessions (FIX or a binary venue protocol) need those; they are Phase 8 runbook items.
 - The reference price for the band and loss limit is supplied by the caller (the e2e test uses the engine mid); a stale reference is the caller's risk.
 
+## 13. Phase 6: strategy and backtester
+
+```
+ tape (public events) ---+--> venue book --> VirtualVenue (our orders, queue position)
+                         |                        ^                    |
+                         |                    ingress                  | fills, acks
+                         |                        |                  egress
+                         +--(md_ns)--> strategy book --> MarketMaker --> Gateway --> OMS --> Risk
+                                                         ^                              |
+                                                         +------------------------------+
+```
+The strategy runs through the same Gateway, OMS, risk engine and wire format as in production. Only the venue is simulated.
+
+### Why the data is synthetic
+The sandbox has no licensed market data, so the tape comes from a generator that drives the real matching engine. A latent fair value jumps every few hundred requests. Informed takers send market orders toward it while the mid lags; passive flow leans toward it before that (more bids added, asks cancelled), which is what makes order book imbalance predictive. The test suite measures the property instead of assuming it: on the default seed the imbalance points the right way for the next mid move 84% of the time. That is far stronger than real markets give. Every PnL number in this chapter therefore shows how the machinery behaves and how effects scale, not what anyone could earn.
+
+### Queue-aware fills
+Our orders are not on the tape, so each carries a simulated queue position. TapeBook keeps an arrival number for every resting tape order, which makes "ahead of us" and "behind us" exact (L3):
+- an order ahead of us trades or is cancelled or cut: `ahead` shrinks;
+- an order behind us trades: price-time priority says we traded first, so we fill min(leaves, print size);
+- a print at a worse price than ours: whoever sold passed through us, so we fill min(leaves, print size) (the provable part);
+- new orders and replaces that lose priority join behind the level as it is at arrival.
+Orders that would take liquidity are rejected. Filling them honestly needs a market impact model, which this chapter does not have.
+
+Two independent derivations of the queue exist (arrival order decides fills, tracked quantity gives `ahead`). They must agree: nothing ahead when someone behind trades, and `ahead` never shrinks by more than it holds. Violations are counted (`queue_inconsistent`); the tests, the fuzzer and every backtest require zero.
+
+`queue_penalty_pct` pretends p% more of the level was ahead of us at arrival, drained by trades only. It exists because the exact model is exact only about the tape; the real queue also depends on things the tape cannot show.
+
+### Validation against the real engine
+Until our order first trades, the real engine and the simulation are the same world. So the test injects one passive order at a random moment into (a) the real engine replaying the same script of other participants and (b) the simulation. Over 250 injections: the engine filled 212 times, the exact simulation 212, at the same moment in 209 and for the same size in 189. It never filled earlier or for more than the engine did. Where it differs it is late or small: a sweep that ends exactly on our order, with nothing behind us to show it, leaves no trace on the tape. That is the one known source of missed fills, and it errs in the safe direction.
+
+### Event ordering and determinism
+Time comes only from the tape and the configured latencies; jitter comes from a seeded generator and cannot reorder a link. Ties go to: tape event at the venue, order message arriving at the venue, tape event reaching the strategy, report reaching the strategy. A message arriving at the instant of a tape event is therefore handled after it (the order is exposed to the event; tested). A run is a pure function of tape, config and seed. Reports are byte-identical across two runs, across gcc and clang, and a pinned digest guards every change in semantics. The cross-compiler check found a real bug in the generator: random draws inside one argument list are evaluated in different orders by gcc and clang, which produced two different markets from one seed. Draws now sit in separate statements.
+
+### Strategy
+fair = mid + alpha * I - skew * position, I = (bid depth - ask depth) / (bid depth + ask depth) over the top 3 price levels, all in 1/16 ticks (integers). bid = floor(fair - half spread), ask = ceil(fair + half spread); clamped so a PostOnly never takes and the two quotes never cross. A side is not quoted when filling it would take position plus working orders past the cap. A quote moves (replace) only when the target is a full tick away, at most once per 50 us per side, because every replace sends it to the back of the queue. The strategy keeps no order state of its own: it reads the OMS.
+
+### Accounting
+Exact, in half raw price units: value = 2*cash + pos*mid2, and
+- at a fill: dV = side*qty*(mid2 - 2*price) - 2*fee*qty (spread capture, fees);
+- at a mid change: dV = pos*(mid2_new - mid2_old) (inventory).
+So value = spread capture + inventory + fees without remainder; the tests assert it to the last unit on random configs and against the OMS cash and position (which agree with the venue once everything drains).
+Adverse selection is read against the mid 100 us, 1 ms and 10 ms after each fill. Realized spread = side*(mid_later - price): the edge actually kept. Post-fill move = side*(mid_later - mid_at_fill): negative means the market moved against the fill. Fill rate is per quote (an accepted order, or a replace that lost its place, is a fresh offer) and per quoted share. Sharpe is computed from 1 ms PnL bins and annualised as mean/std * sqrt(bins per 6.5 h x 252 d); on synthetic data this is illustrative only.
+
+### Results (bench/bt_report, 4 synthetic markets of 1M requests each, ~10 s of market time)
+Headline run, market data 5 us, ingress 10 us, egress 10 us, 2 us jitter:
+
+| | |
+|---|---|
+| PnL | +92.85 (spread capture +43.26, inventory +49.59) |
+| fills | 2793 fills, 4597 shares |
+| fill rate | 6.4% of quotes traded, 3.7% of quoted shares |
+| effective edge | +0.94 ticks per share at the fill |
+| post-fill move at 100 us / 1 ms / 10 ms | +0.02 / +0.28 / +1.29 ticks per share |
+| Sharpe | 0.30 per 1 ms bin |
+| max position | 9 shares |
+| replay speed | 4.3 M tape events/s including gateway, OMS, risk and wire codec (shared VM) |
+
+Signal ablation (sum over 4 markets, same latencies): imbalance lean of 0, 0.5, 1, 2 ticks gives PnL +25.5, +158.5, +365.1, +752.9; the post-fill move at 1 ms goes from -0.43 (adverse selection: fills are the ones the market was about to run over) to +0.38. Without the lean the strategy is adversely selected; with it the signal does the work.
+
+Latency versus alpha decay (round trip = md + ingress + egress, split evenly):
+
+| round trip | PnL | spread capture | inventory | post-fill move 1 ms |
+|---|---|---|---|---|
+| 0 us | +374.8 | +166.0 | +208.8 | +0.32 |
+| 30 us | +360.2 | +165.9 | +194.2 | +0.27 |
+| 120 us | +297.1 | +160.5 | +136.7 | +0.17 |
+| 250 us | +223.1 | +144.9 | +78.1 | +0.06 |
+| 500 us | +121.7 | +126.9 | -5.2 | -0.12 |
+| 1000 us | +7.3 | +131.3 | -124.1 | -0.32 |
+
+The inventory term, the part that comes from the signal, falls to zero near 500 us and goes negative beyond, while spread capture holds up. In this market the edge is gone after about half a millisecond; fill rate rises with latency because stale quotes get hit more often, which is the same adverse selection seen from the other side.
+
+Queue depth sensitivity (pretend p% more of the level was ahead): PnL +365.1, +316.7, +297.9, +262.7, +217.0 for p = 0, 25, 50, 100, 200. A deeper queue costs fills but the result degrades gracefully.
+
+### Tradeoffs and limits
+- Synthetic data only. The mechanics are real and tested; the returns are not predictions.
+- No market impact. Our fills do not change what others do. Fine for small passive quantities; wrong for size.
+- Passive only. Taking liquidity is rejected rather than modelled.
+- One known source of missed fills (sweep ends exactly on us) and no source of invented ones, as far as the engine comparison shows.
+- The strategy has no timers: it acts on tape events and reports, so a quiet market means stale quotes.
+- Positions are marked at the final mid, not unwound; the loss-limit kill sweeps orders but leaves the position (flattening is a decision for the runbook in Phase 8).
+- One instrument, one strategy, flat per-share fees.
+

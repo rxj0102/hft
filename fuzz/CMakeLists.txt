@@ -30,3 +30,8 @@ add_executable(fuzz_codec fuzz_codec.cpp)
 target_link_libraries(fuzz_codec PRIVATE hft_core)
 target_compile_options(fuzz_codec PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
 target_link_options(fuzz_codec PRIVATE -fsanitize=fuzzer,address,undefined)
+
+add_executable(fuzz_venue fuzz_venue.cpp)
+target_link_libraries(fuzz_venue PRIVATE hft_core)
+target_compile_options(fuzz_venue PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
+target_link_options(fuzz_venue PRIVATE -fsanitize=fuzzer,address,undefined)

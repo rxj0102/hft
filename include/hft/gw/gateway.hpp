@@ -130,6 +130,7 @@ class Gateway {
   oms::Oms& oms() noexcept { return oms_; }
   const oms::Oms& oms() const noexcept { return oms_; }
   risk::RiskEngine& risk() noexcept { return risk_; }
+  const risk::RiskEngine& risk() const noexcept { return risk_; }
   const GatewayStats& stats() const noexcept { return stats_; }
 
  private:

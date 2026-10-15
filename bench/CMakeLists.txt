@@ -20,3 +20,6 @@ target_include_directories(bench_match PRIVATE ${CMAKE_SOURCE_DIR}/tests/support
 
 add_executable(bench_risk bench_risk.cpp)
 target_link_libraries(bench_risk PRIVATE hft_core)
+
+add_executable(bt_report bt_report.cpp)
+target_link_libraries(bt_report PRIVATE hft_core)
