@@ -7,3 +7,12 @@ add_test(NAME test_core COMMAND test_core)
 add_executable(test_phase1 test_phase1.cpp)
 target_link_libraries(test_phase1 PRIVATE hft_core Threads::Threads)
 add_test(NAME test_phase1 COMMAND test_phase1)
+
+add_executable(test_book test_book.cpp)
+target_link_libraries(test_book PRIVATE hft_core)
+target_include_directories(test_book PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+# Default run is sized for sanitizer builds; the 10M-event gate run is separate.
+add_test(NAME test_book COMMAND test_book 1000000)
+if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
+  add_test(NAME test_book_gate_10m COMMAND test_book 10000000)
+endif()

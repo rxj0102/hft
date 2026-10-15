@@ -3,6 +3,7 @@
 // makes two runs of the same replay disagree, which breaks determinism, and
 // equality on prices (is this order at the best bid?) must be exact.
 
+#include <compare>
 #include <cstdint>
 #include <limits>
 

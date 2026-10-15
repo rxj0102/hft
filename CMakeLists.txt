@@ -22,6 +22,11 @@ target_link_libraries(hft_core INTERFACE hft_warnings)
 # Hot-path libraries (Phase 1+) link hft_hotpath explicitly; header-only core
 # and the test/bench drivers do not, so they may use stdio and iostream.
 
+# Compiles hot-path headers under -fno-exceptions -fno-rtti so a violation breaks
+# the build instead of hiding in a driver that is allowed to use them.
+add_library(hft_hotpath_check STATIC src/core/hotpath_check.cpp src/book/book_check.cpp)
+target_link_libraries(hft_hotpath_check PUBLIC hft_core PRIVATE hft_hotpath)
+
 enable_testing()
 add_subdirectory(tests)
 add_subdirectory(bench)

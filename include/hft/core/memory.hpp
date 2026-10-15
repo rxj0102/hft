@@ -194,6 +194,9 @@ class Pool {
     return static_cast<std::uint32_t>(reinterpret_cast<const Slot*>(p) - slots_);
   }
   T* at(std::uint32_t idx) noexcept { return reinterpret_cast<T*>(slots_[idx].storage); }
+  const T* at_const(std::uint32_t idx) const noexcept {
+    return reinterpret_cast<const T*>(slots_[idx].storage);
+  }
 
   std::uint32_t capacity() const noexcept { return capacity_; }
   std::uint32_t in_use() const noexcept { return in_use_; }
