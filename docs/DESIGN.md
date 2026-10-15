@@ -286,3 +286,96 @@ Queue depth sensitivity (pretend p% more of the level was ahead): PnL +365.1, +3
 - Positions are marked at the final mid, not unwound; the loss-limit kill sweeps orders but leaves the position (flattening is a decision for the runbook in Phase 8).
 - One instrument, one strategy, flat per-share fees.
 
+
+
+## 14. Phase 7: end-to-end latency and hardening
+
+### What is measured
+One object, `t2t::Pipeline`, runs the production path: feed packet, MdHandler (parse, A/B arbitration, sequencing), OrderBook, MarketMaker, Gateway (risk, OMS, encode) and the send call (a stub that stages bytes). Timing starts when the packet bytes are handed to `on_packet` and stops when the last frame of the reaction is staged. The NIC, the kernel, the exchange and the wire are outside the number.
+
+Time is passed in (the recorded logical time); the TSC is used only for measurement, so replay is deterministic.
+
+Correctness gate for every latency pass: the session is recorded from a Backtester run, then replayed through the real Pipeline. The wire bytes must hash identically (FNV over frames, length mixed in). If one optimisation changes behaviour, the bench exits 2 before printing a timing.
+
+Method: pass "verify" (hash), "total" (two probes), "staged" (extra probes between stages), "cold" (4 MiB walk before each tick), "speed" (no probes). Timer overhead (13.9 ns for an rdtsc+lfence pair) is subtracted. Page faults and context switches inside the hot loop are read with getrusage; any page fault is a hard failure.
+
+### Results (synthetic market, 311k feed packets, 7233 caused an order)
+Shared 2-vCPU Xeon at 2.8 GHz, gcc 13.3, perf preset. Two runs minutes apart on the VM differ by roughly 10% in the body and much more in the tail; treat as indicative.
+
+| Hot caches, packets back to back | p50 | p99 | p99.9 |
+|---|---|---|---|
+| tick-to-trade (first frame was a replace) | 128 ns | 234-260 ns | 500-560 ns |
+| tick-to-trade (first frame was a new order) | 305 ns | 845 ns | |
+| tick-to-decision, no order sent | 72 ns | 144-151 ns | 370 ns |
+| report-to-decision | 58 ns | 208 ns | 525 ns |
+| duplicate packet on line B dropped | 24 ns | 46 ns | 135 ns |
+| sustained, no probes in the loop | 74-78 ns per input (13 M inputs/s) | | |
+
+Cold L1 and L2 (a 4 MiB walk before every tick, data still in L3): tick-to-trade p50 about 0.97 us (one run showed 1.4 us), p99 2.1-2.9 us; no-order p50 405 ns. This is the more honest figure for a tick that arrives after quiet time. The hot numbers are a best case.
+
+p99.9 and max are dominated by the VM, not the code: a 1 s spin loop is interrupted for more than 1 us about 2700 times per second. Do not read the max column as a property of the engine. Bare-metal confirmation is deferred.
+
+### Per-stage budget
+Staged run, ticks that sent an order. The probes cost about 50-100 ns in total (measured per run: the staged end-to-end p50 minus the unprobed headline p50), so stage times are proportions, not exact nanoseconds.
+
+| Stage | p50 (probed) | share | cycles at 2.8 GHz (scaled to the 128 ns headline) |
+|---|---|---|---|
+| feed handler: parse, arbitrate, book | 66 ns | 34% | about 120 |
+| strategy: signal and quote | 67 ns | 34% | about 120 |
+| gateway: risk, OMS, encode, stage | 53 ns | 27% | about 97 |
+| after the wire (second side) | 21 ns | | |
+
+Instruction budget per input (callgrind, gate workload of 106,613 inputs, 797.8 instructions per input): book 32.5%, strategy 30.3%, feed handler 23.9%, pipeline glue 7.2%, gateway/risk/OMS/codec 3.0%, memory and clock 2.8%. The gateway is cheap in instructions and the strategy plus the book are the cost.
+
+### Flame graph findings
+Sampler at 4000 Hz, frame-pointer unwinding, addr2line with inline expansion (16.7k samples, 33 outside the executable). Self time: MarketMaker::on_update 12.7%, MarketMaker::side 12.5%, parse_packet 7.2%, InvariantDivisor::divmod 6.8%, OrderBook::unlink 5.9%, MdHandler::on_packet 5.5%, IdMap::find 3.7%, OrderBook::depth 3.0%, floor_div 2.8%, Pipeline::decide 2.7%. Nothing is above 13%: the profile is flat, which means the big wins are taken. Remaining ideas: skip the strategy when the update cannot change quotes, and keep the id map hot.
+
+### Cache and branch analysis (SIMULATED)
+No hardware PMU in the sandbox, so these come from callgrind's model (I1/D1 32K 8-way, LL 1 MiB 16-way as an L2 stand-in), not from counters. Per input after the optimisations: 2.95 branch mispredicts, 2.26 D1 misses, 1.27 L2-model misses. About 60% of the L2-model misses are first touch of the packet bytes, which are compulsory (NIC DMA data is not in cache). Most of the remaining mispredicts come from the id-map probe loop. Branch mispredicts fell from 1.37M to 0.49M on the 200k-request session.
+
+### Optimisations (interleaved A/B, median of 5 runs)
+| Step | Metric | Before | After |
+|---|---|---|---|
+| parked-packet counter | t2t hot p50 | 240 ns | 163 ns |
+| | idle p50 | 164 ns | 97 ns |
+| | sustained per input | 170 ns | 140 ns |
+| direct depth walk + reciprocal division (right-sized book) | t2t hot p50 | 144 ns | 123 ns |
+| | idle p50 | 89 ns | 72 ns |
+| | sustained per input | 86 ns | 71 ns |
+
+Instructions per input 1814 -> 850 -> 764 on the 200k-request session.
+
+### Decision records
+1. Counter instead of scanning the pending store. The store is 64 slots of about 1.5 KB; scanning it on every in-order packet touched 64 cache lines and was the largest single cost. A counter `parked_` says when there is nothing to do. Drain runs when `parked_ != 0 || gap_active_`. The second term is required: a heartbeat ahead of our sequence opens a gap with nothing parked, and the late in-order packet must close it (found by the fuzzer when I wrongly asserted otherwise; regression test added).
+2. Right-size the book. Capacity is a latency parameter: the id table is 16 B times a power of two of at least 2x max orders, and it competes for L1. Sensitivity (hot): capacity 1024 gives p50 127 / p99 254 ns, 65,536 gives 138 / 388 ns, 262,144 gives 160 / 474 ns. Bench rule: capacity = 3x peak resting orders, power of two, minimum 1024. Overflow fails safe (see failure modes).
+3. InvariantDivisor. The tick-to-index division uses a fixed divisor known at init. `M = floor((2^64-1)/d)`, high multiply, one correction step; exact for all 64-bit inputs (proof in the header, checked against hardware division on edge values and 3M random pairs). Negative offsets fall back to plain division.
+4. Rejected: grouped-by-4 Fibonacci id hash. It cut p99 by 24-32% when the table was over-sized but made it 4-7% worse when right-sized. Since decision 2 right-sizes, it was dropped.
+5. Gate on instruction counts, not nanoseconds. A shared CI runner cannot hold 2% on wall-clock time. Instructions per input under callgrind are deterministic (a rerun gave +0.00%) and track the work done. Tolerance +2%. Mispredicts and cache-model misses are reported, not gated. The baseline is keyed on the compiler major version and the gate skips on a mismatch unless `--strict`. Tested: the gate fails at +120.71% on the pre-optimisation code.
+6. Feed loss is not the kill switch. A lost feed pulls quotes (Gateway::cancel_all, counted as pulled_cancels) and repeats after each report; quoting resumes by itself after a snapshot. The kill switch is latched and needs a human.
+
+### Failure modes
+| Failure | What happens | Evidence |
+|---|---|---|
+| Gap on one line, other line has it | closed by arbitration, nothing sent | gap_closed_by_other_line |
+| Gap on both lines | after the timeout: NeedSnapshot, quotes pulled (cancels only), strategy silent until snapshot, then resumes | feed_loss_pulls_quotes_and_recovers; fuzz oracle: no new/replace frames while the feed is untrusted |
+| Heartbeat shows lost tail | gap opens with nothing parked; closed by a late packet or times out | test_heartbeat_gap_closed_by_late_packet |
+| Book capacity exceeded | exactly one feed loss, quotes pulled, snapshot recovery, no kill | book_capacity_exceeded |
+| Duplicate packets on A and B | dropped in about 24 ns | line_b_duplicates |
+| Hot-path allocation or page fault | test (alloc trap) and bench (exit 3) fail | no_allocation |
+| Behaviour change from an optimisation | wire hash mismatch, bench exits 2 | replay_equals_backtest |
+| Latency regression | CI gate fails above +2% instructions per input | perf_gate.py |
+
+### Testing and hardening results
+Mutation check: 18 injected bugs (md, book depth, divisor, pipeline, gateway counters, session recorder, strategy clamp). 17 died at once. The survivor (heartbeat gap closure) was not a test gap in the code but one in the suite; it now has a test and dies. 18 of 18. Release 16/16 tests (with the 258 s simulation gate), asan 9/9, ubsan 9/9, tsan 9/9, clang 9/9 (non-gate), fuzz smoke on all six targets clean (md and pipeline about 1M runs in 46 s each).
+
+### Reproduce
+```
+cmake --preset perf && cmake --build --preset perf
+./build/perf/bench/bench_t2t --requests 300000 --cpu 1
+python3 scripts/perf_gate.py --bench build/perf/bench/bench_t2t --strict
+./build/perf/bench/bench_t2t --requests 200000 --profile t2t.prof --seconds 6
+python3 scripts/flamegraph.py --top 14 t2t.prof t2t_flame.svg
+```
+
+### Limits
+Synthetic market. Shared VM. Hot numbers are best case. NIC, kernel and exchange not measured. Cache and branch figures are simulated. The strategy runs on every packet (an event-relevance filter is deferred because it changes timing semantics). Book capacity must be sized per instrument.

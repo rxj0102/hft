@@ -35,3 +35,8 @@ add_executable(fuzz_venue fuzz_venue.cpp)
 target_link_libraries(fuzz_venue PRIVATE hft_core)
 target_compile_options(fuzz_venue PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
 target_link_options(fuzz_venue PRIVATE -fsanitize=fuzzer,address,undefined)
+
+add_executable(fuzz_pipeline fuzz_pipeline.cpp)
+target_link_libraries(fuzz_pipeline PRIVATE hft_core)
+target_compile_options(fuzz_pipeline PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
+target_link_options(fuzz_pipeline PRIVATE -fsanitize=fuzzer,address,undefined)

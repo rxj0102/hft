@@ -24,6 +24,7 @@
 #include "hft/book/digest.hpp"
 #include "hft/book/id_map.hpp"
 #include "hft/book/level_bitmap.hpp"
+#include "hft/core/fast_div.hpp"
 #include "hft/core/fixed_point.hpp"
 #include "hft/core/memory.hpp"
 #include "hft/core/types.hpp"
@@ -52,6 +53,7 @@ class OrderBook {
   bool init(core::Arena& arena, const BookConfig& cfg) noexcept {
     base_raw_ = cfg.base.raw();
     tick_ = cfg.tick_raw;
+    if (tick_ > 0) tick_div_.set(static_cast<std::uint64_t>(tick_));
     num_levels_ = cfg.num_levels;
     max_orders_ = cfg.max_orders;
     if (tick_ <= 0 || num_levels_ == 0 || max_orders_ == 0) return false;
@@ -135,6 +137,26 @@ class OrderBook {
   Qty best_bid_qty() const noexcept { return best_[0] == kNone ? 0 : levels_[0][best_[0]].qty; }
   Qty best_ask_qty() const noexcept { return best_[1] == kNone ? 0 : levels_[1][best_[1]].qty; }
   std::uint32_t order_count() const noexcept { return count_; }
+
+  // Total quantity on the n price levels nearest the touch on one side, counted
+  // by price distance: an empty level inside the window contributes zero and the
+  // window stops at the edge of the grid. Same answer as summing level_qty()
+  // over those prices, without converting each price back to a level.
+  Qty depth(Side side, int n) const noexcept {
+    const std::uint32_t b = best_[side_idx(side)];
+    if (b == kNone || n <= 0) return 0;
+    const Level* lv = levels_[side_idx(side)];
+    Qty t = 0;
+    if (side == Side::Buy) {
+      const std::uint32_t k = static_cast<std::uint32_t>(n) - 1 < b ? static_cast<std::uint32_t>(n) - 1 : b;
+      for (std::uint32_t i = 0; i <= k; ++i) t += lv[b - i].qty;
+    } else {
+      const std::uint32_t room = num_levels_ - 1 - b;
+      const std::uint32_t k = static_cast<std::uint32_t>(n) - 1 < room ? static_cast<std::uint32_t>(n) - 1 : room;
+      for (std::uint32_t i = 0; i <= k; ++i) t += lv[b + i].qty;
+    }
+    return t;
+  }
 
   Qty level_qty(Side side, Price p) const noexcept {
     std::uint32_t lvl;
@@ -305,8 +327,9 @@ class OrderBook {
   bool to_level(Price p, std::uint32_t& out) const noexcept {
     const std::int64_t off = p.raw() - base_raw_;
     if (off < 0) return false;
-    const std::int64_t q = off / tick_;
-    if (q * tick_ != off || q >= static_cast<std::int64_t>(num_levels_)) return false;
+    std::uint64_t q, r;
+    tick_div_.divmod(static_cast<std::uint64_t>(off), q, r);  // no hardware divide on this path
+    if (r != 0 || q >= num_levels_) return false;
     out = static_cast<std::uint32_t>(q);
     return true;
   }
@@ -360,6 +383,7 @@ class OrderBook {
   }
 
   std::int64_t base_raw_{0}, tick_{1};
+  core::InvariantDivisor tick_div_{};
   std::uint32_t num_levels_{0}, max_orders_{0}, count_{0};
   Level* levels_[2]{nullptr, nullptr};
   LevelBitmap bitmap_[2];

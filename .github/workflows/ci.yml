@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Warnings are errors everywhere. The long "gate" tests (millions of events)
+  # run only on the optimised build; the sanitizer builds run the default sizes.
+  build-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        preset: [release, asan, ubsan]
+    env:
+      CC: ${{ matrix.compiler == 'gcc' && 'gcc-13' || 'clang-18' }}
+      CXX: ${{ matrix.compiler == 'gcc' && 'g++-13' || 'clang++-18' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 g++-13
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -j2
+
+  tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake --preset tsan && cmake --build --preset tsan
+      - run: ctest --test-dir build/tsan --output-on-failure
+
+  # Short fuzz run of every target, enough to catch a regression in the parsers,
+  # the order entry codec, the OMS and the whole pipeline. Longer runs are done offline.
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18
+      - run: cmake --preset fuzz && cmake --build --preset fuzz
+      - name: Run each target for 45 seconds
+        run: |
+          for t in fuzz_md fuzz_match fuzz_oms fuzz_codec fuzz_venue fuzz_pipeline; do
+            mkdir -p corpus/$t
+            build/fuzz/fuzz/$t -max_total_time=45 -timeout=10 corpus/$t
+          done
+
+  # The performance gate. Wall-clock time on a shared runner is noise, so the
+  # gate counts instructions under valgrind (deterministic) against the checked
+  # in baseline. The latency run, the flame graph and the cache report are
+  # uploaded as artifacts for a human to read; they never fail the build.
+  perf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build valgrind binutils g++-13
+      - name: Build (fixed ISA, frame pointers, debug info)
+        run: cmake --preset perf && cmake --build build/perf --target bench_t2t
+        env:
+          CC: gcc-13
+          CXX: g++-13
+      - name: Instruction-count gate
+        run: python3 scripts/perf_gate.py --bench build/perf/bench/bench_t2t --strict
+      - name: Latency report (informational)
+        run: |
+          cmake --preset release && cmake --build build/release --target bench_t2t
+          mkdir -p perf-out
+          build/release/bench/bench_t2t --json perf-out/latency.json | tee perf-out/latency.txt
+        env:
+          CC: gcc-13
+          CXX: g++-13
+      - name: Flame graph (informational)
+        run: |
+          build/perf/bench/bench_t2t --profile perf-out/samples.txt --seconds 20
+          python3 scripts/flamegraph.py perf-out/samples.txt perf-out/flame.svg --folded perf-out/flame.folded | tee perf-out/self-time.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perf
+          path: perf-out

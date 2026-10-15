@@ -74,6 +74,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     }
   }
 
-  if (book.order_count() > kMaxOrders || !book.check_invariants()) __builtin_trap();
+  if (book.order_count() > kMaxOrders || !book.check_invariants() || !h.check_invariants()) __builtin_trap();
   return 0;
 }

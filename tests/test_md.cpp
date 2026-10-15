@@ -215,8 +215,10 @@ static void test_gap_filled_by_other_line() {
   r.send(Line::A, p1, 100);
   r.send(Line::A, p3, 200);  // p2 is missing on line A
   CHECK(r.h.gap_pending() && r.h.next_seq() == 3 && r.h.stats().parked == 1);
+  CHECK(r.h.parked_packets() == 1 && r.h.check_invariants());
   r.send(Line::B, p2, 300);  // line B has it
   CHECK(!r.h.gap_pending() && r.h.next_seq() == 7 && r.book.order_count() == 6);
+  CHECK(r.h.parked_packets() == 0 && r.h.check_invariants());
   CHECK(r.h.stats().gaps_filled == 1 && r.h.stats().gaps_declared == 0);
   r.h.poll(1'000'000);  // nothing pending, nothing to declare
   CHECK(r.h.state() == FeedState::Live);
@@ -264,6 +266,21 @@ static void test_heartbeat() {
   CHECK(r.h.state() == FeedState::NeedSnapshot);
 }
 
+// A heartbeat ahead of us opens a gap with nothing parked. The late in-order
+// packet must close it (counted as a filled gap), or the timer would later
+// declare a loss that did not happen. The fuzzer found this shape: a gap can be
+// open with zero parked packets, so the drain cannot be keyed on parked_ alone.
+static void test_heartbeat_gap_closed_by_late_packet() {
+  Rig r(8, 1000);
+  r.send(Line::A, pkt(1, {m_add(1, Side::Buy, 10, px(1))}), 0);
+  r.send(Line::A, pkt(3, {}), 10);  // sender is at 3, we are at 2
+  CHECK(r.h.gap_pending() && r.h.parked_packets() == 0 && r.h.check_invariants());
+  r.send(Line::B, pkt(2, {m_add(2, Side::Buy, 10, px(2))}), 20);  // the missing packet, late
+  CHECK(!r.h.gap_pending() && r.h.stats().gaps_filled == 1 && r.h.next_seq() == 3);
+  r.h.poll(5000);  // long past the timeout: nothing left to time out
+  CHECK(r.h.state() == FeedState::Live && r.h.stats().desyncs == 0 && r.h.check_invariants());
+}
+
 static void test_session_and_filter() {
   Rig r;
   r.send(Line::A, pkt(1, {m_add(1, Side::Buy, 10, px(1))}));
@@ -308,6 +325,7 @@ static void test_desync_and_poison() {
   // A newer snapshot (as of 2) covers it; the parked packet is discarded, not replayed.
   r.snap(snap_pkt(4, {s_begin(2, 1), m_add(1, Side::Buy, 10, px(1)), s_end(2)}));
   CHECK(r.h.state() == FeedState::Live && r.h.next_seq() == 3 && r.h.stats().desyncs == 2);
+  CHECK(r.h.parked_packets() == 0 && r.h.check_invariants());  // the covered packet's slot was freed and counted
 }
 
 static void test_snapshot_rejections() {
@@ -349,6 +367,7 @@ static void test_pending_policy() {
   CHECK(r.h.stats().pending_dropped == 0 || true);             // seq 5 is below next_seq? next is 1, so it is parked-or-dropped
   r.send(Line::B, pkt(20, {m_add(20, Side::Buy, 1, px(1))}));  // same packet from the other line
   CHECK(r.h.stats().dups[1] == 1);
+  CHECK(r.h.parked_packets() == 2 && r.h.check_invariants());  // eviction replaces a slot, it does not add one
 }
 
 static void test_malformed_is_atomic() {
@@ -639,9 +658,9 @@ static void test_mutation_fuzz(std::uint64_t iterations) {
     r.h.on_packet(rng.below(2) ? Line::A : Line::B, b.data(), b.size(), now);
     if (it % 257 == 0) r.h.on_snapshot_packet(b.data(), b.size(), now);
     if (it % 64 == 0) r.h.poll(now);
-    if (it % 1000 == 0) CHECK(r.book.check_invariants());
+    if (it % 1000 == 0) CHECK(r.book.check_invariants() && r.h.check_invariants());
   }
-  CHECK(r.book.order_count() <= 1024 && r.book.check_invariants());
+  CHECK(r.book.order_count() <= 1024 && r.book.check_invariants() && r.h.check_invariants());
   std::printf("mutation fuzz: %llu inputs, %llu parsed OK, final state %s, malformed %llu\n",
               static_cast<unsigned long long>(iterations), static_cast<unsigned long long>(accepted),
               r.h.state() == FeedState::Live ? "Live" : "NeedSnapshot",
@@ -656,6 +675,7 @@ int main(int argc, char** argv) {
   test_gap_filled_by_other_line();
   test_gap_timeout_and_snapshot();
   test_heartbeat();
+  test_heartbeat_gap_closed_by_late_packet();
   test_session_and_filter();
   test_replace_semantics();
   test_desync_and_poison();

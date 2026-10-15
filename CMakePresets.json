@@ -29,6 +29,15 @@
       }
     },
     {
+      "name": "perf",
+      "inherits": "base",
+      "description": "Fixed ISA (x86-64-v3, no -march=native), frame pointers and debug info: the build the instruction-count gate, the sampler and callgrind use, so results do not depend on the host CPU",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-O3 -g -fno-omit-frame-pointer -march=x86-64-v3"
+      }
+    },
+    {
       "name": "asan",
       "inherits": "base",
       "cacheVariables": {
@@ -87,6 +96,10 @@
     {
       "name": "fuzz",
       "configurePreset": "fuzz"
+    },
+    {
+      "name": "perf",
+      "configurePreset": "perf"
     }
   ],
   "testPresets": [

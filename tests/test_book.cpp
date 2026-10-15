@@ -3,6 +3,7 @@
 // events and requires identical results and identical full state.
 #include <cstdint>
 #include <cstdio>
+#include <tuple>
 #include <cstdlib>
 #include <set>
 #include <unordered_map>
@@ -261,6 +262,53 @@ struct Counts {
   std::uint64_t rebase_ok = 0, rebase_refused = 0;
 };
 
+
+// Independent oracle for OrderBook::depth: sum the quantity of every resting order
+// within n ticks of the touch, straight from the reference book.
+static hft::core::Qty ref_depth(const RefBook& ref, Side side, int n, std::int64_t tick) {
+  const Price touch = side == Side::Buy ? ref.best_bid() : ref.best_ask();
+  if (touch == Price::invalid() || n <= 0) return 0;
+  const std::int64_t lo = side == Side::Buy ? touch.raw() - (n - 1) * tick : touch.raw();
+  const std::int64_t hi = side == Side::Buy ? touch.raw() : touch.raw() + (n - 1) * tick;
+  hft::core::Qty t = 0;
+  ref.for_each_order([&](Side s, std::int64_t p, std::uint64_t, hft::core::Qty q) {
+    if (s == side && p >= lo && p <= hi) t += q;
+  });
+  return t;
+}
+
+static void check_depth(const OrderBook& book, const RefBook& ref, std::int64_t tick) {
+  for (const int n : {-1, 0, 1, 2, 3, 5, 40}) {
+    CHECK(book.depth(Side::Buy, n) == ref_depth(ref, Side::Buy, n, tick));
+    CHECK(book.depth(Side::Sell, n) == ref_depth(ref, Side::Sell, n, tick));
+  }
+}
+
+// The touch at the very edges of the price grid: the window must stop at the grid, not wrap.
+static void test_depth_at_grid_edges() {
+  Region region = make_region(8);
+  Arena arena(region);
+  BookConfig cfg;
+  cfg.base = Price::from_units(100);
+  cfg.tick_raw = 100;
+  cfg.num_levels = 64;
+  cfg.max_orders = 64;
+  OrderBook b;
+  CHECK(b.init(arena, cfg));
+  RefBook ref(cfg);
+  CHECK(b.depth(Side::Buy, 3) == 0 && b.depth(Side::Sell, 3) == 0);
+  auto lvl = [&](std::int64_t l) { return Price::from_raw(cfg.base.raw() + l * cfg.tick_raw); };
+  for (const auto& o : {std::make_tuple(1u, Side::Buy, 0, 7), std::make_tuple(2u, Side::Buy, 1, 3),
+                        std::make_tuple(3u, Side::Sell, 63, 11), std::make_tuple(4u, Side::Sell, 62, 5),
+                        std::make_tuple(5u, Side::Sell, 62, 6)}) {
+    CHECK(b.add(std::get<0>(o), std::get<1>(o), lvl(std::get<2>(o)), std::get<3>(o)) == BookResult::Ok);
+    CHECK(ref.add(std::get<0>(o), std::get<1>(o), lvl(std::get<2>(o)), std::get<3>(o)) == BookResult::Ok);
+  }
+  CHECK(b.depth(Side::Buy, 1) == 3 && b.depth(Side::Buy, 2) == 10 && b.depth(Side::Buy, 50) == 10);  // stops at level 0
+  CHECK(b.depth(Side::Sell, 1) == 11 && b.depth(Side::Sell, 2) == 22 && b.depth(Side::Sell, 50) == 22);  // stops at the last level
+  check_depth(b, ref, cfg.tick_raw);
+}
+
 static void run_equivalence(std::uint64_t n_events, std::uint64_t seed, std::uint32_t num_levels,
                             std::uint32_t max_orders, std::uint32_t target_live) {
   Region region = make_region(64);
@@ -338,6 +386,7 @@ static void run_equivalence(std::uint64_t n_events, std::uint64_t seed, std::uin
     }
     if (book.order_count() > max_live) max_live = book.order_count();
     if (i % 997 == 0) {
+      check_depth(book, ref, cfg.tick_raw);
       ++digest_checks;
       if (book.digest() != ref.digest() || !book.check_invariants()) {
         std::fprintf(stderr, "DIGEST/INVARIANT MISMATCH at event %llu\n", static_cast<unsigned long long>(i));
@@ -368,6 +417,7 @@ static void run_equivalence(std::uint64_t n_events, std::uint64_t seed, std::uin
 
 int main(int argc, char** argv) {
   const std::uint64_t n = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 1'000'000ULL;
+  test_depth_at_grid_edges();
   test_bitmap();
   test_idmap();
   test_book_basics();

@@ -138,19 +138,36 @@ struct Link {
   }
 };
 
+// Does nothing. A real observer sees exactly what the strategy side saw (used
+// to record a session and replay it through the production pipeline):
+//   md(now, i)          tape event i reached the strategy
+//   report(now, d, n)   report bytes reached the gateway
+//   sent(now, d, n)     the gateway put a frame on the wire
+struct NullObserver {
+  void md(std::uint64_t, std::size_t) noexcept {}
+  void report(std::uint64_t, const std::uint8_t*, std::size_t) noexcept {}
+  void sent(std::uint64_t, const std::uint8_t*, std::size_t) noexcept {}
+};
+
+template <class Obs>
 struct ClientSend {
   Link* link;
-  void operator()(const std::uint8_t* d, std::size_t n) noexcept { link->push(d, n); }
+  Obs* obs;
+  const std::uint64_t* now;
+  void operator()(const std::uint8_t* d, std::size_t n) noexcept {
+    obs->sent(*now, d, n);
+    link->push(d, n);
+  }
 };
 
 }  // namespace detail
 
-template <class Strategy>
+template <class Strategy, class Obs = detail::NullObserver>
 class Backtester {
  public:
-  using Gw = gw::Gateway<detail::ClientSend>;
+  using Gw = gw::Gateway<detail::ClientSend<Obs>>;
 
-  Backtester() : gw_(detail::ClientSend{&to_venue_}) {}
+  Backtester() : gw_(detail::ClientSend<Obs>{&to_venue_, &obs_, &now_}) {}
 
   bool init(core::Arena& arena, const sim::PublicEvent* tape, std::size_t n, const book::BookConfig& book_cfg,
             const BtConfig& cfg, Strategy* strat) noexcept {
@@ -214,12 +231,14 @@ class Backtester {
           break;
         }
         case 3: {
+          obs_.md(t, is);
           sbook_.apply(tape_[is++]);
           strat_->on_update(t, sbook_, gw_);
           break;
         }
         default: {
           const detail::Msg& m = to_client_.front();
+          obs_.report(t, m.data, m.len);
           gw_.on_bytes(m.data, m.len, t);
           to_client_.pop();
           strat_->on_update(t, sbook_, gw_);
@@ -283,6 +302,7 @@ class Backtester {
   Gw& gateway() noexcept { return gw_; }
   const Gw& gateway() const noexcept { return gw_; }
   const Metrics& metrics() const noexcept { return metrics_; }
+  Obs& observer() noexcept { return obs_; }
   const VirtualVenue& venue() const noexcept { return venue_; }
   const TapeBook& venue_book() const noexcept { return vbook_; }
   const TapeBook& strategy_book() const noexcept { return sbook_; }
@@ -350,6 +370,7 @@ class Backtester {
   VirtualVenue venue_;
   Metrics metrics_;
   detail::Link to_venue_, to_client_;
+  Obs obs_;
   Gw gw_;
   std::uint64_t now_ = 0, last_tape_ts_ = 0, wire_seq_ = 0, bad_frames_ = 0;
 };

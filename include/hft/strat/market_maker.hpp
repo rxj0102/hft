@@ -23,7 +23,6 @@
 
 #include <cstdint>
 
-#include "hft/bt/tape_book.hpp"
 #include "hft/oms/oms.hpp"
 #include "hft/sim/types.hpp"
 
@@ -50,8 +49,10 @@ class MarketMaker {
   explicit MarketMaker(const MmConfig& c = MmConfig{}) noexcept : c_(c) {}
 
   // Call after every market data event and every report. `GW` is a Gateway.
-  template <class GW>
-  void on_update(std::uint64_t now, const bt::TapeBook& book, GW& gw) noexcept {
+  // `Book` is anything with the read-only view used below: two_sided, best_bid,
+  // best_ask, tick_index, price_at and depth (bt::TapeBook and book::BookView).
+  template <class Book, class GW>
+  void on_update(std::uint64_t now, const Book& book, GW& gw) noexcept {
     ++stats_.updates;
     if (!book.two_sided() || gw.risk().killed()) return;
     const std::int64_t bi = book.tick_index(book.best_bid());
@@ -93,8 +94,8 @@ class MarketMaker {
   }
   static std::int64_t ceil_div(std::int64_t a, std::int64_t b) noexcept { return -floor_div(-a, b); }
 
-  template <class GW>
-  void side(core::Side s, std::int64_t target_tick, std::uint64_t now, const bt::TapeBook& book, GW& gw) noexcept {
+  template <class Book, class GW>
+  void side(core::Side s, std::int64_t target_tick, std::uint64_t now, const Book& book, GW& gw) noexcept {
     SideState& st = s == core::Side::Buy ? bid_ : ask_;
     const oms::Position& pos = gw.oms().position();
     const oms::OrderRec* o = st.id ? gw.oms().find(st.id) : nullptr;

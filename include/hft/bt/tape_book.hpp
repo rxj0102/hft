@@ -10,6 +10,7 @@
 
 #include "hft/book/id_map.hpp"
 #include "hft/book/order_book.hpp"
+#include "hft/core/fast_div.hpp"
 #include "hft/core/memory.hpp"
 #include "hft/sim/types.hpp"
 
@@ -31,6 +32,7 @@ class TapeBook {
 
   bool init(core::Arena& arena, const book::BookConfig& cfg) noexcept {
     cfg_ = cfg;
+    if (cfg.tick_raw > 0) tick_div_.set(static_cast<std::uint64_t>(cfg.tick_raw));
     if (!book_.init(arena, cfg)) return false;
     if (!pool_.init(arena, cfg.max_orders)) return false;
     std::uint32_t cap = 2;
@@ -108,21 +110,18 @@ class TapeBook {
 
   // Total quantity on the n price levels nearest the touch on one side, counted
   // by price distance (an empty level inside the window contributes zero).
-  Qty depth(Side s, int n) const noexcept {
-    const Price b = s == Side::Buy ? best_bid() : best_ask();
-    if (b == Price::invalid()) return 0;
-    Qty t = 0;
-    const std::int64_t step = s == Side::Buy ? -cfg_.tick_raw : cfg_.tick_raw;
-    for (int k = 0; k < n; ++k) t += book_.level_qty(s, Price::from_raw(b.raw() + step * k));
-    return t;
-  }
+  Qty depth(Side s, int n) const noexcept { return book_.depth(s, n); }
 
   // True if p is on the tick grid and inside the window.
   bool price_ok(Price p) const noexcept {
     const std::int64_t d = p.raw() - cfg_.base.raw();
     return d >= 0 && d % cfg_.tick_raw == 0 && d / cfg_.tick_raw < static_cast<std::int64_t>(cfg_.num_levels);
   }
-  std::int64_t tick_index(Price p) const noexcept { return (p.raw() - cfg_.base.raw()) / cfg_.tick_raw; }
+  std::int64_t tick_index(Price p) const noexcept {
+    const std::int64_t off = p.raw() - cfg_.base.raw();
+    if (off < 0) return off / cfg_.tick_raw;
+    return static_cast<std::int64_t>(tick_div_.div(static_cast<std::uint64_t>(off)));
+  }
   Price price_at(std::int64_t idx) const noexcept { return Price::from_raw(cfg_.base.raw() + idx * cfg_.tick_raw); }
 
   std::uint64_t seq() const noexcept { return seq_; }  // arrival number of the newest order
@@ -152,6 +151,7 @@ class TapeBook {
   }
 
   book::BookConfig cfg_{};
+  core::InvariantDivisor tick_div_{};
   book::OrderBook book_;
   core::Pool<Rec> pool_;
   book::IdMap map_;

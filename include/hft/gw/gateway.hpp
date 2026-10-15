@@ -34,6 +34,7 @@ struct GatewayStats {
   std::uint64_t reports = 0;
   std::uint64_t seq_gaps = 0, seq_dups = 0, bad_messages = 0, broken_streams = 0;
   std::uint64_t kill_cancels = 0;  // cancels sent by the kill sweep
+  std::uint64_t pulled_cancels = 0;  // cancels sent by cancel_all (quotes pulled, no kill)
 };
 
 struct SubmitResult {
@@ -64,7 +65,7 @@ class Gateway {
   SubmitResult new_order(Side side, OrderType type, Price price, Qty qty, std::uint64_t now) noexcept {
     SubmitResult r;
     r.risk = risk_.check_new(side, type, price, qty, oms_.position(), now);
-    if (risk_.killed()) sweep(now);  // the check itself can trip the switch (loss limit)
+    if (risk_.killed()) sweep(now, stats_.kill_cancels);  // the check itself can trip the switch (loss limit)
     if (r.risk != RiskResult::Ok) {
       ++stats_.risk_rejects;
       return r;
@@ -98,7 +99,7 @@ class Gateway {
       return r;
     }
     r.risk = risk_.check_replace(o->side, price, qty, o->leaves, oms_.position(), now);
-    if (risk_.killed()) sweep(now);
+    if (risk_.killed()) sweep(now, stats_.kill_cancels);
     if (r.risk != RiskResult::Ok) {
       ++stats_.risk_rejects;
       return r;
@@ -114,8 +115,14 @@ class Gateway {
 
   void kill(KillReason why, std::uint64_t now) noexcept {
     risk_.kill(why);
-    sweep(now);
+    sweep(now, stats_.kill_cancels);
   }
+
+  // Cancels everything cancellable, without latching the kill switch. For
+  // pulling quotes when the market data can no longer be trusted. Orders still
+  // PendingNew cannot be cancelled yet, so call again after later reports.
+  // Safe to call repeatedly; does nothing when nothing is working.
+  void cancel_all(std::uint64_t now) noexcept { sweep(now, stats_.pulled_cancels); }
 
   // Bytes from the exchange, in any chunking.
   void on_bytes(const std::uint8_t* data, std::size_t len, std::uint64_t now) noexcept {
@@ -160,7 +167,7 @@ class Gateway {
       ++stats_.seq_gaps;
       risk_.kill(KillReason::SessionGap);
     }
-    if (risk_.killed()) sweep(now);
+    if (risk_.killed()) sweep(now, stats_.kill_cancels);
   }
 
   void send_cancel(OrderId id) noexcept {
@@ -170,13 +177,13 @@ class Gateway {
   }
 
   // Cancel everything cancellable. Safe to call repeatedly.
-  void sweep(std::uint64_t now) noexcept {
+  void sweep(std::uint64_t now, std::uint64_t& counter) noexcept {
     // Collect first: requesting a cancel changes state but never the list, so
     // iterating while requesting is fine, and no allocation is needed.
     oms_.for_each_open([&](const oms::OrderRec& o) {
       if (oms::is_workable(o.state) && oms_.on_request_cancel(o.id, now) == oms::Request::Ok) {
         send_cancel(o.id);
-        ++stats_.kill_cancels;
+        ++counter;
       }
     });
   }

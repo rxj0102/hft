@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include "hft/core/clock.hpp"
+#include "hft/core/fast_div.hpp"
 #include "hft/core/histogram.hpp"
 
 static int g_failures = 0;
@@ -67,7 +68,59 @@ static void test_histogram_reset() {
   CHECK(h.quantile(0.5) == 0);
 }
 
+// The reciprocal divide must equal the hardware divide for every input.
+static void test_invariant_divisor() {
+  using hft::core::InvariantDivisor;
+  // Edge values against a spread of divisors, including powers of two, 1, and huge ones.
+  const std::uint64_t ds[] = {1, 2, 3, 7, 10, 16, 99, 100, 101, 255, 256, 1000, 4096, 65535, 65537, 1u << 20,
+                              1000000007ULL, 0x7FFFFFFFULL, 0xFFFFFFFFULL, 1ULL << 32, (1ULL << 32) + 1,
+                              1ULL << 40, 0x7FFFFFFFFFFFFFFFULL, 0x8000000000000000ULL, 0xFFFFFFFFFFFFFFFFULL};
+  const std::uint64_t edge_x[] = {0, 1, 2, 99, 100, 101, 0xFFFFFFFFULL, 0x100000000ULL, 0x7FFFFFFFFFFFFFFFULL,
+                                  0x8000000000000000ULL, 0xFFFFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFFFFFULL};
+  for (const std::uint64_t d : ds) {
+    const InvariantDivisor v(d);
+    std::uint64_t xs[sizeof edge_x / sizeof edge_x[0] + 8];
+    std::size_t n = 0;
+    for (const std::uint64_t x : edge_x) xs[n++] = x;
+    xs[n++] = d - 1;
+    xs[n++] = d;
+    xs[n++] = d + 1;
+    xs[n++] = d * 2 - 1;
+    xs[n++] = d * 2;
+    xs[n++] = ~std::uint64_t{0} - (~std::uint64_t{0} % d);       // largest multiple of d
+    xs[n++] = ~std::uint64_t{0} - (~std::uint64_t{0} % d) - 1;
+    xs[n++] = ~std::uint64_t{0} % d;
+    for (std::size_t i = 0; i < n; ++i) {
+      std::uint64_t q, r;
+      v.divmod(xs[i], q, r);
+      CHECK(q == xs[i] / d && r == xs[i] % d);
+    }
+  }
+  // Random pairs, with the divisor drawn at every magnitude.
+  std::uint64_t s = 0x9E3779B97F4A7C15ULL;
+  auto next = [&] {
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    return s * 0x2545F4914F6CDD1DULL;
+  };
+  for (int i = 0; i < 3'000'000; ++i) {
+    std::uint64_t d = next() >> (next() % 64);
+    if (d == 0) d = 1;
+    const std::uint64_t x = next() >> (next() % 64);
+    std::uint64_t q, r;
+    InvariantDivisor(d).divmod(x, q, r);
+    if (q != x / d || r != x % d) {
+      std::fprintf(stderr, "divmod(%llu, %llu) = %llu rem %llu\n", (unsigned long long)x, (unsigned long long)d,
+                   (unsigned long long)q, (unsigned long long)r);
+      CHECK(false);
+      break;
+    }
+  }
+}
+
 int main() {
+  test_invariant_divisor();
   test_clock();
   test_histogram_small_exact();
   test_histogram_uniform();

@@ -23,3 +23,6 @@ target_link_libraries(bench_risk PRIVATE hft_core)
 
 add_executable(bt_report bt_report.cpp)
 target_link_libraries(bt_report PRIVATE hft_core)
+
+add_executable(bench_t2t bench_t2t.cpp)
+target_link_libraries(bench_t2t PRIVATE hft_core)

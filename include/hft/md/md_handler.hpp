@@ -83,6 +83,7 @@ class MdHandler {
     pending_ = arena.allocate_array<Pending>(cfg.pending_slots);
     if (!pending_) return false;
     for (std::uint32_t i = 0; i < cfg.pending_slots; ++i) pending_[i].used = false;
+    parked_ = 0;
     state_ = FeedState::NeedSnapshot;
     return true;
   }
@@ -94,6 +95,7 @@ class MdHandler {
     next_seq_ = next_seq;
     gap_active_ = false;
     for (std::uint32_t i = 0; i < cfg_.pending_slots; ++i) pending_[i].used = false;
+    parked_ = 0;
   }
 
   void on_packet(Line line, const std::uint8_t* data, std::size_t len, std::uint64_t now_ns) noexcept {
@@ -130,7 +132,12 @@ class MdHandler {
         park(pv, li);  // desynced mid-packet: keep it for replay after the snapshot
         return;
       }
-      drain_pending(now_ns);
+      // The store is 64 slots of ~1.5 KB each: scanning it touches 64 cache
+      // lines, which was the largest cost on the whole tick when it ran for
+      // every packet. With nothing parked and no gap open it has no effect. A gap
+      // can be open with nothing parked (a heartbeat announced lost packets), so
+      // both conditions are needed; the in-order packet is what closes that gap.
+      if (parked_ != 0 || gap_active_) drain_pending(now_ns);
       return;
     }
     // Ahead of the expected sequence: wait for the other line.
@@ -205,6 +212,14 @@ class MdHandler {
 
   FeedState state() const noexcept { return state_; }
   bool book_valid() const noexcept { return state_ == FeedState::Live; }
+  std::uint32_t parked_packets() const noexcept { return parked_; }
+
+  // True if the parked-packet counter agrees with the slots. For tests and fuzzers.
+  bool check_invariants() const noexcept {
+    std::uint32_t n = 0;
+    for (std::uint32_t i = 0; i < cfg_.pending_slots; ++i) n += pending_[i].used ? 1u : 0u;
+    return n == parked_;
+  }
   bool gap_pending() const noexcept { return gap_active_; }
   std::uint64_t next_seq() const noexcept { return next_seq_; }
   const MdStats& stats() const noexcept { return stats_; }
@@ -338,6 +353,7 @@ class MdHandler {
         return;
       }
     }
+    if (!dst->used) ++parked_;
     dst->first_seq = pv.seq;
     dst->count = pv.count;
     dst->len = static_cast<std::uint16_t>(pv.len);
@@ -357,6 +373,7 @@ class MdHandler {
         const std::uint64_t end = p.first_seq + p.count;
         if (end <= next_seq_) {
           p.used = false;  // already covered
+          --parked_;
           continue;
         }
         if (p.first_seq > next_seq_) continue;  // still ahead of us
@@ -368,13 +385,12 @@ class MdHandler {
         pv.count = p.count;
         if (!deliver(pv, next_seq_ - p.first_seq)) return;  // desynced; slot kept for replay
         p.used = false;
+        --parked_;
         moved = progressed = true;
       }
       if (!moved) break;
     }
-    bool any = false;
-    for (std::uint32_t i = 0; i < cfg_.pending_slots; ++i) any = any || pending_[i].used;
-    if (any) {
+    if (parked_ != 0) {
       // Start the clock when a gap newly opens, and restart it when progress
       // shrank the gap (the remaining hole is a different one now).
       if (!gap_active_ || progressed) gap_since_ = now_ns;
@@ -403,6 +419,7 @@ class MdHandler {
   MdConfig cfg_{};
   Listener listener_{};
   Pending* pending_{nullptr};
+  std::uint32_t parked_{0};  // slots in use
   FeedState state_{FeedState::NeedSnapshot};
   std::uint64_t next_seq_{0};
   bool gap_active_{false};

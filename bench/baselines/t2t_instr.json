@@ -1,0 +1,14 @@
+{
+  "compiler_major": "13",
+  "compiler": "13.3.0",
+  "isa": "x86-64-v3",
+  "requests": 100000,
+  "inputs": 106613,
+  "frames": 2610,
+  "capacity": 1024,
+  "tolerance_pct": 2.0,
+  "ir_per_input": 797.798,
+  "mispredicts_per_input": 2.951,
+  "d1_misses_per_input": 2.262,
+  "l2_misses_per_input": 1.273
+}
