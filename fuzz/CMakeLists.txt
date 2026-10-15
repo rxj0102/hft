@@ -13,3 +13,10 @@ target_link_options(fuzz_md PRIVATE -fsanitize=fuzzer,address,undefined)
 add_executable(make_corpus make_corpus.cpp)
 target_link_libraries(make_corpus PRIVATE hft_core)
 target_include_directories(make_corpus PRIVATE ${CMAKE_SOURCE_DIR}/tests/support)
+
+# Engine vs reference matcher, run in lock step.
+add_executable(fuzz_match fuzz_match.cpp)
+target_link_libraries(fuzz_match PRIVATE hft_core)
+target_include_directories(fuzz_match PRIVATE ${CMAKE_SOURCE_DIR}/tests/support)
+target_compile_options(fuzz_match PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
+target_link_options(fuzz_match PRIVATE -fsanitize=fuzzer,address,undefined)

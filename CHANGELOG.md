@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Phase 4
+- Matching engine (include/hft/sim/matching_engine.hpp): price-time priority; Limit, Market, IOC, FOK (read-only feasibility check, then all-or-nothing) and PostOnly; five self-trade-prevention modes (none, cancel newest, cancel oldest, cancel both, decrement-and-cancel); cancel; cancel/replace (shrink at the same price keeps queue position, anything else loses it and re-enters as a Limit that may trade). Trades print at the resting order's price. Storage reuses the Phase 2 flat-level design plus an owner field; no allocation after init.
+- Two event streams per request: private execution reports (Accepted, Rejected, Fill x2 per trade, Canceled with a reason, Replaced, CancelRejected, ReplaceRejected) and public book events (Add, Exec, Reduce, Delete). The order of events within a request is part of the contract.
+- Exchange simulator (exchange_sim.hpp): configurable ingress, egress, market-data and processing latency plus seeded jitter, caller-supplied time, per-link FIFO (jitter delays but never reorders one participant), deterministic tie-breaking, bounded event queue with visible back-pressure.
+- ITCH publisher (feed_publisher.hpp): public events become Phase 3 wire messages, so the simulator can drive the real market data handler.
+- Tests (tests/test_sim.cpp): 26 conformance scenarios that pin each rule; a slow reference matcher (flat vector, dry-run FOK) with differential runs of engine vs reference over all five STP modes on a tiny (forces BookFull) and a large book, compared per request on every report, public event and the book digest; per-request properties (two equal sides per trade, one Exec per trade, rejects leave no trace, killed FOK leaves the book untouched, PostOnly never trades); engine feed rebuilds an identical book in the Phase 3 handler (flush every 1, 5, 37 ops); simulator latency arithmetic, cross-participant races, FIFO under jitter, refusals, determinism, zero-latency equivalence to the bare engine, full pipeline engine -> latency -> ITCH -> handler -> book, and a zero-allocation proof.
+- Mutation check: 15 injected engine bugs; 13 caught, the other 2 are equivalent mutants (cannot change behaviour).
+- libFuzzer target fuzz_match runs the engine and the reference in lock step and traps on any difference.
+- bench_match: throughput and per-request latency by request kind.
+- Rules documented as limits: ids are unique among resting orders only (finished ids can be reused), a replace re-enters as plain Limit even if the original was PostOnly, a book-full remainder is cancelled with reason BookFull after matching, and processing_ns is added latency, not a serialising queue.
+
 ### Phase 3
 - ITCH-style wire format: MoldUDP-like sequenced packet frame, Add/Execute/Partial Cancel/Delete/Replace plus snapshot Begin/End, big-endian zero-copy decode, strict whole-packet validation before apply.
 - MdHandler: A/B line arbitration (first copy wins), out-of-order parking with a gap timer, heartbeat-based tail-loss detection, snapshot-based recovery with replay of parked packets, desync detection from book rejections, caller-supplied time for deterministic replay, per-line statistics, listener hook (no virtual dispatch).

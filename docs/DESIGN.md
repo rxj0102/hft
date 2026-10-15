@@ -108,3 +108,52 @@ The book's price window can now be re-centred (`OrderBook::rebase`): it succeeds
 - The session id is fixed by the first valid packet unless configured. A spoofed first packet could pin a wrong session; real deployments configure it.
 - No SIMD in this phase: the format is length-prefixed, so there is no byte scanning to vectorise. AVX2 belongs with the FIX parser, which is deferred.
 - Parked packets are copied (up to 1472 bytes each) because the receive buffer is reused. The copy only happens on the loss path.
+
+## 11. Phase 4: matching engine and exchange simulator
+
+### Rules
+Everything below is pinned by a named test in tests/test_sim.cpp.
+
+| Topic | Rule |
+|---|---|
+| Priority | Best price first; within a price, earliest arrival. Trade price is the resting order's price. |
+| Limit | Matches what crosses, rests the remainder. |
+| Market | Matches at any price, remainder cancelled (MarketRemainder), never rests. The price field is ignored. |
+| IOC | Limit price, remainder cancelled (IocRemainder). |
+| FOK | Decided before anything changes. If the full quantity cannot trade now: Accepted, then Canceled(FokUnfillable), book untouched. |
+| PostOnly | Equal price counts as crossing; a crossing post-only is Rejected(WouldCross) with no Accepted. |
+| Validation order | id 0, then quantity, then price (window and tick), then duplicate id, then post-only cross. First failure wins. |
+| Replace | Shrink at the same price keeps the queue position (public Reduce). Any other change removes the order (public Delete) and re-enters it as a Limit with the same id (it may trade). |
+| Cancel / replace auth | Only the owner may touch an order; otherwise CancelRejected / ReplaceRejected(UnknownOrder). |
+
+### Self-trade prevention
+Applied when an incoming order meets a resting order of the same owner.
+
+| Mode | Effect |
+|---|---|
+| None | The trade happens. |
+| CancelNewest | Incoming remainder is cancelled; the resting order stays. |
+| CancelOldest | Resting order is cancelled and matching continues behind it. |
+| CancelBoth | Both are cancelled. |
+| DecrementAndCancel | Both shrink by the smaller quantity with no trade; the one that reaches zero is removed. |
+
+A FOK order is only feasible if STP would not stop or shrink it: CancelOldest skips own orders (they get cancelled when the order actually runs), the other modes make a FOK that meets its own order unfillable.
+
+### Event contract
+Per request, in this order: Accepted; for each trade the taker Fill then the maker Fill, then the public Exec; terminal Canceled for any remainder; public Add if the remainder rests. Rejected requests emit exactly one report and no public events. The reference matcher produces the identical sequence, including sequence numbers.
+
+### Exchange simulator
+```
+ participant --ingress--> [engine] --egress--> participant   (private reports)
+                                   --md------> subscribers   (public events -> ITCH -> Phase 3 handler)
+```
+Time is always an argument. Each leg is base + uniform[0, jitter]; each (participant, direction) link is FIFO, so jitter cannot reorder one session. Messages from different participants race, and ties resolve by queue order, so a run is repeatable bit for bit for a given seed. Zero latency makes it equal to calling the engine directly (tested).
+
+### Tradeoffs and limits
+- One instrument per engine, same as the book. Multi-instrument is one engine per instrument.
+- Ids are unique among resting orders only. A real exchange forbids reuse for the day; enforcing that needs unbounded memory or a Bloom-style filter, which is not worth it for a simulator.
+- A replace always re-enters as a plain Limit. Original post-only intent is not remembered (an extra byte per order and a policy choice nobody asked for).
+- If the pool is full when a remainder should rest, the remainder is cancelled with BookFull after the matching it earned. Pre-checking would have to guess how many slots matching frees.
+- processing_ns adds delay but does not serialise requests; there is no matching-engine queueing model. Queueing delay is Phase 7's concern, measured on the real pipeline rather than modelled here.
+- The simulator's output queue cannot refuse events, so overflow is counted (dropped_out) instead of back-pressured; tests assert it stays zero.
+- Auctions, iceberg/hidden orders, stop orders, price bands and circuit breakers are out of scope.
