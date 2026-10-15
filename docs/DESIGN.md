@@ -157,3 +157,48 @@ Time is always an argument. Each leg is base + uniform[0, jitter]; each (partici
 - processing_ns adds delay but does not serialise requests; there is no matching-engine queueing model. Queueing delay is Phase 7's concern, measured on the real pipeline rather than modelled here.
 - The simulator's output queue cannot refuse events, so overflow is counted (dropped_out) instead of back-pressured; tests assert it stays zero.
 - Auctions, iceberg/hidden orders, stop orders, price bands and circuit breakers are out of scope.
+
+## 12. Phase 5: OMS, risk and gateway
+
+```
+ strategy --> Gateway --> RiskEngine.check --> Oms.on_send --> encode --> wire --> ExchangeEdge --> ExchangeSim
+                ^                                                                          |
+                +---- Oms.on_report <-- decode <-- StreamDecoder <-- wire <-- encode <-----+
+```
+
+### Order state machine
+States: PendingNew, New, PartiallyFilled, PendingCancel, PendingReplace, Filled, Canceled, Rejected. Events: Ack, Reject, Fill, Cancel, Replaced, CancelReject, ReplaceReject, RequestCancel, RequestReplace. One constexpr table gives the action for every (state, event) pair:
+
+| Action | Meaning |
+|---|---|
+| Apply | Normal transition. |
+| Ignore | Legitimate late message (a cancel reject after the order already filled). Counted, no effect. |
+| Anomaly | The exchange said something impossible in this state. Counted, order untouched, never trusted. |
+| Refuse | Our own request is not allowed in this state (second request while one is pending, request on a finished order). |
+
+Fills keep PendingCancel and PendingReplace pending, because the exchange may match before it sees the request. A self-trade-decrement cancel with leaves left shrinks the order instead of ending it. The tests carry a second, independently written copy of the table and compare all 110 cells.
+
+### Exposure and risk
+Each live order reserves exposure: PendingNew reserves the full quantity, a working order its leaves, and an order with a replace in flight leaves plus the new quantity (a fill can land before the replace does, so the old size is still at risk, then the new size rests). Position limit check: pos + open_buy + qty <= max (mirror for sells). Because fills move quantity from reservation to position one for one, the sum never grows from fills; the e2e test asserts the bound after every step.
+
+Check order: kill switch, loss limit, bad params, max order qty, no reference price, notional, price band, position, open orders, rate limit. The token bucket is last so an order refused for any other reason spends no token. Loss limit uses mark-to-market against the reference price and latches the kill switch.
+
+### Kill switch
+Latched; first cause kept (Manual, MaxLoss, SessionGap, Disconnect). On kill the gateway cancels every working order, then repeats the sweep after every inbound report until none remain, because a cancel can cross a replace-accept or leave a new order that was in flight. New orders and replaces are refused. Cancels bypass risk so the switch can always flatten. Reset is an explicit call.
+
+### Wire format
+Frame: u16 length, then body: type u8, seq u64, payload (all big-endian). Types: O new (35 bytes), X cancel (17), U replace (33), R report (71). Decoders require exact lengths and valid enums. A zero or oversize length breaks the stream; it stays broken until reset. Sequence handling on the client: a duplicate is dropped, a gap or malformed message trips the kill switch.
+
+### Results
+- risk check p99 about 30-40 ns, gate under 1000 ns (bench_risk, gcc and clang, shared VM).
+- fuzz_oms found the Replaced leaves <= 0 bug; mutation 20 of 20 caught.
+
+### Tradeoffs and limits
+- One outstanding request per order: simpler state machine, and it matches how venues treat cancel/replace chains in practice, but a strategy cannot queue a cancel behind a replace.
+- A replace reserves old plus new quantity. Conservative: a client near its limit cannot replace even a shrink. The alternative (reserve the max) was shown unsound by the e2e test.
+- Replace quantity means the new open quantity, not the new total.
+- Finished orders are retained in a ring and evicted oldest-first. A report for an evicted id is counted as unknown, never applied.
+- Cancels bypass risk and the rate limit.
+- No heartbeats, logon or retransmission: a gap is a kill, not a recovery. Real sessions (FIX or a binary venue protocol) need those; they are Phase 8 runbook items.
+- The reference price for the band and loss limit is supplied by the caller (the e2e test uses the engine mid); a stale reference is the caller's risk.
+
