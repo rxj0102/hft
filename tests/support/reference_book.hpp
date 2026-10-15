@@ -68,6 +68,41 @@ class RefBook {
     return BookResult::Ok;
   }
 
+  // Same contract as OrderBook::rebase: succeeds only if the shift is a whole
+  // number of ticks and every resting price fits the new window.
+  bool rebase(Price new_base) {
+    const std::int64_t dp = new_base.raw() - cfg_.base.raw();
+    if (dp % cfg_.tick_raw != 0) return false;
+    const std::int64_t span = static_cast<std::int64_t>(cfg_.num_levels) * cfg_.tick_raw;
+    auto fits = [&](std::int64_t price) {
+      const std::int64_t off = price - new_base.raw();
+      return off >= 0 && off < span;
+    };
+    if (!bids_.empty() && (!fits(bids_.begin()->first) || !fits(bids_.rbegin()->first))) return false;
+    if (!asks_.empty() && (!fits(asks_.begin()->first) || !fits(asks_.rbegin()->first))) return false;
+    cfg_.base = new_base;
+    return true;
+  }
+
+  // Visits every resting order in canonical order (bids best-first, asks
+  // best-first, each queue head to tail). The snapshot server uses this.
+  template <class Fn>
+  void for_each_order(Fn&& fn) const {
+    for (auto it = bids_.rbegin(); it != bids_.rend(); ++it)
+      for (const Ord& o : it->second) fn(Side::Buy, it->first, o.id, o.qty);
+    for (auto it = asks_.begin(); it != asks_.end(); ++it)
+      for (const Ord& o : it->second) fn(Side::Sell, it->first, o.id, o.qty);
+  }
+
+  bool lookup(std::uint64_t id, Side& side, std::int64_t& price, Qty& qty) const {
+    auto it = where_.find(id);
+    if (it == where_.end()) return false;
+    side = it->second.side;
+    price = it->second.price;
+    qty = it->second.it->qty;
+    return true;
+  }
+
   Price best_bid() const { return bids_.empty() ? Price::invalid() : Price::from_raw(bids_.rbegin()->first); }
   Price best_ask() const { return asks_.empty() ? Price::invalid() : Price::from_raw(asks_.begin()->first); }
   std::uint32_t order_count() const { return static_cast<std::uint32_t>(where_.size()); }

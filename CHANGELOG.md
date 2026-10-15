@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Phase 3
+- ITCH-style wire format: MoldUDP-like sequenced packet frame, Add/Execute/Partial Cancel/Delete/Replace plus snapshot Begin/End, big-endian zero-copy decode, strict whole-packet validation before apply.
+- MdHandler: A/B line arbitration (first copy wins), out-of-order parking with a gap timer, heartbeat-based tail-loss detection, snapshot-based recovery with replay of parked packets, desync detection from book rejections, caller-supplied time for deterministic replay, per-line statistics, listener hook (no virtual dispatch).
+- OrderBook gained clear(), side_of(), rebase() (price-window re-centring, verified against the reference) and check_invariants() (structural oracle).
+- Generator bug found at scale: FeedGen's mix drifted upward above target and overran capacity on 2M-op runs; mix fixed to be net-removing above target.
+- Tests: wire golden bytes and malformed-input cases, 12 handler scenarios, five whole-feed simulations (clean, lossy A/B, heavy loss, line B down, late join) checked against the reference book, zero-allocation proof for the handler, in-process mutation fuzzing. Six injected handler bugs and two rebase bugs were each caught.
+- libFuzzer target (fuzz/fuzz_md.cpp, "fuzz" preset, ASan+UBSan) with a seed-corpus generator; oracle is check_invariants() after every input.
+- bench_md: parse-only, single-line and A+B handler throughput; md headers compile under -fno-exceptions -fno-rtti.
+
 ### Phase 2
 - Order book: flat per-side level arrays, intrusive FIFO order queues (32-bit pool indices), two-level bitmap for next-best-level search, open-addressing id map with backward-shift deletion. Operations: add, cancel, execute (partial/full), replace (priority kept only on same-price size reduction).
 - Order-sensitive state digest (prices, quantities, queue order) for equivalence checking.

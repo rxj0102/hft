@@ -30,6 +30,11 @@ class LevelBitmap {
     return true;
   }
 
+  void clear_all() noexcept {
+    std::memset(words_, 0, sizeof(std::uint64_t) * nwords_);
+    std::memset(sum_, 0, sizeof(std::uint64_t) * nsum_);
+  }
+
   void set(std::uint32_t i) noexcept {
     const std::uint32_t w = i >> 6;
     words_[w] |= 1ULL << (i & 63);

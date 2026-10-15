@@ -18,6 +18,8 @@
 // moves; Phase 3 will add that when the feed handler needs it.
 
 #include <cstdint>
+#include <cstring>
+#include <limits>
 
 #include "hft/book/digest.hpp"
 #include "hft/book/id_map.hpp"
@@ -141,6 +143,118 @@ class OrderBook {
   }
 
   bool contains(OrderId id) const noexcept { return map_.find(id) != kNil; }
+
+  // Needed to turn a feed "replace" (new id, same side) into cancel + add.
+  bool side_of(OrderId id, Side& out) const noexcept {
+    const std::uint32_t idx = map_.find(id);
+    if (idx == kNil) return false;
+    out = pool_.at_const(idx)->side;
+    return true;
+  }
+
+  // Drops every order. Used when a snapshot replaces the whole book. O(levels).
+  void clear() noexcept {
+    for (int s = 0; s < 2; ++s) {
+      for (std::uint32_t i = 0; i < num_levels_; ++i) levels_[s][i] = Level{kNil, kNil, 0};
+      bitmap_[s].clear_all();
+      best_[s] = kNone;
+    }
+    pool_.reset();
+    map_.clear();
+    count_ = 0;
+  }
+
+  // Shifts the price window so `new_base` becomes the lowest representable
+  // price. Order prices do not change, only their level indices. Fails (book
+  // untouched) if the shift is not a whole number of ticks or any resting
+  // order would fall outside the new window. O(levels + orders): a maintenance
+  // operation between messages, not part of the per-update path.
+  bool rebase(Price new_base) noexcept {
+    const std::int64_t dp = new_base.raw() - base_raw_;
+    if (dp % tick_ != 0) return false;
+    const std::int64_t delta = dp / tick_;  // new level index = old index - delta
+    if (delta == 0) return true;
+
+    std::uint32_t lo[2] = {kNone, kNone}, hi[2] = {0, 0};
+    std::int64_t glo = std::numeric_limits<std::int64_t>::max();
+    std::int64_t ghi = std::numeric_limits<std::int64_t>::min();
+    for (int s = 0; s < 2; ++s) {
+      if (best_[s] == kNone) continue;
+      lo[s] = bitmap_[s].next_ge(0);
+      hi[s] = bitmap_[s].prev_le(num_levels_ - 1);
+      if (static_cast<std::int64_t>(lo[s]) < glo) glo = lo[s];
+      if (static_cast<std::int64_t>(hi[s]) > ghi) ghi = hi[s];
+    }
+    if (glo > ghi) {  // empty book: nothing to move
+      base_raw_ = new_base.raw();
+      return true;
+    }
+    if (glo - delta < 0 || ghi - delta >= static_cast<std::int64_t>(num_levels_)) return false;
+
+    for (int s = 0; s < 2; ++s) {
+      if (lo[s] == kNone) continue;
+      Level* L = levels_[s];
+      const std::int64_t nlo = static_cast<std::int64_t>(lo[s]) - delta;
+      const std::int64_t nhi = static_cast<std::int64_t>(hi[s]) - delta;
+      std::memmove(L + nlo, L + lo[s], (hi[s] - lo[s] + 1u) * sizeof(Level));
+      // Empty the old positions the move did not overwrite.
+      for (std::int64_t i = lo[s]; i <= static_cast<std::int64_t>(hi[s]); ++i)
+        if (i < nlo || i > nhi) L[i] = Level{kNil, kNil, 0};
+      bitmap_[s].clear_all();
+      for (std::int64_t i = nlo; i <= nhi; ++i) {
+        if (L[i].head == kNil) continue;
+        const auto lvl = static_cast<std::uint32_t>(i);
+        bitmap_[s].set(lvl);
+        for (std::uint32_t o = L[i].head; o != kNil; o = pool_.at(o)->next) pool_.at(o)->level = lvl;
+      }
+      best_[s] = (s == 0) ? bitmap_[0].prev_le(num_levels_ - 1) : bitmap_[1].next_ge(0);
+    }
+    base_raw_ = new_base.raw();
+    return true;
+  }
+
+  // Verifies every structural invariant: bitmap bits match occupied levels,
+  // queue links are consistent both ways, each order sits in the level and side
+  // it claims, level totals equal the sum of their orders, the id map points at
+  // the right slots, best prices are the true extremes, and counts agree.
+  // O(levels + orders); used by tests and as a fuzzing oracle, never per-update.
+  bool check_invariants() const noexcept {
+    std::uint32_t total = 0;
+    for (std::size_t s = 0; s < 2; ++s) {
+      std::uint32_t occupied = 0, lo = kNone, hi = kNone;
+      for (std::uint32_t l = 0; l < num_levels_; ++l) {
+        const Level& L = levels_[s][l];
+        const bool occ = L.head != kNil;
+        if (occ != bitmap_[s].test(l)) return false;
+        if ((L.head == kNil) != (L.tail == kNil)) return false;
+        if (!occ) {
+          if (L.qty != 0) return false;
+          continue;
+        }
+        ++occupied;
+        if (lo == kNone) lo = l;
+        hi = l;
+        Qty sum = 0;
+        std::uint32_t prev = kNil;
+        for (std::uint32_t i = L.head; i != kNil; i = pool_.at_const(i)->next) {
+          if (i >= max_orders_) return false;
+          const Order& o = *pool_.at_const(i);
+          if (o.prev != prev || o.level != l || side_idx(o.side) != s || o.qty <= 0) return false;
+          if (map_.find(o.id) != i) return false;
+          sum += o.qty;
+          prev = i;
+          if (++total > max_orders_) return false;  // also stops on a cyclic list
+        }
+        if (prev != L.tail || sum != L.qty) return false;
+      }
+      if (occupied == 0) {
+        if (best_[s] != kNone) return false;
+      } else if (best_[s] != (s == 0 ? hi : lo)) {
+        return false;
+      }
+    }
+    return total == count_ && total == pool_.in_use();
+  }
 
   // Full-state digest (see digest.hpp). O(book size); for tests and checkpoints.
   std::uint64_t digest() const noexcept {

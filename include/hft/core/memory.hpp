@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 #include "hft/core/types.hpp"
@@ -171,6 +172,16 @@ class Pool {
     free_head_ = capacity ? 0 : kNil;
     in_use_ = 0;
     return true;
+  }
+
+  // Drops every object at once. Valid only for trivially destructible T, which
+  // is what lets us skip per-object destructors.
+  void reset() noexcept {
+    static_assert(std::is_trivially_destructible_v<T>, "reset() skips destructors");
+    for (std::uint32_t i = 0; i < capacity_; ++i)
+      slots_[i].next = (i + 1 < capacity_) ? i + 1 : kNil;
+    free_head_ = capacity_ ? 0 : kNil;
+    in_use_ = 0;
   }
 
   template <class... Args>

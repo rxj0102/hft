@@ -24,9 +24,16 @@ target_link_libraries(hft_core INTERFACE hft_warnings)
 
 # Compiles hot-path headers under -fno-exceptions -fno-rtti so a violation breaks
 # the build instead of hiding in a driver that is allowed to use them.
-add_library(hft_hotpath_check STATIC src/core/hotpath_check.cpp src/book/book_check.cpp)
+add_library(hft_hotpath_check STATIC src/core/hotpath_check.cpp src/book/book_check.cpp
+            src/md/md_check.cpp)
 target_link_libraries(hft_hotpath_check PUBLIC hft_core PRIVATE hft_hotpath)
 
 enable_testing()
 add_subdirectory(tests)
 add_subdirectory(bench)
+
+# Fuzz targets need clang's libFuzzer runtime: use the "fuzz" preset.
+option(HFT_BUILD_FUZZ "Build libFuzzer targets (requires clang)" OFF)
+if(HFT_BUILD_FUZZ)
+  add_subdirectory(fuzz)
+endif()

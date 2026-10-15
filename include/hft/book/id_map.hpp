@@ -21,12 +21,15 @@ class IdMap {
   bool init(core::Arena& a, std::uint32_t capacity_pow2) noexcept {
     if (capacity_pow2 < 2 || (capacity_pow2 & (capacity_pow2 - 1)) != 0) return false;
     mask_ = capacity_pow2 - 1;
+    cap_ = capacity_pow2;
     shift_ = 64u - static_cast<unsigned>(std::countr_zero(capacity_pow2));
     slots_ = a.allocate_array<Slot>(capacity_pow2);
     if (!slots_) return false;
     std::memset(slots_, 0, sizeof(Slot) * capacity_pow2);
     return true;
   }
+
+  void clear() noexcept { std::memset(slots_, 0, sizeof(Slot) * cap_); }
 
   std::uint32_t find(std::uint64_t key) const noexcept {
     if (key == 0) return kNil;
@@ -87,6 +90,7 @@ class IdMap {
   }
 
   Slot* slots_{nullptr};
+  std::uint32_t cap_{0};
   std::uint32_t mask_{0};
   unsigned shift_{0};
 };

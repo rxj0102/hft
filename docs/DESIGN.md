@@ -74,3 +74,37 @@ Each arrow between threads is a single-producer single-consumer ring. Each stage
 
 - Zero dependencies in Phase 0 vs using GoogleTest immediately: chose zero dependencies, so the gate is reproducible in any container. Cost: a tiny hand-rolled check macro until Phase 1.
 - Log-linear histogram vs vendoring HdrHistogram_c: chose our own (about 80 lines), because it keeps the record path allocation-free and header-only. Cost: precision is bounded by our bucket scheme (about 1.6 percent relative error with 6 sub-bucket bits).
+
+## 10. Phase 3: market data path
+
+### Wire format (include/hft/md/itch_wire.hpp)
+ITCH-style, not the real Nasdaq spec. A MoldUDP64-like packet frame (session[10], first seq u64, count u16, then length-prefixed messages, all big-endian) carries Add, Execute, Partial Cancel, Delete and Replace messages. A count-0 packet is a heartbeat whose seq is the sender's next sequence. Fields are read straight from the receive buffer with memcpy + bswap (one load, one byte swap each).
+
+Validation is strict and whole-packet, done BEFORE anything is applied: bounds, per-type fixed lengths, side byte, sequence overflow, trailing bytes. A malformed packet therefore cannot half-apply. Unknown types of unknown length are skipped (forward compatibility) and still consume their sequence number.
+
+### Handler (include/hft/md/md_handler.hpp)
+```
+              first copy of seq wins; later copies = duplicates
+ line A ──┐                         ┌── in order ──► apply to book
+          ├─► validate ─► sequence ─┤
+ line B ──┘                         └── ahead of next_seq ──► park (fixed store)
+                                              │ other line fills the hole: drain in order  (gap filled)
+                                              └ timeout: declare gap ─► NeedSnapshot
+ NeedSnapshot: park everything. Snapshot "as of S" (Begin/Add.../End) rebuilds the book,
+ next_seq = S+1, parked packets replay (<= S discarded). Live again.
+```
+- Time is an argument (`now_ns`), never read from a clock, so a recorded session replays bit-identically.
+- Any message the book rejects (unknown order, bad quantity, duplicate id) is treated as a desync: the book is no longer trusted, so we drop to NeedSnapshot rather than carry on with corrupt state.
+- A feed Replace (new order id, back of queue) is applied as cancel + add on the same side; the new id is checked first so a failure cannot destroy the original order.
+- Parked-packet policy when the store is full: evict the lowest sequence number. After an outage the packets right after a recent snapshot matter, not the oldest ones.
+- Snapshot assembly is all-or-nothing: wrong count, mismatched End, a hole in the snapshot channel, or a rejected add aborts it and the handler keeps waiting for the next cycle.
+
+### Price window
+The book's price window can now be re-centred (`OrderBook::rebase`): it succeeds only if every resting order still fits, and is checked against the reference book in the property test. The handler does not call it automatically; deciding when to re-centre is a policy (Phase 6).
+
+### Tradeoffs and limits
+- Recovery is snapshot-only. There is no retransmission-request (MoldUDP rerequest) path; adding one would shrink recovery time but needs a bidirectional channel and its own state machine.
+- One instrument per handler (filtered by locate). A multi-instrument feed runs one handler per instrument over the same packets, which parses each packet once per handler; a shared front end that dispatches by locate is a Phase 7 optimisation if profiling shows it matters.
+- The session id is fixed by the first valid packet unless configured. A spoofed first packet could pin a wrong session; real deployments configure it.
+- No SIMD in this phase: the format is length-prefixed, so there is no byte scanning to vectorise. AVX2 belongs with the FIX parser, which is deferred.
+- Parked packets are copied (up to 1472 bytes each) because the receive buffer is reused. The copy only happens on the loss path.

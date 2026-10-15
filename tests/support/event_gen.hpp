@@ -102,6 +102,17 @@ class EventGen {
 
   std::size_t live() const { return live_.size(); }
 
+  // Call after a successful book rebase. Live order prices are absolute so they
+  // stay valid; only the level-relative mid has to follow the shifted window.
+  void on_rebase(Price new_base, std::int64_t delta_ticks) {
+    c_.base = new_base;
+    std::int64_t m = static_cast<std::int64_t>(mid_) - delta_ticks;
+    const std::int64_t lo = c_.num_levels / 4, hi = c_.num_levels * 3 / 4;
+    if (m < lo) m = lo;
+    if (m > hi) m = hi;
+    mid_ = static_cast<std::uint32_t>(m);
+  }
+
  private:
   struct Live {
     std::uint64_t id;
