@@ -421,3 +421,7 @@ Decisions:
 - Removed during the build because no test could reach it: a call into the feed handler's timers (the stream has no sequence gaps to wait out) and a loop that drove recorded timers from the tool (the next line's own stale check does the same).
 
 Honest limits: see LIVE_PAPER.md. Biggest: a simulated venue that never fills, runs of at most 90 seconds, two processes joined by a pipe with no supervisor.
+
+## 17. Phase 11: operations
+
+Full write-up in OPERATIONS.md. Built: event log and metrics in `hft_live`, `scripts/supervise.py`, `scripts/drill.py`, ADR 24. Events are derived in the tool from changes in the session's counters, so the session still knows nothing about logging. The watchdog watches a file the main loop refreshes, not the feed, so a quiet market is not a hang. Limits: a script is not a service manager, and the paper venue cannot show what a real exchange does after a kill -9.

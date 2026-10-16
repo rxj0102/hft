@@ -86,6 +86,17 @@ Needs the `perf` preset (frame pointers kept, `-g`).
 ### Fuzz crash
 The crashing input is written as `crash-<hash>` in the working directory. Rerun with `./build/fuzz/fuzz/fuzz_<target> crash-<hash>`. Fix the bug or, if the oracle was wrong, fix the oracle and say so (this happened once: a gap can be open with nothing parked). Add a regression test before closing it.
 
+### Running supervised (docs/OPERATIONS.md)
+```
+python3 scripts/supervise.py --run-dir /tmp/hft-run --log /tmp/hft-run/supervisor.jsonl
+```
+Read `supervisor.jsonl` first: `pair_start`/`pair_stopped` say what died and how (`signal` 9 is kill -9, `why: watchdog` is a hang). Then `events.jsonl` for what `hft_live` saw, and `metrics.prom` for the counters.
+- Exit 4 from the supervisor: `hft_live` reported an integrity failure (`halted` in `events.jsonl`). Do not restart blindly. Keep `events.jsonl`, `live.err` and the capture; treat it as a bug.
+- Exit 3: a crash loop. Read `live.err` and `capture.err`; the usual causes are a missing binary, a bad option, or no network.
+- `segment_start` with no `segment_end` before the next `start` means the process was killed hard.
+- Stop with SIGTERM or Ctrl-C: `hft_live` ends with reason `kill`, flat, and the supervisor exits 0.
+- `python3 scripts/drill.py` (about 25 s, no network) re-runs the fault drills after any change to the tools.
+
 ### Capturing and replaying real data
 ```
 python3 -m pip install websockets
@@ -113,4 +124,4 @@ One status line every 10 seconds on stderr: `QUOTING` (a segment is live), `PULL
 - If the pipe ends early, check the capture script's stderr first (`captured N messages ...` is its last line).
 
 ## 5. Known operational gaps
-No automatic flatten. No order-entry heartbeats or retransmission. One instrument per pipeline. Snapshot delivery is the host's job. The live paper session has been run for up to 90 seconds at a time against the public feed; there is no supervisor that restarts either process, and nothing has traded on a real exchange.
+No automatic flatten. No order-entry heartbeats or retransmission. One instrument per pipeline. Snapshot delivery is the host's job. The live paper session has been run for up to 90 seconds at a time against the public feed; the supervisor is a script (no service manager, no reboot survival, no alert delivery), and nothing has traded on a real exchange.

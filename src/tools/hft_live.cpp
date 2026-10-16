@@ -22,11 +22,14 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <sys/stat.h>
+
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -86,12 +89,121 @@ void status(const feed::LiveSession& s, double secs) {
                static_cast<unsigned long long>(st.check_failures));
 }
 
+// ---- operations: event log and metrics file ----------------------------------------------------------
+// One JSON object per line, appended and flushed at once, so a crash loses nothing already written.
+// Events are derived from changes in the session's counters and summaries after each call; the session
+// itself knows nothing about logging.
+struct EventLog {
+  std::FILE* f = nullptr;
+  bool ok() const { return f != nullptr; }
+  void open(const std::string& path) {
+    if (path == "-") f = stderr;
+    else f = std::fopen(path.c_str(), "a");
+  }
+  // `body` is the inside of the object after "event":"name"; callers pass only numbers and fixed words.
+  void emit(const char* event, double mono_s, const std::string& body = std::string()) {
+    if (!f) return;
+    const auto wall = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::fprintf(f, "{\"ts_ms\":%lld,\"mono_s\":%.3f,\"event\":\"%s\"%s%s}\n", static_cast<long long>(wall), mono_s, event,
+                 body.empty() ? "" : ",", body.c_str());
+    std::fflush(f);
+  }
+};
+
+struct Observer {
+  std::uint64_t segments = 0, stale = 0, resnaps = 0, sums = 0, bad_lines = 0, regress = 0;
+  bool halted = false;
+};
+
+std::string num(const char* k, unsigned long long v) { return std::string("\"") + k + "\":" + std::to_string(v); }
+
+void observe(EventLog& log, Observer& o, const feed::LiveSession& s, double mono_s) {
+  if (!log.ok()) return;
+  const feed::LiveStats& st = s.stats();
+  if (st.segments != o.segments) {
+    o.segments = st.segments;
+    log.emit("segment_start", mono_s, num("segment", st.segments));
+  }
+  if (st.stale_events != o.stale) {
+    o.stale = st.stale_events;
+    log.emit("stale_feed", mono_s, num("count", st.stale_events));
+  }
+  if (st.resnap_requests != o.resnaps) {
+    o.resnaps = st.resnap_requests;
+    log.emit("resubscribe_requested", mono_s, num("count", st.resnap_requests));
+  }
+  while (o.sums < s.summaries().size()) {
+    const feed::SegmentSummary& sm = s.summaries()[o.sums++];
+    std::string b = std::string("\"reason\":\"") + feed::end_reason_name(sm.reason) + "\"," + num("segment", o.sums) + "," +
+                    num("packets", sm.packets) + "," + num("flat", sm.flat) + "," + num("kill_latched", sm.kill_latched) + "," +
+                    num("book_matched_model", sm.book_matched_model) + "," + num("flatten_rounds", sm.flatten_rounds) + "," +
+                    num("flatten_sim_ns", sm.flatten_sim_ns) + "," + num("open_before_flatten", sm.open_before_flatten);
+    log.emit("segment_end", mono_s, b);
+  }
+  if (st.time_regressions != o.regress) {
+    o.regress = st.time_regressions;
+    log.emit("clock_regression", mono_s, num("count", st.time_regressions));
+  }
+  // a halt the operator did not ask for: shutdown and kill are already visible as segment_end reasons
+  if (s.halted() && !o.halted && (st.check_failures || st.final_mismatches || st.flatten_failures)) {
+    o.halted = true;
+    log.emit("halted", mono_s,
+             num("check_failures", st.check_failures) + "," + num("final_mismatches", st.final_mismatches) + "," +
+                 num("flatten_failures", st.flatten_failures));
+  }
+}
+
+// Prometheus text format, written to a temporary file and renamed, so a reader never sees half a file.
+void write_metrics(const std::string& path, const feed::LiveSession& s, double uptime_s) {
+  if (path.empty()) return;
+  const feed::LiveStats& st = s.stats();
+  const gw::GatewayStats* g = s.gateway_stats();
+  const std::string tmp = path + ".tmp";
+  std::FILE* f = std::fopen(tmp.c_str(), "w");
+  if (!f) return;
+  auto c = [&](const char* name, const char* help, unsigned long long v, const char* type = "counter") {
+    std::fprintf(f, "# HELP %s %s\n# TYPE %s %s\n%s %llu\n", name, help, name, type, name, v);
+  };
+  std::fprintf(f, "# HELP hft_live_uptime_seconds Seconds since start.\n# TYPE hft_live_uptime_seconds gauge\nhft_live_uptime_seconds %.3f\n", uptime_s);
+  c("hft_live_quoting", "1 while a segment is live and quotes may be out.", s.active() ? 1 : 0, "gauge");
+  c("hft_live_halted", "1 once the session has halted for good.", s.halted() ? 1 : 0, "gauge");
+  c("hft_live_open_orders", "Orders working now (OMS view).", s.open_orders(), "gauge");
+  c("hft_live_lines_total", "Input lines.", st.lines);
+  c("hft_live_feed_messages_total", "Feed messages parsed.", st.messages);
+  c("hft_live_feed_bad_total", "Damaged feed messages.", st.bad);
+  c("hft_live_segments_started_total", "Segments started.", st.segments);
+  c("hft_live_stale_feed_total", "Times the feed went silent and quotes were pulled.", st.stale_events);
+  c("hft_live_resubscribe_requests_total", "Resubscribe requests to the capture process.", st.resnap_requests);
+  c("hft_live_model_checks_total", "Comparisons of the book with the independent model.", st.checks);
+  c("hft_live_model_check_failures_total", "Failed comparisons.", st.check_failures);
+  c("hft_live_final_mismatches_total", "Segments whose final book differed from the model.", st.final_mismatches);
+  c("hft_live_flatten_failures_total", "Flattens that did not get flat.", st.flatten_failures);
+  c("hft_live_orders_new_total", "New orders sent.", st.sent_new + (g ? g->sent_new : 0));
+  c("hft_live_orders_replace_total", "Replaces sent.", st.sent_replace + (g ? g->sent_replace : 0));
+  c("hft_live_orders_cancel_total", "Cancels sent.", st.sent_cancel + (g ? g->sent_cancel : 0));
+  c("hft_live_risk_rejects_total", "Orders refused by risk.", st.risk_rejects + (g ? g->risk_rejects : 0));
+  std::fprintf(f, "# HELP hft_live_segments_ended_total Segments ended, by reason.\n# TYPE hft_live_segments_ended_total counter\n");
+  for (int r = 0; r < static_cast<int>(feed::EndReason::kCount); ++r)
+    std::fprintf(f, "hft_live_segments_ended_total{reason=\"%s\"} %llu\n", feed::end_reason_name(static_cast<feed::EndReason>(r)),
+                 static_cast<unsigned long long>(st.ended[r]));
+  const core::Histogram& h = s.line_ns();
+  std::fprintf(f, "# HELP hft_live_message_ns Wall-clock ns per update message (parse + convert + pipeline).\n# TYPE hft_live_message_ns gauge\n");
+  if (h.count()) {
+    std::fprintf(f, "hft_live_message_ns{q=\"0.5\"} %llu\nhft_live_message_ns{q=\"0.99\"} %llu\nhft_live_message_ns{q=\"1\"} %llu\n",
+                 static_cast<unsigned long long>(h.quantile(0.5)), static_cast<unsigned long long>(h.quantile(0.99)),
+                 static_cast<unsigned long long>(h.max()));
+  }
+  std::fclose(f);
+  std::rename(tmp.c_str(), path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   feed::LiveConfig lc;
   lc.timed = true;
-  std::string from, resnap_file;
+  std::string from, resnap_file, log_path, metrics_path;
+  double metrics_s = 5.0;
   double pace = 0.0, report_s = 10.0, max_seconds = 0.0;
   bool spin = false;
   for (int i = 1; i < argc; ++i) {
@@ -114,10 +226,13 @@ int main(int argc, char** argv) {
     else if (a == "--max-seconds" && num(v) && v > 0) max_seconds = v;
     else if (a == "--resnap-file" && i + 1 < argc) resnap_file = argv[++i];
     else if (a == "--spin") spin = true;
+    else if (a == "--log" && i + 1 < argc) log_path = argv[++i];
+    else if (a == "--metrics" && i + 1 < argc) metrics_path = argv[++i];
+    else if (a == "--metrics-s" && num(v) && v > 0) metrics_s = v;
     else {
       std::fprintf(stderr,
                    "usage: hft_live [--from capture.l2 [--pace X]] [--stale-ms N] [--rtt-us N] [--lots N] [--levels N]\n"
-                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n"
+                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S]\n"
                    "reads capture-format lines from stdin unless --from is given\n");
       return 1;
     }
@@ -134,15 +249,30 @@ int main(int argc, char** argv) {
   const std::uint64_t t_start = mono_ns();
   auto now_ns = [&] { return mono_ns() - t_start; };
   auto secs = [&] { return static_cast<double>(now_ns()) / 1e9; };
-  double next_report = report_s;
+  double next_report = report_s, next_metrics = 0.0;
   std::uint64_t last_now = 0;
+  EventLog elog;
+  if (!log_path.empty()) {
+    elog.open(log_path);
+    if (!elog.ok()) {
+      std::fprintf(stderr, "cannot open log %s\n", log_path.c_str());
+      return 1;
+    }
+  }
+  Observer obs;
+  elog.emit("start", 0.0, std::string("\"mode\":\"") + (from.empty() ? "pipe" : "file") + "\"," + num("stale_ms", lc.stale_ns / 1000000));
   auto after_line = [&] {
     if (session.take_resnap()) touch(resnap_file);
+    observe(elog, obs, session, secs());
   };
   auto periodic = [&] {
     if (secs() >= next_report) {
       status(session, secs());
       next_report += report_s;
+    }
+    if (!metrics_path.empty() && secs() >= next_metrics) {
+      write_metrics(metrics_path, session, secs());
+      next_metrics = secs() + metrics_s;
     }
   };
 
@@ -215,6 +345,9 @@ int main(int argc, char** argv) {
     else session.shutdown(last_now);
   }
 
+  observe(elog, obs, session, secs());
+  write_metrics(metrics_path, session, secs());
+  elog.emit("exit", secs(), std::string("\"cause\":\"") + (g_stop ? "signal" : "input_ended") + "\"");
   const feed::LiveStats& st = session.stats();
   std::printf("== hft_live summary (%s)\n", g_stop ? "stopped by signal: kill switch latched, all quotes cancelled" : "input ended");
   std::printf("  input: %llu lines, %llu feed messages (%llu other, %llu damaged), %llu unparsable lines, %llu markers, %llu before a snapshot\n",

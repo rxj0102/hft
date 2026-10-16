@@ -96,6 +96,23 @@ All of these end in the same flatten (ADR 22): cancel everything, answer the can
 
 Not handled: restarting either process (no supervisor), a real exchange's behaviour (the venue is simulated and acknowledges everything), a feed that is slow but alive, any failure that takes hours to appear.
 
+## Process-level failures (Phase 11)
+
+Evidence is `scripts/drill.py` against a local fake feed unless stated. The paper venue is inside `hft_live`, so state lost with a killed process is not a risk the drills can show.
+
+| Failure | Response | Visible as |
+|---|---|---|
+| kill -9 of the capture | `hft_live` sees end of input, ends flat; pair restarted | `capture_exited`, `pair_stopped`, `pair_start` run+1 |
+| kill -9 of `hft_live` | capture exits on the closed pipe; pair restarted | `pair_stopped` with signal 9; no `segment_end` in the event log |
+| `hft_live` stopped or hung | watchdog after 30 s without a metrics refresh: SIGKILL, restart | `watchdog` |
+| `hft_live` exits 4 | not restarted | `fatal_halt`, supervisor exit 4 |
+| restarts in a loop | give up after 5 in 300 s | `giving_up`, exit 3 |
+| a child ignores SIGTERM | SIGKILL after the grace period | `live_ignored_sigterm` |
+| capture gone, `hft_live` does not follow | killed after 5 s | `live_did_not_follow_capture` |
+| supervisor itself dies | nothing restarts it | not handled |
+| host reboot | nothing restarts it | not handled |
+| orders left working at a real exchange after a kill -9 | not modelled (paper venue) | not handled |
+
 ## Known gaps
 
 - Position is not flattened automatically after a kill. That is a human decision (see the runbook).

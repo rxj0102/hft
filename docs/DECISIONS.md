@@ -25,3 +25,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 21. [The live session reuses the replay path, and is checked against it](adr/0021-live-session-shares-the-replay-path.md) (Accepted)
 22. [Every end of trust is the same flatten, and the strategy does not get a vote](adr/0022-end-of-segment-is-a-flatten.md) (Accepted)
 23. [Silence is a feed loss, detected on the process's own clock](adr/0023-silence-is-a-feed-loss.md) (Accepted)
+24. [The supervisor restarts on loss, never on a verdict](adr/0024-supervisor-policy.md) (Accepted)

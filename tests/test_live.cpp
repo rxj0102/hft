@@ -214,6 +214,7 @@ void test_flatten_with_orders_in_flight() {
   warm_up(s, 1'000'000);
   CHECK(s.active());
   CHECK(s.open_orders() > 0);                 // the strategy is quoting
+  const std::uint32_t stage_open_orders = s.open_orders();
   CHECK(s.gateway_stats()->reports == 0);     // no ack has come back yet: the orders are still PendingNew at the gateway
   s.on_line("#1006000\treconnect", 1'006'000);  // 2 us later the connection drops
   CHECK(!s.active());
@@ -221,6 +222,7 @@ void test_flatten_with_orders_in_flight() {
   const SegmentSummary& sm = s.summaries()[0];
   CHECK(sm.reason == EndReason::Marker);
   CHECK(sm.flat);                              // nothing left working anywhere
+  CHECK(sm.open_before_flatten == stage_open_orders);  // and the flatten really had orders to take down
   CHECK(sm.flatten_rounds >= 2);               // PendingNew orders had to wait for their ack before they could be cancelled
   CHECK(!sm.kill_latched);                     // a lost feed is not a kill
   CHECK(s.stats().pulled_cancels > 0 && s.stats().kill_cancels == 0);

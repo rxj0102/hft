@@ -127,6 +127,50 @@ check("1 ended: left price window" in out and "1 resubscribe requests" in out, "
 if os.path.exists(flag):
     os.remove(flag)
 
+# 9. operations output: JSON event log and metrics file
+import json
+logp = tempfile.mktemp(suffix=".log"); metp = tempfile.mktemp(suffix=".prom")
+p = run_file(basic_session() + "#2000000\treconnect\n", "--log", logp, "--metrics", metp)
+ev = [json.loads(l) for l in open(logp)]
+names = [e["event"] for e in ev]
+check(names == ["start", "segment_start", "segment_end", "exit"], "log: events in order, no spurious halt: %s" % names)
+end = [e for e in ev if e["event"] == "segment_end"][0]
+check(end["reason"] == "reconnect/marker" and end["flat"] == 1 and end["kill_latched"] == 0 and end["book_matched_model"] == 1,
+      "log: segment_end fields %s" % end)
+check(all("ts_ms" in e and "mono_s" in e for e in ev), "log: every line is stamped")
+m = open(metp).read()
+vals = {}
+for l in m.splitlines():
+    if l and not l.startswith("#"):
+        k, v = l.rsplit(" ", 1)
+        vals[k] = float(v)
+check(vals["hft_live_segments_started_total"] == 1 and vals["hft_live_feed_messages_total"] == 5, "metrics: counters %s" % vals)
+check(vals['hft_live_segments_ended_total{reason="reconnect/marker"}'] == 1 and vals["hft_live_model_check_failures_total"] == 0, "metrics: labelled counter")
+check(vals["hft_live_orders_new_total"] > 0 and vals["hft_live_quoting"] == 0, "metrics: orders counted, not quoting after the end")
+check(not os.path.exists(metp + ".tmp"), "metrics: temporary file renamed away")
+
+# stale and kill appear in the log; the metrics file is refreshed while the feed is quiet
+logp2 = tempfile.mktemp(suffix=".log"); metp2 = tempfile.mktemp(suffix=".prom")
+proc = subprocess.Popen([BIN, "--report-s", "1000", "--stale-ms", "300", "--log", logp2, "--metrics", metp2, "--metrics-s", "0.2"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+proc.stdin.write(snap(2) + upd(3, "buy", "100.00", "5"))
+proc.stdin.flush()
+time.sleep(0.8)
+t1 = os.stat(metp2).st_mtime_ns
+time.sleep(0.5)
+t2 = os.stat(metp2).st_mtime_ns
+check(t2 > t1, "metrics: file keeps being refreshed with no input (this is what a watchdog watches)")
+proc.send_signal(signal.SIGTERM)
+out, err = proc.communicate(timeout=10)
+ev = [json.loads(l) for l in open(logp2)]
+names = [e["event"] for e in ev]
+check("stale_feed" in names and "resubscribe_requested" in names, "log: stale feed recorded: %s" % names)
+ends = [e for e in ev if e["event"] == "segment_end"]
+check(len(ends) == 1 and ends[0]["reason"] == "stale feed", "log: segment ended by stale feed: %s" % ends)
+check(names[-1] == "exit" and ev[-1]["cause"] == "signal", "log: exit by signal recorded")
+for f_ in (logp, metp, logp2, metp2):
+    if os.path.exists(f_): os.remove(f_)
+
 if failures:
     sys.exit("%d live tool test failures" % failures)
 print("test_live_tool: all checks passed")

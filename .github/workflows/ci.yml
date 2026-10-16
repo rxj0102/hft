@@ -39,6 +39,9 @@ jobs:
       - name: Live tool tests (process, pipe, signals, real-time silence)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: python3 scripts/test_live_tool.py build/release/hft_live
+      - name: Fault drills (supervisor, local fake feed)
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        run: python3 scripts/drill.py --live build/release/hft_live
 
   tsan:
     runs-on: ubuntu-24.04

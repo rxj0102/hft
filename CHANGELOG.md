@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Phase 11
+- Operations (docs/OPERATIONS.md): `hft_live --log` writes a JSON event log (segment start/end with reason, flatness, orders taken down, stale feed, resubscribe, clock regression, unrequested halt, exit cause); `--metrics` writes Prometheus text by rename, refreshed even when the feed is quiet. `scripts/supervise.py` runs `capture_l2.py --out - | hft_live`, restarts on loss with backoff and a crash-loop limit, does not restart after exit 4 (integrity verdict), kills a process whose metrics stop refreshing, and forwards SIGTERM so it reaches `hft_live` as the kill path.
+- `scripts/drill.py`: 11 fault drills with the real capture script and the real `hft_live` against a local fake feed (no network, invented prices): connection drop, silence on an open connection, kill -9 of the capture, kill -9 of `hft_live`, SIGSTOP hang, SIGTERM, a child that ignores SIGTERM, capture gone with `hft_live` stuck, slow flapping, crash loop, integrity exit. 52 checks, about 25 s. Where quotes are taken down the drills check that there were quotes out (`open_before_flatten > 0`).
+- Mutation check of the supervisor: 11 injected bugs. An earlier run left survivors (capture-exit fallback untested, restart-window pruning untested, one redundant kill). The two gaps got drills, the redundant line was removed; all 11 are caught now.
+- A real-feed supervised run: kill -9 of `hft_live` at 15 s (restart in 0.5 s), SIGTERM at 33 s (kill, switch latched, exit 0).
+- Not shown, stated in the docs: orders left working at a real exchange after a kill -9 (the paper venue dies with the process), supervisor or host failure, runs of hours, alert delivery.
+
 ### Phase 10
 - Live paper mode (docs/LIVE_PAPER.md): `feed::LiveSession` and the `hft_live` tool run the unchanged pipeline on the public Coinbase feed in real time against the Phase 9 paper venue. The capture script now streams to a pipe (`--out -`) and resubscribes when a file appears (`--resnap-file`).
 - Guards: stale feed (3 s of nothing, heartbeats count), reconnect markers, a new snapshot, the price leaving the grid, a failed comparison with the independent model, a failed flatten, SIGINT/SIGTERM (kill switch), end of input (shutdown). All but the last three are routine and recover at the next snapshot; every one ends in the same flatten, which cancels through the gateway without letting the strategy quote.

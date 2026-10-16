@@ -84,6 +84,7 @@ struct SegmentSummary {
   std::uint64_t frames_before_flatten = 0, hash_before_flatten = 0;  // the order flow the feed itself caused
   std::uint64_t frames_total = 0;
   std::uint64_t flatten_rounds = 0, flatten_sim_ns = 0;
+  std::uint32_t open_before_flatten = 0;  // orders the flatten had to take down
   bool flat = false;            // nothing left working at the venue or in the OMS
   bool kill_latched = false;    // the risk engine's kill switch was on when the segment ended
   bool book_matched_model = false;
@@ -384,6 +385,7 @@ class LiveSession {
     sm.packets = s.pkts;
     sm.frames_before_flatten = s.frames;
     sm.hash_before_flatten = s.hash;
+    sm.open_before_flatten = s.pipe->gateway().oms().open_orders();
 
     std::uint64_t t = now;
     std::uint8_t rep[gw::kMaxFrame];
