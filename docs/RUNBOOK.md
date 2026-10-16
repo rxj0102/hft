@@ -97,6 +97,9 @@ Read `supervisor.jsonl` first: `pair_start`/`pair_stopped` say what died and how
 - Stop with SIGTERM or Ctrl-C: `hft_live` ends with reason `kill`, flat, and the supervisor exits 0.
 - `python3 scripts/drill.py` (about 25 s, no network) re-runs the fault drills after any change to the tools.
 
+### Sandbox order entry (docs/SANDBOX.md)
+Keys only in environment variables. Smoke test first (one far-away post-only order, cancelled after five seconds), then `supervise.py --bridge`. Read `bridge.jsonl`. Exit 4 with `who=bridge`: credentials, clock or configuration; fix and start by hand. If you are unsure what rests on the exchange, run the bridge with an empty input (`true | python3 scripts/order_bridge.py --log -`): it cancels everything for the product and reports `start_flat`.
+
 ### Capturing and replaying real data
 ```
 python3 -m pip install websockets

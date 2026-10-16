@@ -171,6 +171,114 @@ check(names[-1] == "exit" and ev[-1]["cause"] == "signal", "log: exit by signal 
 for f_ in (logp, metp, logp2, metp2):
     if os.path.exists(f_): os.remove(f_)
 
+# 10. the order mirror (--orders-fd): lines, neutrality, reader gone, reader stalled
+def churn(n):
+    """a snapshot, then n updates that make the best bid jump up and down, so the strategy keeps replacing its quotes"""
+    out = [snap(1_000_000)]
+    t = 1_001_000
+    for i in range(n):
+        out.append(upd(t, "buy", "100.05", "5" if i % 2 == 0 else "0"))
+        t += 100_000  # acks (50 us away) are back before the next move, so the strategy replaces rather than waits
+    return "".join(out)
+
+
+def run_with_pipe(text, reader, *extra):
+    """runs hft_live --from with --orders-fd attached to a pipe. reader: 'read' (drained), 'closed', 'stalled'"""
+    path = tempfile.mktemp(suffix=".l2"); logp_ = tempfile.mktemp(suffix=".log")
+    open(path, "w").write(text)
+    r, w = os.pipe()
+    cmd = [BIN, "--from", path, "--report-s", "1000", "--log", logp_, "--orders-fd", str(w)] + list(extra)
+    got = []
+    if reader == "closed":
+        os.close(r)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, pass_fds=(w,))
+    os.close(w)
+    if reader == "read":
+        import threading
+        def drain():
+            with os.fdopen(r, "r") as f:
+                for line in f:
+                    got.append(line)
+        th = threading.Thread(target=drain); th.start()
+    out, err = proc.communicate(timeout=120)
+    if reader == "read":
+        th.join()
+    elif reader == "stalled":
+        os.close(r)
+    ev = [json.loads(l) for l in open(logp_)]
+    os.remove(path); os.remove(logp_)
+    return proc.returncode, out, ev, got
+
+
+def wire_hash(out):
+    for l in out.splitlines():
+        if "wire hash" in l:
+            return l.split()[-1]
+    return None
+
+
+text = churn(300)
+base = run_file(text)
+rc, out, ev, got = run_with_pipe(text, "read")
+rows = [json.loads(l) for l in got]
+kinds = [r["t"] for r in rows]
+check(rc == 0 and kinds[0] == "hello" and rows[0]["px_scale"] == 10000 and rows[0]["qty_scale"] == 100000, "mirror: starts with a hello that states the units")
+check(kinds.count("new") >= 2 and kinds.count("rep") > 100 and kinds.count("can") >= 2, "mirror: new/rep/can lines present: %s" % {k: kinds.count(k) for k in set(kinds)})
+check(kinds[-1] == "end" and rows[-1]["seg"] == 1, "mirror: the segment end marker comes after the final cancels")
+news = {r["id"] for r in rows if r["t"] == "new"}; cans = {r["id"] for r in rows if r["t"] == "can"}
+check(news and news <= cans, "mirror: every order that was sent was cancelled before the segment ended")
+check(all(r["px"] % 100 == 0 for r in rows if "px" in r), "mirror: prices are whole ticks")
+check(wire_hash(out) is not None and wire_hash(out) == wire_hash(base.stdout), "mirror: attaching the pipe does not change the order flow (wire hash %s)" % wire_hash(out))
+check(not any(e["event"] == "orders_out_lost" for e in ev), "mirror: nothing lost with a reader")
+
+rc, out, ev, _ = run_with_pipe(text, "closed")
+lost = [e for e in ev if e["event"] == "orders_out_lost"]
+check(rc == 0 and len(lost) == 1 and lost[0]["why"] == "write_failed", "mirror: reader gone -> orders_out_lost(write_failed), session unaffected, exit 0: %s" % lost)
+check(wire_hash(out) == wire_hash(base.stdout), "mirror: and the order flow is still the same")
+
+big = churn(20000)
+base_big = run_file(big)
+rc, out, ev, _ = run_with_pipe(big, "stalled")
+lost = [e for e in ev if e["event"] == "orders_out_lost"]
+check(rc == 0 and len(lost) == 1 and lost[0]["why"] == "overflow", "mirror: reader stalled -> orders_out_lost(overflow), exit 0: %s" % lost)
+check(wire_hash(out) == wire_hash(base_big.stdout), "mirror: a stalled reader does not change the order flow (%s)" % wire_hash(out))
+
+# a reader that starts late: the backlog (more than a pipe holds) must all arrive, in order, including the final cancels and the end marker
+def slow_reader_run(text):
+    path = tempfile.mktemp(suffix=".l2"); open(path, "w").write(text)
+    r, w = os.pipe()
+    proc = subprocess.Popen([BIN, "--from", path, "--report-s", "1000", "--orders-fd", str(w)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, pass_fds=(w,))
+    os.close(w)
+    time.sleep(1.0)  # hft_live has finished its input and is waiting to flush
+    data = b""
+    with os.fdopen(r, "rb") as f:
+        data = f.read()
+    out, err = proc.communicate(timeout=60)
+    os.remove(path)
+    return proc.returncode, [json.loads(l) for l in data.decode().splitlines()]
+
+mid = churn(3000)
+rc, _, _, fast = run_with_pipe(mid, "read")
+rc2, slow = slow_reader_run(mid)
+check(rc2 == 0 and len(slow) == len(fast) and len(slow) > 3000, "mirror: a late reader receives every line (%d of %d)" % (len(slow), len(fast)))
+check(slow == [json.loads(l) for l in fast] and slow[-1]["t"] == "end", "mirror: same lines in the same order, the end marker last")
+
+# a reader that never reads and a backlog that fits the buffer: the exit waits two seconds, then reports the loss
+t0 = time.time()
+rc, out, ev, _ = run_with_pipe(mid, "stalled")
+lost = [e for e in ev if e["event"] == "orders_out_lost"]
+check(rc == 0 and len(lost) == 1 and lost[0]["why"] == "unflushed_at_exit" and time.time() - t0 >= 2.0,
+      "mirror: unread backlog at exit -> orders_out_lost(unflushed_at_exit) after the wait: %s" % lost)
+
+# the two quotes are on the right sides of the market
+firsts = [r for r in rows if r["t"] == "new"][:2]
+sides = {r["side"]: r["px"] for r in firsts}
+check(set(sides) == {"buy", "sell"} and sides["buy"] < sides["sell"], "mirror: buy below sell in the first two orders: %s" % sides)
+
+rc = subprocess.run([BIN, "--from", "/dev/null", "--orders-fd", "55"], capture_output=True).returncode
+check(rc == 1, "mirror: --orders-fd on a descriptor that is not open: exit 1")
+
 if failures:
     sys.exit("%d live tool test failures" % failures)
 print("test_live_tool: all checks passed")

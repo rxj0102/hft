@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""A local stand-in for the Coinbase Exchange REST order endpoints, for tests and drills. Invented prices.
+
+It checks what a real exchange would check (signature, key, passphrase, timestamp window, rate limit, post-only
+against a configured book, size and tick) and can be told to misbehave. It is NOT the sandbox: it shows that the
+bridge behaves against the documented API, not that the real sandbox agrees.
+
+  ex = FakeExchange(key, secret_b64, passphrase); ex.start(); ex.url
+  ex.best_bid / ex.best_ask : post-only orders that would cross are refused with 400
+  ex.mode : "ok" | "down" (500) | "auth" (401) | "forbidden" (403) | "slow" (sleeps ex.delay before answering, still applies the effect)
+            | "drop" (applies the effect, then closes the socket without answering)
+  ex.skew : seconds added to the time it reports on /time
+"""
+import base64
+import hashlib
+import hmac
+import json
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+
+class FakeExchange:
+    def __init__(self, key, secret_b64, passphrase, rate=15.0, burst=30.0):
+        self.key, self.secret, self.passphrase = key, base64.b64decode(secret_b64), passphrase
+        self.lock = threading.Lock()
+        self.orders = {}        # id -> dict (open orders only)
+        self.by_coid = {}
+        self.log = []           # (t, method, path, status)
+        self.mode, self.delay, self.skew = "ok", 0.0, 0.0
+        self.best_bid, self.best_ask = 81000.00, 81000.10
+        self.rate, self.burst, self.tokens, self.t_tok = rate, burst, burst, time.monotonic()
+        self.enforce_rate = True
+        self.httpd = None
+
+    # ---- helpers for tests ----
+    @property
+    def url(self):
+        return "http://127.0.0.1:%d" % self.httpd.server_address[1]
+
+    def open_orders(self):
+        with self.lock:
+            return list(self.orders.values())
+
+    def max_rate(self, window=1.0):
+        with self.lock:
+            ts = [t for t, m, p, s in self.log if p != "/time"]
+        best = 0
+        j = 0
+        for i, t in enumerate(ts):
+            while ts[j] < t - window:
+                j += 1
+            best = max(best, i - j + 1)
+        return best
+
+    def requests(self, method=None, prefix=None):
+        with self.lock:
+            return [r for r in self.log if (method is None or r[1] == method) and (prefix is None or r[2].startswith(prefix))]
+
+    def start(self):
+        ex = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def handle_any(self):
+                u = urlparse(self.path)
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n).decode() if n else ""
+                status, payload, drop = ex.dispatch(self.command, self.path, u, body, self.headers)
+                with ex.lock:
+                    ex.log.append((time.monotonic(), self.command, u.path, status))
+                if drop:
+                    self.close_connection = True
+                    self.connection.close()
+                    return
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = do_POST = do_DELETE = handle_any
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        return self
+
+    def stop(self):
+        if self.httpd:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+
+    # ---- the API ----
+    def dispatch(self, method, rawpath, u, body, h):
+        if u.path == "/time":
+            return 200, {"iso": "", "epoch": time.time() + self.skew}, False
+        if self.mode == "down":
+            return 500, {"message": "internal"}, False
+        if self.mode == "auth":
+            return 401, {"message": "Invalid API Key"}, False
+        if self.mode == "forbidden":
+            return 403, {"message": "Forbidden"}, False
+        # authentication: independent re-implementation of the documented algorithm
+        ts = h.get("CB-ACCESS-TIMESTAMP", "")
+        want = base64.b64encode(hmac.new(self.secret, (ts + method + rawpath + body).encode(), hashlib.sha256).digest()).decode()
+        try:
+            fresh = abs(float(ts) - (time.time() + self.skew)) <= 30
+        except ValueError:
+            fresh = False
+        if (h.get("CB-ACCESS-KEY") != self.key or h.get("CB-ACCESS-PASSPHRASE") != self.passphrase
+                or not hmac.compare_digest(h.get("CB-ACCESS-SIGN", ""), want)):
+            return 401, {"message": "invalid signature or credentials"}, False
+        if not fresh:
+            return 400, {"message": "request timestamp expired"}, False
+        with self.lock:
+            now = time.monotonic()
+            if self.enforce_rate:
+                self.tokens = min(self.burst, self.tokens + (now - self.t_tok) * self.rate)
+                self.t_tok = now
+                if self.tokens < 1:
+                    return 429, {"message": "Too Many Requests"}, False
+                self.tokens -= 1
+        if self.mode == "slow":
+            time.sleep(self.delay)
+        status, payload = self.apply(method, u, body)
+        return status, payload, self.mode == "drop"
+
+    def apply(self, method, u, body):
+        q = parse_qs(u.query)
+        with self.lock:
+            if method == "POST" and u.path == "/orders":
+                try:
+                    o = json.loads(body)
+                    price, size = float(o["price"]), float(o["size"])
+                except (ValueError, KeyError, TypeError):
+                    return 400, {"message": "invalid order"}
+                if o.get("type") != "limit" or o.get("side") not in ("buy", "sell") or not o.get("client_oid"):
+                    return 400, {"message": "invalid order"}
+                if size < 0.00001 or abs(price * 100 - round(price * 100)) > 1e-6:
+                    return 400, {"message": "size or price increment invalid"}
+                if o.get("post_only") and ((o["side"] == "buy" and price >= self.best_ask) or (o["side"] == "sell" and price <= self.best_bid)):
+                    return 400, {"message": "Post only mode"}
+                if o["client_oid"] in self.by_coid:
+                    return 400, {"message": "client_oid already used"}
+                oid = str(uuid.uuid4())
+                rec = {"id": oid, "client_oid": o["client_oid"], "side": o["side"], "price": o["price"], "size": o["size"],
+                       "product_id": o.get("product_id"), "status": "open"}
+                self.orders[oid] = rec
+                self.by_coid[o["client_oid"]] = oid
+                return 200, rec
+            if method == "DELETE" and u.path == "/orders":
+                pid = (q.get("product_id") or [None])[0]
+                ids = [i for i, r in self.orders.items() if pid is None or r["product_id"] == pid]
+                for i in ids:
+                    del self.orders[i]
+                return 200, ids
+            if method == "DELETE" and u.path.startswith("/orders/client:"):
+                oid = self.by_coid.get(u.path[len("/orders/client:"):])
+                if oid in self.orders:
+                    del self.orders[oid]
+                    return 200, oid
+                return 404, {"message": "NotFound"}
+            if method == "DELETE" and u.path.startswith("/orders/"):
+                oid = u.path[len("/orders/"):]
+                if oid in self.orders:
+                    del self.orders[oid]
+                    return 200, oid
+                return 404, {"message": "NotFound"}
+            if method == "GET" and u.path == "/orders":
+                pid = (q.get("product_id") or [None])[0]
+                return 200, [r for r in self.orders.values() if pid is None or r["product_id"] == pid]
+        return 404, {"message": "NotFound"}

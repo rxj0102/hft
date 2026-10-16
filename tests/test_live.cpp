@@ -234,6 +234,58 @@ void test_flatten_with_orders_in_flight() {
   CHECK(s.active() && s.open_orders() > 0);
 }
 
+struct TapLog {
+  struct Rec {
+    std::uint64_t seg;
+    std::uint8_t kind;
+    std::uint64_t id;
+  };
+  std::vector<Rec> recs;
+};
+
+void tap_collect(void* ctx, std::uint64_t seg, const std::uint8_t* d, std::size_t n) noexcept {
+  gw::ClientMsg m;
+  if (n >= 2 && gw::decode_client(d + 2, n - 2, m)) static_cast<TapLog*>(ctx)->recs.push_back({seg, m.kind, m.id});
+}
+
+// The order tap sees exactly the frames the gateway sends, labelled with the segment they belong to, in order.
+void test_order_tap() {
+  TapLog log;
+  LiveConfig c = small_cfg();
+  c.order_tap = tap_collect;
+  c.order_tap_ctx = &log;
+  LiveSession s(c);
+  warm_up(s, 1'000'000);
+  s.on_line("#1006000\treconnect", 1'006'000);
+  warm_up(s, 2'000'000);
+  s.kill(2'010'000);
+  CHECK(s.summaries().size() == 2);
+  std::uint64_t frames = 0;
+  for (const auto& sm : s.summaries()) frames += sm.frames_total;
+  CHECK(log.recs.size() == frames && frames > 0);       // every frame, no more
+  std::uint64_t news[3] = {0, 0, 0}, cancels[3] = {0, 0, 0};
+  std::uint64_t last_seg = 0;
+  bool ordered = true;
+  for (const auto& r : log.recs) {
+    CHECK(r.seg == 1 || r.seg == 2);
+    if (r.seg < last_seg) ordered = false;
+    last_seg = r.seg;
+    if (r.kind == gw::kMsgNew) ++news[r.seg];
+    if (r.kind == gw::kMsgCancel) ++cancels[r.seg];
+  }
+  CHECK(ordered);                                         // segment 1 entirely before segment 2
+  CHECK(news[1] > 0 && news[2] > 0);
+  CHECK(news[1] == cancels[1] && news[2] == cancels[2]);  // every order a segment sent was cancelled before it ended
+  // without a tap the session behaves the same
+  LiveSession plain(small_cfg());
+  warm_up(plain, 1'000'000);
+  plain.on_line("#1006000\treconnect", 1'006'000);
+  warm_up(plain, 2'000'000);
+  plain.kill(2'010'000);
+  CHECK(plain.summaries()[0].hash_before_flatten == s.summaries()[0].hash_before_flatten);
+  CHECK(plain.summaries()[1].frames_total == s.summaries()[1].frames_total);
+}
+
 void test_stale_feed() {
   LiveConfig c = small_cfg();
   c.stale_ns = 3'000'000'000ULL;
@@ -491,6 +543,7 @@ int main() {
   test_multi_packet_messages();
   test_deterministic();
   test_flatten_with_orders_in_flight();
+  test_order_tap();
   test_stale_feed();
   test_stale_found_by_next_line();
   test_heartbeats_keep_the_feed_alive();

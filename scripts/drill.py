@@ -15,6 +15,8 @@ os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 os.environ["no_proxy"] = "127.0.0.1,localhost"
 HERE = os.path.dirname(os.path.abspath(__file__))
 import websockets
+sys.path.insert(0, HERE)
+import fake_exchange
 
 LIVE = os.path.join(os.path.dirname(HERE), "build/release/hft_live")
 failures = 0
@@ -100,7 +102,7 @@ async def until(pred, timeout, step=0.1):
 
 
 class Run:
-    def __init__(self, feed, port, extra=(), live_cmd=None, capture_cmd=None):
+    def __init__(self, feed, port, extra=(), live_cmd=None, capture_cmd=None, env=None):
         self.dir = tempfile.mkdtemp(prefix="drill-")
         self.sup_log = os.path.join(self.dir, "sup.jsonl")
         self.events = os.path.join(self.dir, "events.jsonl")
@@ -112,10 +114,16 @@ class Run:
         if live_cmd:
             cmd += ["--live-cmd", live_cmd]
         cmd += list(extra)
-        self.p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        e = dict(os.environ)
+        e.update(env or {})
+        self.p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=e)
 
     def sup(self, name=None):
         ev = read_jsonl(self.sup_log)
+        return [e for e in ev if name is None or e["event"] == name]
+
+    def bridge_events(self, name=None):
+        ev = read_jsonl(os.path.join(self.dir, "bridge.jsonl"))
         return [e for e in ev if name is None or e["event"] == name]
 
     def live_events(self, name=None):
@@ -307,9 +315,130 @@ async def drill_integrity(feed, port):
     r.cleanup()
 
 
+# ---- order bridge drills: the sandbox REST API is played by scripts/fake_exchange.py -------------------------------
+# These show what the processes do around a fake exchange. They do not show what the real sandbox does.
+KEY, PASS = "drill-key", "drill-pass"
+SECRET = __import__("base64").b64encode(b"drill-secret-bytes-0123456789abcdef").decode()
+
+
+def bridge_run(feed, port, ex, **kw):
+    env = {"HFT_CB_KEY": KEY, "HFT_CB_SECRET": SECRET, "HFT_CB_PASSPHRASE": PASS}
+    env.update(kw.pop("env", {}))
+    args = "--test-exchange --base-url %s --rate 20 --max-notional 100000 --max-errors 3 --sync-s 1" % ex.url
+    return Run(feed, port, extra=["--bridge", "--bridge-args", args] + kw.pop("extra", []), env=env, **kw)
+
+
+def new_exchange():
+    ex = fake_exchange.FakeExchange(KEY, SECRET, PASS).start()
+    ex.best_bid, ex.best_ask = 0.0, 1e12  # the invented feed's prices are unrelated to the exchange's: never cross
+    return ex
+
+
+async def drill_bridge_flow(feed, port):
+    ex = new_exchange()
+    r = bridge_run(feed, port, ex)
+    ok = await until(lambda: ex.open_orders(), 20)
+    check(ok, "the strategy's quotes reach the exchange: %d resting" % len(ex.open_orders()))
+    check(len(ex.open_orders()) <= 6, "and stay within max-open")
+    rc = await r.stop()
+    check(rc == 0, "supervisor exits 0 on SIGTERM")
+    check(len(ex.open_orders()) == 0, "nothing left resting on the exchange")
+    ends = r.live_events("segment_end")
+    check(r.bridge_events("exit_flat") and r.bridge_events("exit_flat")[-1]["flat"], "bridge reported flat")
+    check(ends and ends[-1]["reason"] == "kill" and ends[-1]["open_before_flatten"] > 0, "hft_live ended with the kill path and quotes out")
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_kill_bridge(feed, port):
+    ex = new_exchange()
+    r = bridge_run(feed, port, ex)
+    await until(lambda: ex.open_orders(), 20)
+    n = len(ex.open_orders())
+    pid = r.pid("bridge", 1)
+    t0 = time.monotonic()
+    os.kill(pid, signal.SIGKILL)
+    ok = await until(lambda: len(r.sup("pair_start")) >= 2, 15)
+    check(ok, "the trio restarts after kill -9 of the bridge")
+    cleared = await until(lambda: any(e.get("cancelled", 0) >= 1 for e in r.bridge_events("cancel_all")), 15)
+    check(cleared, "the new bridge's first act is cancel-all, and it found %s stranded orders (%d before the kill)" %
+          ([e["cancelled"] for e in r.bridge_events("cancel_all")], n))
+    print("      orders stranded for about %.1f s (kill to cancel-all)" % (time.monotonic() - t0))
+    check(await until(lambda: ex.open_orders(), 15), "quoting resumes on the exchange")
+    await r.stop()
+    check(len(ex.open_orders()) == 0, "flat at the end")
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_kill_live_bridge(feed, port):
+    ex = new_exchange()
+    r = bridge_run(feed, port, ex)
+    await until(lambda: ex.open_orders(), 20)
+    check(len(ex.open_orders()) > 0, "orders resting before the kill")
+    os.kill(r.pid("live", 1), signal.SIGKILL)
+    ok = await until(lambda: r.sup("pair_stopped"), 15)
+    check(ok, "pair stopped")
+    ps = r.sup("pair_stopped")[0]
+    check(ps["live"]["signal"] == 9 and ps["bridge"]["returncode"] == 0, "hft_live died by SIGKILL; the bridge saw end of input and left cleanly: %s" % ps["bridge"])
+    # at the moment the supervisor reports the stop, the old bridge is gone: its cancel-all must have run
+    check(r.bridge_events("exit_flat") and r.bridge_events("exit_flat")[0]["flat"], "bridge cancelled everything before exiting")
+    check(await until(lambda: len(r.sup("pair_start")) >= 2, 15), "restarted")
+    check(await until(lambda: ex.open_orders(), 15), "quoting again")
+    await r.stop()
+    check(len(ex.open_orders()) == 0, "flat at the end")
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_exchange_down(feed, port):
+    ex = new_exchange()
+    r = bridge_run(feed, port, ex)
+    await until(lambda: ex.open_orders(), 20)
+    ex.mode = "down"
+    ok = await until(lambda: r.sup("bridge_exited"), 30)
+    check(ok, "the bridge gives up on a dead exchange (exit %s)" % (r.sup("bridge_exited")[0]["returncode"] if ok else None))
+    check(r.sup("bridge_exited") and r.sup("bridge_exited")[0]["returncode"] == 1, "with the restartable code 1")
+    check(not r.sup("fatal_halt"), "and the supervisor does not treat it as fatal")
+    ex.mode = "ok"
+    check(await until(lambda: len(r.sup("pair_start")) >= 2 and ex.open_orders(), 30), "when the exchange is back, quoting resumes")
+    await r.stop()
+    check(len(ex.open_orders()) == 0, "flat at the end")
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_bad_credentials(feed, port):
+    ex = new_exchange()
+    r = bridge_run(feed, port, ex, env={"HFT_CB_PASSPHRASE": "wrong"})
+    rc = await asyncio.get_event_loop().run_in_executor(None, lambda: r.p.wait(30))
+    check(rc == 4, "supervisor exits 4 (got %s)" % rc)
+    check(len(r.sup("pair_start")) == 1 and r.sup("fatal_halt") and r.sup("fatal_halt")[0].get("who") == "bridge", "not restarted: a person must look")
+    check(len(ex.requests("POST")) == 0, "no order was placed")
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_bridge_hang(feed, port):
+    ex = new_exchange()
+    r = bridge_run(feed, port, ex)
+    await until(lambda: ex.open_orders(), 20)
+    os.kill(r.pid("bridge", 1), signal.SIGSTOP)
+    ok = await until(lambda: r.sup("watchdog"), 20)
+    check(ok and r.sup("watchdog_target")[0]["who"] == "bridge", "the watchdog names the bridge: %s" % r.sup("watchdog_target")[:1])
+    check(await until(lambda: len(r.sup("pair_start")) >= 2, 15), "trio restarted")
+    check(await until(lambda: any(e.get("cancelled", 0) >= 1 for e in r.bridge_events("cancel_all")), 15), "the stranded orders were cancelled by the new bridge")
+    await r.stop()
+    check(len(ex.open_orders()) == 0, "flat at the end")
+    ex.stop()
+    r.cleanup()
+
+
 DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill_kill_capture),
           ("kill_live", drill_kill_live), ("hang", drill_hang), ("sigterm", drill_sigterm), ("term_ignored", drill_term_ignored),
-          ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity)]
+          ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity),
+          ("bridge_flow", drill_bridge_flow), ("kill_bridge", drill_kill_bridge), ("kill_live_bridge", drill_kill_live_bridge),
+          ("exchange_down", drill_exchange_down), ("bad_credentials", drill_bad_credentials), ("bridge_hang", drill_bridge_hang)]
 
 
 async def main(only):

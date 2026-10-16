@@ -92,13 +92,18 @@ def main(argv=None):
     ap.add_argument("--startup-grace-s", type=float, default=10.0)
     ap.add_argument("--term-grace-s", type=float, default=10.0)
     ap.add_argument("--metrics-s", type=float, default=2.0)
+    ap.add_argument("--bridge", action="store_true", help="also run scripts/order_bridge.py (sandbox order entry; keys from HFT_CB_* env)")
+    ap.add_argument("--bridge-args", default="", help="extra order_bridge.py options, shell-split (e.g. --rate 6 --max-notional 10)")
+    ap.add_argument("--bridge-cmd", default=None, help="replace the bridge command (shell-split)")
     a = ap.parse_args(argv)
 
     os.makedirs(a.run_dir, exist_ok=True)
     resnap = os.path.join(a.run_dir, "resnap")
     metrics = os.path.join(a.run_dir, "metrics.prom")
     events = os.path.join(a.run_dir, "events.jsonl")
-    sub = {"resnap": resnap, "metrics": metrics, "log": events}
+    bridge_events = os.path.join(a.run_dir, "bridge.jsonl")
+    bridge_metrics = os.path.join(a.run_dir, "bridge.prom")
+    sub = {"resnap": resnap, "metrics": metrics, "log": events, "bridge_metrics": bridge_metrics, "bridge_log": bridge_events}
     log = Log(a.log)
 
     def fmt(cmd):
@@ -117,9 +122,17 @@ def main(argv=None):
         live_cmd = [a.live, "--resnap-file", resnap, "--log", events, "--metrics", metrics, "--metrics-s", str(a.metrics_s),
                     "--report-s", "60", "--stale-ms", str(a.stale_ms)]
 
+    bridge_cmd = None
+    if a.bridge or a.bridge_cmd:
+        if a.bridge_cmd:
+            bridge_cmd = fmt(shlex.split(a.bridge_cmd))
+        else:
+            bridge_cmd = [sys.executable, os.path.join(HERE, "order_bridge.py"), "--log", bridge_events, "--metrics", bridge_metrics,
+                          "--metrics-s", "1"] + shlex.split(a.bridge_args)
+
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
-    log.emit("supervisor_start", run_dir=a.run_dir, capture=capture_cmd, live=live_cmd)
+    log.emit("supervisor_start", run_dir=a.run_dir, capture=capture_cmd, live=live_cmd, bridge=bridge_cmd)
 
     starts = collections.deque()
     backoff = a.backoff_s
@@ -127,7 +140,7 @@ def main(argv=None):
     exit_code = 0
     while True:
         run_no += 1
-        for f in (resnap, metrics):
+        for f in (resnap, metrics, bridge_metrics):
             try:
                 os.remove(f)
             except FileNotFoundError:
@@ -138,13 +151,28 @@ def main(argv=None):
         live_err = open(os.path.join(a.run_dir, "live.err"), "ab")
         cap = subprocess.Popen(capture_cmd, stdout=w, stderr=cap_err, start_new_session=True)
         os.close(w)
-        live = subprocess.Popen(live_cmd, stdin=r, stdout=live_out, stderr=live_err, start_new_session=True)
+        bridge = None
+        bridge_out = bridge_err = None
+        if bridge_cmd:
+            # hft_live writes its order flow into this pipe; the bridge reads it. Neither can be re-attached to a new
+            # partner, so if either dies the trio restarts (the bridge cancels everything on the exchange at start).
+            orr, orw = os.pipe()
+            live = subprocess.Popen(live_cmd + ["--orders-fd", str(orw)], stdin=r, stdout=live_out, stderr=live_err,
+                                    start_new_session=True, pass_fds=(orw,))
+            bridge_out = open(os.path.join(a.run_dir, "bridge.out"), "ab")
+            bridge_err = open(os.path.join(a.run_dir, "bridge.err"), "ab")
+            bridge = subprocess.Popen(bridge_cmd, stdin=orr, stdout=bridge_out, stderr=bridge_err, start_new_session=True)
+            os.close(orr)
+            os.close(orw)
+        else:
+            live = subprocess.Popen(live_cmd, stdin=r, stdout=live_out, stderr=live_err, start_new_session=True)
         os.close(r)
         t0 = time.monotonic()
         starts.append(time.time())
-        log.emit("pair_start", run=run_no, capture_pid=cap.pid, live_pid=live.pid)
+        log.emit("pair_start", run=run_no, capture_pid=cap.pid, live_pid=live.pid, bridge_pid=bridge.pid if bridge else None)
 
         why = None
+        wd_who = None
         cap_gone_at = None
         while why is None:
             time.sleep(0.1)
@@ -153,6 +181,8 @@ def main(argv=None):
                 why = "stop_requested"
             elif live.poll() is not None:
                 why = "live_exited"
+            elif bridge is not None and bridge.poll() is not None:
+                why = "bridge_exited"
             elif cap.poll() is not None:
                 # the capture ended; hft_live sees end of input and exits flat. Give it time to.
                 if cap_gone_at is None:
@@ -161,12 +191,17 @@ def main(argv=None):
                 elif now - cap_gone_at > 5.0:
                     why = "live_did_not_follow_capture"
             elif a.watchdog_s > 0 and now - t0 > a.startup_grace_s:
-                try:
-                    age = time.time() - os.stat(metrics).st_mtime
-                except FileNotFoundError:
-                    age = now - t0
-                if age > a.watchdog_s:
-                    why = "watchdog"
+                for who, path in (("live", metrics), ("bridge", bridge_metrics if bridge else None)):
+                    if path is None:
+                        continue
+                    try:
+                        age = time.time() - os.stat(path).st_mtime
+                    except FileNotFoundError:
+                        age = now - t0
+                    if age > a.watchdog_s:
+                        why = "watchdog"
+                        wd_who = who
+                        log.emit("watchdog_target", run=run_no, who=who, age_s=round(age, 1))
 
         if why == "stop_requested":
             log.emit("stop_requested", run=run_no)
@@ -177,11 +212,20 @@ def main(argv=None):
                 log.emit("live_ignored_sigterm", run=run_no)
                 kill_group(live, signal.SIGKILL)
                 live.wait()
+            if bridge is not None:  # hft_live is gone, so the bridge sees end of input and cancels everything
+                try:
+                    bridge.wait(a.term_grace_s)
+                except subprocess.TimeoutExpired:
+                    log.emit("bridge_ignored_eof", run=run_no)
+                    kill_group(bridge, signal.SIGKILL)
+                    bridge.wait()
             kill_group(cap, signal.SIGTERM)
         elif why in ("watchdog", "live_did_not_follow_capture"):
             log.emit(why, run=run_no)  # the cleanup below kills it
         elif why == "live_exited":
             log.emit("live_exited", run=run_no, **describe(live.returncode))
+        elif why == "bridge_exited":
+            log.emit("bridge_exited", run=run_no, **describe(bridge.returncode))
         # whatever is left of the pair goes now
         kill_group(cap, signal.SIGTERM)
         try:
@@ -192,17 +236,33 @@ def main(argv=None):
         if live.poll() is None:
             kill_group(live, signal.SIGKILL)
             live.wait()
-        for f in (cap_err, live_out, live_err):
-            f.close()
+        if bridge is not None and bridge.poll() is None:
+            if why == "watchdog" and wd_who == "bridge":  # it is the hung one: it cannot cancel anything
+                kill_group(bridge, signal.SIGKILL)
+            else:  # hft_live is gone, so the bridge sees end of input: let it cancel and leave
+                try:
+                    bridge.wait(a.term_grace_s)
+                except subprocess.TimeoutExpired:
+                    log.emit("bridge_ignored_eof", run=run_no)
+                    kill_group(bridge, signal.SIGKILL)
+            bridge.wait()
+        for f in (cap_err, live_out, live_err, bridge_out, bridge_err):
+            if f:
+                f.close()
         ran = time.monotonic() - t0
         log.emit("pair_stopped", run=run_no, ran_s=round(ran, 2), why=why, live=describe(live.returncode),
-                 capture=describe(cap.returncode))
+                 capture=describe(cap.returncode), bridge=describe(bridge.returncode) if bridge else None)
 
         if why == "stop_requested":
             exit_code = 0
             break
         if live.returncode == 4:
             log.emit("fatal_halt", run=run_no, detail="hft_live reported an integrity failure; not restarting, a person must look")
+            exit_code = 4
+            break
+        if bridge is not None and bridge.returncode in (2, 4):
+            log.emit("fatal_halt", run=run_no, who="bridge", code=bridge.returncode,
+                     detail="order bridge refused to run (configuration, credentials or clock); not restarting")
             exit_code = 4
             break
         now_wall = time.time()

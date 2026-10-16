@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+"""Tests of scripts/order_bridge.py against the local fake exchange (scripts/fake_exchange.py). No network.
+
+  python3 scripts/test_bridge.py
+
+Each case states the expected outcome first. The fake exchange checks signatures with its own code; the signing
+function is also compared with openssl, a third implementation. None of this talks to the real sandbox.
+"""
+import base64
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import fake_exchange  # noqa: E402
+import order_bridge  # noqa: E402
+
+BRIDGE = os.path.join(HERE, "order_bridge.py")
+KEY, PASS = "key-AbC123xyz", "pass-QwErTy987"
+SECRET = base64.b64encode(b"s3cret-bytes-for-tests-0123456789-abcdef").decode()
+fails = 0
+
+
+def check(cond, msg):
+    global fails
+    print(("  ok   " if cond else "  FAIL ") + msg)
+    if not cond:
+        fails += 1
+
+
+def until(fn, timeout=8.0, step=0.02):
+    t = time.monotonic() + timeout
+    while time.monotonic() < t:
+        if fn():
+            return True
+        time.sleep(step)
+    return fn()
+
+
+class Bridge:
+    def __init__(self, ex, tmp, extra=(), env=None, test=True):
+        self.log = os.path.join(tmp, "bridge.jsonl")
+        e = dict(os.environ)
+        e.update({"HFT_CB_KEY": KEY, "HFT_CB_SECRET": SECRET, "HFT_CB_PASSPHRASE": PASS})
+        e.update(env or {})
+        cmd = [sys.executable, BRIDGE, "--log", self.log, "--rate", "20", "--metrics-s", "0.2",
+               "--metrics", os.path.join(tmp, "b.prom")] + (["--test-exchange", "--base-url", ex.url] if test else []) + list(extra)
+        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=e)
+
+    def send(self, *objs):
+        for o in objs:
+            self.p.stdin.write((json.dumps(o) + "\n").encode())
+        self.p.stdin.flush()
+
+    def events(self, name=None):
+        try:
+            rows = [json.loads(l) for l in open(self.log)]
+        except FileNotFoundError:
+            return []
+        return [r for r in rows if name is None or r["event"] == name]
+
+    def finish(self, how="eof", timeout=15):
+        if how == "eof":
+            self.p.stdin.close()
+        elif how == "term":
+            self.p.send_signal(signal.SIGTERM)
+        elif how == "kill":
+            self.p.kill()
+        try:
+            self.p.wait(timeout)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+            self.p.wait()
+        err = self.p.stderr.read().decode()
+        return self.p.returncode, err
+
+
+def new(i, px, qty=5, side="buy", seg=1):
+    return {"t": "new", "seg": seg, "id": i, "side": side, "px": px, "qty": qty, "type": 4}
+
+
+def hello():
+    return {"t": "hello", "v": 1, "px_scale": 10000, "qty_scale": 100000}
+
+
+def fresh(tmp_name):
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix=tmp_name)
+    ex = fake_exchange.FakeExchange(KEY, SECRET, PASS).start()
+    return ex, tmp
+
+
+def test_signing():
+    print("signing and units")
+    ts, method, path, body = "1700000000.123", "POST", "/orders", '{"a":1}'
+    mine = order_bridge.sign(SECRET, ts, method, path, body)
+    keyhex = base64.b64decode(SECRET).hex()
+    out = subprocess.run(["openssl", "dgst", "-sha256", "-mac", "HMAC", "-macopt", "hexkey:" + keyhex, "-binary"],
+                         input=(ts + method + path + body).encode(), capture_output=True)
+    check(out.returncode == 0 and base64.b64encode(out.stdout).decode() == mine, "signature equals openssl HMAC-SHA256 over timestamp+method+path+body")
+    check(order_bridge.sign(SECRET, ts, "post", path, body) == mine, "method is upper-cased before signing")
+    check(order_bridge.sign(SECRET, ts, method, path, body + " ") != mine, "a different body gives a different signature")
+    check(order_bridge.fmt_price(819080300, 10000) == "81908.03", "price 819080300 -> 81908.03")
+    check(order_bridge.fmt_price(819080350, 10000) is None, "a price off the cent is refused")
+    check(order_bridge.fmt_size(5, 100000) == "0.00005", "5 lots -> 0.00005")
+    check(order_bridge.fmt_size(123456, 100000) == "1.23456", "123456 lots -> 1.23456")
+    check(order_bridge.fmt_size(0, 100000) is None, "zero size refused")
+
+
+def test_guards():
+    print("guards: URL, keys")
+    ex, tmp = fresh("g1")
+    for url, test in [("https://api.exchange.coinbase.com", False), ("https://api-public.sandbox.exchange.coinbase.com.evil.com", False),
+                      ("http://api-public.sandbox.exchange.coinbase.com", False), ("http://10.0.0.5:80", True), ("https://127.0.0.1:9", True)]:
+        try:
+            order_bridge.check_url(url, test)
+            ok = False
+        except order_bridge.Fatal as e:
+            ok = e.code == 2
+        check(ok, "refused: %s%s" % (url, " (test mode)" if test else ""))
+    check(order_bridge.check_url("https://api-public.sandbox.exchange.coinbase.com/", False) == order_bridge.SANDBOX_URL, "the sandbox URL is accepted")
+    # production URL through the real entry point: exit 2, nothing sent anywhere
+    # If this guard were broken the bridge would try to talk to production. The proxy below points at a dead local
+    # port, so even then nothing could leave the machine: the test fails by connection refused, not by a real request.
+    dead = dict(os.environ, HFT_CB_KEY=KEY, HFT_CB_SECRET=SECRET, HFT_CB_PASSPHRASE=PASS, HTTPS_PROXY="http://127.0.0.1:9",
+                https_proxy="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9", http_proxy="http://127.0.0.1:9", NO_PROXY="", no_proxy="")
+    p = subprocess.run([sys.executable, BRIDGE, "--base-url", "https://api.exchange.coinbase.com", "--max-errors", "1"],
+                       capture_output=True, env=dead, input=b"", timeout=30)
+    check(p.returncode == 2 and b"refusing base URL" in p.stderr, "production URL: exit 2")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HFT_CB_")}
+    p = subprocess.run([sys.executable, BRIDGE, "--test-exchange", "--base-url", ex.url], capture_output=True, env=env, input=b"")
+    check(p.returncode == 2 and b"HFT_CB_KEY" in p.stderr, "missing keys: exit 2, names the variables")
+    check(len(ex.requests()) == 0, "no request reached the exchange in either case")
+    ex.stop()
+
+
+def test_flow():
+    print("order flow: place, replace, cancel, coalesce, flat at EOF")
+    ex, tmp = fresh("f1")
+    ex.orders["stale1"] = {"id": "stale1", "client_oid": "x", "side": "buy", "price": "1.00", "size": "0.1", "product_id": "BTC-USD"}
+    b = Bridge(ex, tmp)
+    check(until(lambda: b.events("start_flat")), "started")
+    check(len(ex.open_orders()) == 0 and b.events("start_flat")[0]["flat"], "orders already on the account are cancelled at start")
+    b.send(hello(), new(1, 810000000), new(2, 810200000, side="sell"))
+    check(until(lambda: len(ex.open_orders()) == 2), "two orders reach the exchange")
+    o = {r["side"]: r for r in ex.open_orders()}
+    check(o["buy"]["price"] == "81000.00" and o["sell"]["price"] == "81020.00" and o["buy"]["size"] == "0.00005", "prices and sizes are in dollars and coins")
+    check(all(r["client_oid"] for r in o.values()) and len({r["client_oid"] for r in o.values()}) == 2, "each has its own client_oid")
+    n_before = len(ex.requests())
+    for k in range(60):  # a burst of replaces: only the last should matter
+        b.send({"t": "rep", "seg": 1, "id": 1, "px": 810000000 - 100 * (k + 1), "qty": 5})
+    check(until(lambda: any(abs(float(r["price"]) - (81000.00 - 0.60)) < 1e-9 for r in ex.open_orders() if r["side"] == "buy")),
+          "the exchange ends at the last price (81000.00 - 0.60)")
+    sent = len(ex.requests()) - n_before
+    check(sent < 30, "60 replaces became %d requests (coalesced)" % sent)
+    b.send({"t": "can", "seg": 1, "id": 2})
+    check(until(lambda: len(ex.open_orders()) == 1), "cancel removes the order")
+    rc, err = b.finish("eof")
+    check(rc == 0 and len(ex.open_orders()) == 0, "end of input: cancel-all, nothing left working, exit 0 (rc=%s)" % rc)
+    check(b.events("exit_flat")[-1]["flat"] is True, "exit_flat logged")
+    ex.stop()
+
+
+def test_pacing():
+    print("pacing: --rate 8 holds under a stream of changes")
+    ex, tmp = fresh("p1")
+    b = Bridge(ex, tmp, ["--rate", "8"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), new(1, 810000000), new(2, 810200000, side="sell"))
+    t_end = time.monotonic() + 3.0
+    k = 0
+    while time.monotonic() < t_end:  # both quotes move all the time
+        k += 1
+        b.send({"t": "rep", "seg": 1, "id": 1, "px": 810000000 - 100 * (k % 50), "qty": 5},
+               {"t": "rep", "seg": 1, "id": 2, "px": 810200000 + 100 * (k % 50), "qty": 5})
+        time.sleep(0.01)
+    mx = ex.max_rate()
+    check(mx <= 9, "at most %d requests in any second (limit set 8, exchange allows 15)" % mx)
+    check(len(ex.requests("POST")) >= 8, "and it kept working (%d POSTs)" % len(ex.requests("POST")))
+    b.finish("eof", 30)
+    ex.stop()
+
+
+def test_cancel_before_place():
+    print("a replace is a cancel then a new order, never the reverse")
+    ex, tmp = fresh("c1")
+    b = Bridge(ex, tmp, ["--rate", "50"])
+    b.send(hello(), new(1, 810000000))
+    until(lambda: len(ex.open_orders()) == 1)
+    mark = len(ex.requests())
+    b.send({"t": "rep", "seg": 1, "id": 1, "px": 809900000, "qty": 5})
+    until(lambda: any(r["price"] == "80990.00" for r in ex.open_orders()))
+    seq = [(m, p) for t, m, p, s in ex.requests()[mark:]]
+    di = next((i for i, (m, p) in enumerate(seq) if m == "DELETE" and p.startswith("/orders/")), None)
+    pi = next((i for i, (m, p) in enumerate(seq) if m == "POST"), None)
+    check(di is not None and pi is not None and di < pi, "DELETE %s before POST %s" % (di, pi))
+    check(len(ex.open_orders()) == 1, "one order afterwards, not two")
+    b.finish("eof")
+    ex.stop()
+
+
+def test_segment_end_and_priority():
+    print("segment end clears the segment; a cancel goes before a new order that is waiting")
+    ex, tmp = fresh("z1")
+    b = Bridge(ex, tmp, ["--rate", "3"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), new(1, 810000000), new(2, 810200000, side="sell"))
+    until(lambda: len(ex.open_orders()) == 2, 10)
+    b.send({"t": "end", "seg": 1, "reason": "stale feed"})
+    check(until(lambda: len(ex.open_orders()) == 0, 10), "segment end: the orders are cancelled without any cancel lines")
+    b.send(new(1, 809000000, seg=2))  # ids restart in a new segment
+    check(until(lambda: len(ex.open_orders()) == 1 and ex.open_orders()[0]["price"] == "80900.00", 10), "a new segment may reuse id 1")
+    mark = len(ex.requests())
+    # one batch: move order 1 and add order 3. The cancel (risk down) must precede the POST.
+    b.send({"t": "rep", "seg": 2, "id": 1, "px": 808000000, "qty": 5}, new(3, 807000000, seg=2))
+    until(lambda: {o["price"] for o in ex.open_orders()} == {"80800.00", "80700.00"}, 10)
+    seq = [m for t, m, p, st in ex.requests()[mark:] if m in ("DELETE", "POST")]
+    check(seq[:1] == ["DELETE"], "first request after the batch: %s" % seq[:3])
+    b.finish("eof", 20)
+    ex.stop()
+
+
+def test_signals():
+    print("SIGTERM and SIGKILL")
+    ex, tmp = fresh("s1")
+    b = Bridge(ex, tmp)
+    b.send(hello(), new(1, 810000000), new(2, 810200000, side="sell"))
+    until(lambda: len(ex.open_orders()) == 2)
+    rc, _ = b.finish("term")
+    check(rc == 0 and len(ex.open_orders()) == 0, "SIGTERM: flat, exit 0")
+    # kill -9 leaves the orders; the next start clears them (this is the gap the supervisor's restart closes)
+    b = Bridge(ex, tmp)
+    b.send(hello(), new(1, 810000000))
+    until(lambda: len(ex.open_orders()) == 1)
+    b.finish("kill")
+    check(len(ex.open_orders()) == 1, "SIGKILL: the order is still resting (expected, nothing can run)")
+    b2 = Bridge(ex, tmp)
+    check(until(lambda: len(ex.open_orders()) == 0), "the next start cancels it")
+    b2.finish("eof")
+    ex.stop()
+
+
+def test_errors():
+    print("exchange misbehaviour")
+    # 1. auth refused: exit 4, not retried
+    ex, tmp = fresh("e1")
+    ex.mode = "auth"
+    b = Bridge(ex, tmp)
+    rc, err = b.finish("eof")
+    check(rc == 4, "401 at start: exit 4 (rc=%s)" % rc)
+    ex.stop()
+    ex, tmp = fresh("e2")
+    b = Bridge(ex, tmp, env={"HFT_CB_PASSPHRASE": "wrong"})
+    rc, _ = b.finish("eof")
+    check(rc == 4, "wrong passphrase: exit 4 (rc=%s)" % rc)
+    ex.stop()
+    ex, tmp = fresh("e1b")
+    ex.mode = "forbidden"
+    b = Bridge(ex, tmp)
+    rc, _ = b.finish("eof")
+    check(rc == 4, "403 at start: exit 4 (rc=%s)" % rc)
+    ex.stop()
+    # 2. exchange down
+    ex, tmp = fresh("e3")
+    ex.mode = "down"
+    b = Bridge(ex, tmp, ["--max-errors", "3"])
+    t0 = time.monotonic()
+    rc, _ = b.finish("eof", 30)
+    check(rc == 1, "5xx forever: exit 1 after 3 errors, restartable (rc=%s, %.1f s)" % (rc, time.monotonic() - t0))
+    ex.stop()
+    # 2b. exchange goes down in the middle of a run: errors are counted, the bridge gives up with a restartable code
+    ex, tmp = fresh("e3b")
+    b = Bridge(ex, tmp, ["--max-errors", "3", "--sync-s", "0.3"])
+    b.send(hello(), new(1, 810000000))
+    until(lambda: len(ex.open_orders()) == 1)
+    ex.mode = "down"
+    t0 = time.monotonic()
+    until(lambda: b.p.poll() is not None, 40)  # it must stop by itself, input is still open
+    rc = b.p.poll()
+    b.finish("eof", 20)
+    check(rc == 1 and b.events("fatal"), "5xx in mid-run: gives up by itself with exit 1 (rc=%s, %.1f s)" % (rc, time.monotonic() - t0))
+    check(len(b.events("http_5xx")) >= 3 and b.events("http_5xx")[2]["consecutive"] == 3, "the errors were counted")
+    ex.stop()
+    # 3. clock skew
+    ex, tmp = fresh("e4")
+    ex.skew = 100
+    b = Bridge(ex, tmp)
+    rc, _ = b.finish("eof")
+    check(rc == 4 and not ex.requests("POST"), "clock 100 s off the exchange: exit 4, no order sent (rc=%s)" % rc)
+    ex.stop()
+    # 4. 429 from a tight exchange limit: backs off, still gets there
+    ex, tmp = fresh("e5")
+    ex.rate, ex.burst, ex.tokens = 2.0, 2.0, 2.0
+    b = Bridge(ex, tmp, ["--rate", "40"])
+    b.send(hello(), new(1, 810000000), new(2, 810200000, side="sell"), new(3, 809900000))
+    ok = until(lambda: len(ex.open_orders()) == 3, 20)
+    check(ok and b.events("rate_limited"), "429s seen (%d) and all three orders placed after backing off" % len(b.events("rate_limited")))
+    got429 = sum(1 for r in ex.requests() if r[3] == 429)
+    check(got429 <= 6, "the exchange refused %d requests, not a stream of them" % got429)
+    bo = [e["backoff_s"] for e in b.events("rate_limited")]
+    check(bo and min(bo) >= 1.0, "each 429 pauses at least a second: %s" % bo)
+    b.finish("eof", 30)
+    check(len(ex.open_orders()) == 0, "and flat afterwards")
+    ex.stop()
+    # 5. post-only refusal: not retried unchanged; a new price is tried
+    ex, tmp = fresh("e6")
+    ex.best_ask = 80000.00  # the bid at 81000.00 would cross
+    b = Bridge(ex, tmp)
+    b.send(hello(), new(1, 810000000))
+    until(lambda: b.events("order_rejected"))
+    time.sleep(0.5)
+    posts = len(ex.requests("POST"))
+    check(posts == 1, "refused once, not retried unchanged (%d POSTs)" % posts)
+    b.send({"t": "rep", "seg": 1, "id": 1, "px": 799000000, "qty": 5})
+    check(until(lambda: len(ex.open_orders()) == 1), "a new price is tried and rests")
+    b.finish("eof")
+    ex.stop()
+    # 6. lost reply to a POST: the order may exist; it must not be left behind
+    ex, tmp = fresh("e7")
+    b = Bridge(ex, tmp, ["--timeout", "1"])
+    until(lambda: b.events("start_flat"))
+    ex.mode = "drop"
+    b.send(hello(), new(1, 810000000))
+    until(lambda: b.events("net_error"))
+    ex.mode = "ok"
+    time.sleep(1.5)
+    check(b.events("net_error") and len(ex.requests("DELETE", "/orders/client:")) >= 1, "unknown outcome -> cancel by client_oid")
+    rc, _ = b.finish("eof")
+    check(rc == 0 and len(ex.open_orders()) == 0, "nothing left on the exchange")
+    ex.stop()
+    # 7. an order that vanished (filled elsewhere) is noticed
+    ex, tmp = fresh("e8")
+    b = Bridge(ex, tmp, ["--sync-s", "0.3"])
+    b.send(hello(), new(1, 810000000))
+    until(lambda: len(ex.open_orders()) == 1)
+    first = ex.open_orders()[0]["id"]
+    with ex.lock:
+        ex.orders.clear()
+    check(until(lambda: b.events("order_vanished")), "order_vanished logged")
+    check(until(lambda: len(ex.open_orders()) == 1 and ex.open_orders()[0]["id"] != first), "wanted order placed again (the strategy still wants it)")
+    # a stray order placed behind our back is cancelled
+    with ex.lock:
+        ex.orders["stray"] = {"id": "stray", "client_oid": "z", "side": "buy", "price": "1.00", "size": "0.1", "product_id": "BTC-USD"}
+    check(until(lambda: "stray" not in {o["id"] for o in ex.open_orders()}), "a stray order is cancelled")
+    b.finish("eof")
+    ex.stop()
+
+
+def test_limits_and_secrets():
+    print("local limits and secrets")
+    ex, tmp = fresh("l1")
+    b = Bridge(ex, tmp, ["--max-notional", "10", "--max-open", "2"])
+    until(lambda: b.events("start_flat"))
+    # 5 lots at 81000 = $4.05; 1000 lots = $810
+    b.send(hello(), new(1, 810000000, qty=1000), new(2, 810000000, qty=5), new(3, 809900000, qty=5), new(4, 809800000, qty=5),
+           new(5, 810005000 + 50, qty=5))
+    until(lambda: len(ex.open_orders()) == 2)
+    time.sleep(0.5)
+    check(len(ex.open_orders()) == 2, "max-open 2 holds (%d resting)" % len(ex.open_orders()))
+    check(not any(r["size"] == "0.01000" for r in ex.open_orders()), "the $810 order was not sent")
+    check(len(ex.requests("POST")) == 2, "and no refused order cost a request (%d POSTs)" % len(ex.requests("POST")))
+    rc, err = b.finish("eof")
+    blob = open(b.log).read() + err + open(os.path.join(tmp, "b.prom")).read()
+    check(KEY not in blob and SECRET not in blob and PASS not in blob, "key, secret and passphrase appear in neither log, stderr nor metrics")
+    prom = open(os.path.join(tmp, "b.prom")).read()
+    check("hft_bridge_placed_total 2" in prom and "hft_bridge_refused_local_total" in prom, "metrics file written")
+    ex.stop()
+
+
+def test_hft_live_mirror(live):
+    if not live:
+        return
+    print("hft_live --orders-fd into the bridge, on a recorded capture")
+    cap = os.path.join(HERE, "..", "data", "btc2.l2")
+    if not os.path.exists(cap):
+        print("  skip (no recorded capture in data/)")
+        return
+    ex, tmp = fresh("m1")
+    ex.best_bid, ex.best_ask = 0.0, 1e9  # never cross
+    bl = os.path.join(tmp, "bridge.jsonl")
+    env = dict(os.environ, HFT_CB_KEY=KEY, HFT_CB_SECRET=SECRET, HFT_CB_PASSPHRASE=PASS)
+    r, w = os.pipe()
+    bp = subprocess.Popen([sys.executable, BRIDGE, "--test-exchange", "--base-url", ex.url, "--log", bl, "--rate", "50", "--max-notional", "50"],
+                          stdin=r, env=env, stderr=subprocess.PIPE)
+    os.close(r)
+    lp = subprocess.run([live, "--from", cap, "--pace", "4", "--orders-fd", str(w)], pass_fds=(w,), capture_output=True)
+    os.close(w)
+    bp.wait(60)
+    check(lp.returncode == 0, "hft_live exit 0")
+    check(bp.returncode == 0 and len(ex.open_orders()) == 0, "bridge exit 0, exchange flat afterwards (rc=%s)" % bp.returncode)
+    posts, dels = len(ex.requests("POST")), len(ex.requests("DELETE"))
+    check(posts >= 4 and dels >= 3, "orders followed the strategy during the run: %d POST, %d DELETE" % (posts, dels))
+    ex.stop()
+
+
+if __name__ == "__main__":
+    live = sys.argv[1] if len(sys.argv) > 1 else None
+    test_signing()
+    test_guards()
+    test_flow()
+    test_pacing()
+    test_cancel_before_place()
+    test_segment_end_and_priority()
+    test_signals()
+    test_errors()
+    test_limits_and_secrets()
+    test_hft_live_mirror(live)
+    print("test_bridge: " + ("all checks passed" if not fails else "%d FAILED" % fails))
+    sys.exit(1 if fails else 0)

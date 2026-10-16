@@ -18,19 +18,23 @@
 //
 // Exit codes: 0 clean, 1 usage or I/O, 4 integrity failure (book differs from the
 // model, or the session could not get flat), 5 no segment ever started.
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
 
 #include <sys/stat.h>
 
+#include <cerrno>
 #include <chrono>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -110,14 +114,99 @@ struct EventLog {
   }
 };
 
+// Mirror of the order flow for the order-entry bridge, one JSON line per frame, to an inherited pipe (--orders-fd).
+// The tap runs inside the tick-to-trade path: it only formats into a fixed buffer. The write happens afterwards, in
+// flush(), and never blocks. If the reader is gone or falls a megabyte behind, the mirror is declared lost and the pipe
+// closed; the bridge sees end of input and cancels everything it has working, and the supervisor restarts the trio.
+struct OrderOut {
+  static constexpr std::size_t kCap = 1u << 20;
+  int fd = -1;
+  bool lost = false;
+  const char* lost_why = "";
+  std::size_t len = 0;
+  std::uint64_t lines = 0;
+  std::unique_ptr<char[]> buf{new char[kCap]};
+
+  void line(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
+    if (fd < 0) return;
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = std::vsnprintf(buf.get() + len, kCap - len, fmt, ap);
+    va_end(ap);
+    if (n < 0 || static_cast<std::size_t>(n) >= kCap - len) {
+      lose("overflow");
+      return;
+    }
+    len += static_cast<std::size_t>(n);
+    ++lines;
+  }
+  void lose(const char* why) {
+    if (fd >= 0) ::close(fd);
+    fd = -1;
+    lost = true;
+    lost_why = why;
+    len = 0;
+  }
+  // Writes what the pipe takes now. wait_ms > 0: keep trying that long (used once, at exit).
+  void flush(int wait_ms = 0) {
+    const auto t0 = std::chrono::steady_clock::now();
+    while (fd >= 0 && len > 0) {
+      const ssize_t w = ::write(fd, buf.get(), len);
+      if (w > 0) {
+        std::memmove(buf.get(), buf.get() + w, len - static_cast<std::size_t>(w));
+        len -= static_cast<std::size_t>(w);
+        continue;
+      }
+      if (w < 0 && errno == EINTR) continue;
+      if (w < 0 && errno == EAGAIN) {
+        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        if (wait_ms <= 0 || waited >= wait_ms) return;
+        pollfd p{fd, POLLOUT, 0};
+        ::poll(&p, 1, 20);
+        continue;
+      }
+      lose("write_failed");
+      return;
+    }
+  }
+};
+
+void order_tap(void* ctx, std::uint64_t seg, const std::uint8_t* d, std::size_t n) noexcept {
+  auto* o = static_cast<OrderOut*>(ctx);
+  gw::ClientMsg m;
+  if (n < 2 || !gw::decode_client(d + 2, n - 2, m)) return;
+  const unsigned long long sg = seg, id = m.id;
+  if (m.kind == gw::kMsgNew)
+    o->line("{\"t\":\"new\",\"seg\":%llu,\"id\":%llu,\"side\":\"%s\",\"px\":%lld,\"qty\":%lld,\"type\":%u}\n", sg, id,
+            m.side == core::Side::Buy ? "buy" : "sell", static_cast<long long>(m.price.raw()), static_cast<long long>(m.qty),
+            static_cast<unsigned>(m.otype));
+  else if (m.kind == gw::kMsgReplace)
+    o->line("{\"t\":\"rep\",\"seg\":%llu,\"id\":%llu,\"px\":%lld,\"qty\":%lld}\n", sg, id, static_cast<long long>(m.price.raw()),
+            static_cast<long long>(m.qty));
+  else if (m.kind == gw::kMsgCancel)
+    o->line("{\"t\":\"can\",\"seg\":%llu,\"id\":%llu}\n", sg, id);
+}
+
 struct Observer {
-  std::uint64_t segments = 0, stale = 0, resnaps = 0, sums = 0, bad_lines = 0, regress = 0;
-  bool halted = false;
+  std::uint64_t segments = 0, stale = 0, resnaps = 0, sums = 0, mirrored = 0, bad_lines = 0, regress = 0;
+  bool halted = false, lost_logged = false;
 };
 
 std::string num(const char* k, unsigned long long v) { return std::string("\"") + k + "\":" + std::to_string(v); }
 
-void observe(EventLog& log, Observer& o, const feed::LiveSession& s, double mono_s) {
+void observe(EventLog& log, Observer& o, const feed::LiveSession& s, double mono_s, OrderOut* oo = nullptr) {
+  if (oo) {
+    while (o.mirrored < s.summaries().size()) {
+      const feed::SegmentSummary& sm = s.summaries()[o.mirrored++];
+      oo->line("{\"t\":\"end\",\"seg\":%llu,\"reason\":\"%s\"}\n", static_cast<unsigned long long>(o.mirrored),
+               feed::end_reason_name(sm.reason));
+    }
+    oo->flush();
+    if (oo->lost && !o.lost_logged) {
+      o.lost_logged = true;
+      log.emit("orders_out_lost", mono_s, std::string("\"why\":\"") + oo->lost_why + "\"");
+    }
+  }
   if (!log.ok()) return;
   const feed::LiveStats& st = s.stats();
   if (st.segments != o.segments) {
@@ -206,6 +295,7 @@ int main(int argc, char** argv) {
   double metrics_s = 5.0;
   double pace = 0.0, report_s = 10.0, max_seconds = 0.0;
   bool spin = false;
+  int orders_fd = -1;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     auto num = [&](double& v) {
@@ -229,10 +319,11 @@ int main(int argc, char** argv) {
     else if (a == "--log" && i + 1 < argc) log_path = argv[++i];
     else if (a == "--metrics" && i + 1 < argc) metrics_path = argv[++i];
     else if (a == "--metrics-s" && num(v) && v > 0) metrics_s = v;
+    else if (a == "--orders-fd" && num(v) && v >= 3 && v < 1024) orders_fd = static_cast<int>(v);
     else {
       std::fprintf(stderr,
                    "usage: hft_live [--from capture.l2 [--pace X]] [--stale-ms N] [--rtt-us N] [--lots N] [--levels N]\n"
-                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S]\n"
+                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N]\n"
                    "reads capture-format lines from stdin unless --from is given\n");
       return 1;
     }
@@ -245,6 +336,19 @@ int main(int argc, char** argv) {
   sigaction(SIGTERM, &sa, nullptr);
   signal(SIGPIPE, SIG_IGN);
 
+  OrderOut oout;
+  if (orders_fd >= 0) {
+    const int fl = fcntl(orders_fd, F_GETFL);
+    if (fl < 0 || fcntl(orders_fd, F_SETFL, fl | O_NONBLOCK) < 0) {
+      std::fprintf(stderr, "--orders-fd %d is not an open descriptor\n", orders_fd);
+      return 1;
+    }
+    oout.fd = orders_fd;
+    lc.order_tap = order_tap;
+    lc.order_tap_ctx = &oout;
+    oout.line("{\"t\":\"hello\",\"v\":1,\"px_scale\":10000,\"qty_scale\":100000}\n");
+  }
+  OrderOut* oo = orders_fd >= 0 ? &oout : nullptr;
   feed::LiveSession session(lc);
   const std::uint64_t t_start = mono_ns();
   auto now_ns = [&] { return mono_ns() - t_start; };
@@ -263,7 +367,7 @@ int main(int argc, char** argv) {
   elog.emit("start", 0.0, std::string("\"mode\":\"") + (from.empty() ? "pipe" : "file") + "\"," + num("stale_ms", lc.stale_ns / 1000000));
   auto after_line = [&] {
     if (session.take_resnap()) touch(resnap_file);
-    observe(elog, obs, session, secs());
+    observe(elog, obs, session, secs(), oo);
   };
   auto periodic = [&] {
     if (secs() >= next_report) {
@@ -345,7 +449,12 @@ int main(int argc, char** argv) {
     else session.shutdown(last_now);
   }
 
-  observe(elog, obs, session, secs());
+  observe(elog, obs, session, secs(), oo);
+  oout.flush(2000);  // the final cancels must reach the bridge before the pipe closes
+  if (oout.fd >= 0 && oout.len > 0) {  // the reader did not take them in two seconds: say so, the bridge's picture is incomplete
+    oout.lose("unflushed_at_exit");
+    if (!obs.lost_logged) elog.emit("orders_out_lost", secs(), std::string("\"why\":\"") + oout.lost_why + "\"");
+  }
   write_metrics(metrics_path, session, secs());
   elog.emit("exit", secs(), std::string("\"cause\":\"") + (g_stop ? "signal" : "input_ended") + "\"");
   const feed::LiveStats& st = session.stats();

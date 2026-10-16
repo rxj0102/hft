@@ -50,6 +50,10 @@
 
 namespace hft::feed {
 
+// Called for every frame the gateway sends (new, replace, cancel), after the paper venue has it.
+// Must not block or allocate; it runs inside the tick-to-trade path. `seg` is the segment number (1-based).
+using OrderTap = void (*)(void* ctx, std::uint64_t seg, const std::uint8_t* frame, std::size_t n) noexcept;
+
 struct LiveConfig {
   L2Config l2;
   std::uint64_t venue_rtt_ns = 50'000;
@@ -60,6 +64,8 @@ struct LiveConfig {
   std::size_t arena_bytes = 256u << 20;       // working memory per segment (lazily committed)
   bool timed = false;                         // time each line with the steady clock (parse + convert + pipeline)
   std::uint32_t max_flatten_rounds = 64;      // cancel/answer rounds before giving up and killing
+  OrderTap order_tap = nullptr;               // mirror of the order flow for an order-entry bridge (nullptr: none)
+  void* order_tap_ctx = nullptr;
 };
 
 enum class EndReason : std::uint8_t { Marker, NewSnapshot, Window, Stale, Integrity, Kill, Shutdown, kCount };
@@ -240,7 +246,17 @@ class LiveSession {
   L2Converter* converter_for_test() noexcept { return seg_ ? &seg_->conv : nullptr; }
 
  private:
-  using Pipe = t2t::Pipeline<detail::HashSend>;
+  struct LiveSend {
+    detail::HashSend h;
+    OrderTap tap;
+    void* ctx;
+    std::uint64_t seg;
+    void operator()(const std::uint8_t* d, std::size_t n) noexcept {
+      h(d, n);
+      if (tap) tap(ctx, seg, d, n);
+    }
+  };
+  using Pipe = t2t::Pipeline<LiveSend>;
   struct Seg;
   struct Sink {
     Seg* s;
@@ -299,7 +315,9 @@ class LiveSession {
     pc.live_at_start = true;
     s.region = core::Region::create(cfg_.arena_bytes, core::RegionOptions{false, false, true, -1});
     s.arena = core::Arena(s.region);
-    s.pipe.reset(new Pipe(detail::HashSend{&s.hash, &s.frames, &s.bytes, &s.venue}, pc.mm));
+    s.pipe.reset(new Pipe(LiveSend{detail::HashSend{&s.hash, &s.frames, &s.bytes, &s.venue}, cfg_.order_tap, cfg_.order_tap_ctx,
+                                   st_.segments + 1},
+                          pc.mm));
     if (s.region.data() == nullptr || !s.pipe->init(s.arena, pc)) {
       ++st_.init_failures;
       seg_.reset();

@@ -81,7 +81,7 @@ CMake presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fu
 
 A recorded Coinbase level-2 capture can be converted into the engine's ITCH-style packets and replayed through the unchanged `Pipeline` (`hft_replay`, see LIVE_FEED.md). This is offline tooling: the capture is a Python script, the conversion allocates freely, and nothing in `feed/` is on the hot path.
 
-`feed::LiveSession` (`feed/live.hpp`, tool `hft_live`) runs the same chain one line at a time with the time passed in, and owns the guards a live process needs: stale-feed detection, reconnect and window-exit handling, the periodic comparison with the independent model, kill and shutdown. Every way of losing trust in the feed ends in one flatten routine that cancels through the gateway without giving the strategy a look. See LIVE_PAPER.md. `scripts/supervise.py` keeps the capture and `hft_live` running and `hft_live` emits a JSON event log and metrics (OPERATIONS.md).
+`feed::LiveSession` (`feed/live.hpp`, tool `hft_live`) runs the same chain one line at a time with the time passed in, and owns the guards a live process needs: stale-feed detection, reconnect and window-exit handling, the periodic comparison with the independent model, kill and shutdown. Every way of losing trust in the feed ends in one flatten routine that cancels through the gateway without giving the strategy a look. See LIVE_PAPER.md. `scripts/supervise.py` keeps the capture and `hft_live` running and `hft_live` emits a JSON event log and metrics (OPERATIONS.md). With `--bridge`, `hft_live` also mirrors its orders over a pipe to `scripts/order_bridge.py`, which keeps a Coinbase sandbox account in step (SANDBOX.md).
 
 ## Not built
 

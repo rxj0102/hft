@@ -109,6 +109,16 @@ Evidence is `scripts/drill.py` against a local fake feed unless stated. The pape
 | restarts in a loop | give up after 5 in 300 s | `giving_up`, exit 3 |
 | a child ignores SIGTERM | SIGKILL after the grace period | `live_ignored_sigterm` |
 | capture gone, `hft_live` does not follow | killed after 5 s | `live_did_not_follow_capture` |
+| bridge killed (kill -9) | orders keep resting until the next bridge starts and cancels all (about 0.4 s in the drill) | `bridge_exited`/`pair_stopped`; next `cancel_all` with `cancelled` > 0 |
+| `hft_live` killed (kill -9) with the bridge up | bridge sees end of input, cancels all, exits 0; trio restarts | `pair_stopped` bridge rc 0, `exit_flat` |
+| bridge hung | watchdog (bridge metrics) SIGKILLs it; next bridge cancels what it left | `watchdog_target` who=bridge |
+| exchange unreachable or 5xx | bridge counts errors with backoff, exits 1 after `--max-errors`; supervisor restarts the trio | `http_5xx`/`net_error`, `fatal` code 1 |
+| 429 from the exchange | pause and back off, no stream of retries | `rate_limited` |
+| credentials refused, or clock off by more than 20 s | exit 4, not restarted, nothing placed | `fatal_halt` who=bridge |
+| reply to an order lost | the order is cancelled by client_oid | `place_unknown` |
+| exchange fills or drops a resting order | noticed at the next sync, wanted order placed again | `order_vanished` |
+| supervisor and bridge both gone while the exchange is down | orders stay resting | not handled |
+| the real sandbox behaving differently from the fake exchange | unknown | not tested |
 | supervisor itself dies | nothing restarts it | not handled |
 | host reboot | nothing restarts it | not handled |
 | orders left working at a real exchange after a kill -9 | not modelled (paper venue) | not handled |

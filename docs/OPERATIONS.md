@@ -65,6 +65,10 @@ Where the drills show orders being taken down, they also check `open_before_flat
 
 A run on the real Coinbase feed through the supervisor: kill -9 of `hft_live` at 15 s (restart after 0.5 s), SIGTERM at 33 s (segment ended `kill`, 2 orders taken down, switch latched, exit 0).
 
+## With the order bridge
+
+`supervise.py --bridge` adds a third process (docs/SANDBOX.md). `bridge.jsonl` has its events (`bridge_start`, `clock_skew`, `cancel_all`, `start_flat`, `order_rejected`, `rate_limited`, `http_5xx`, `net_error`, `order_vanished`, `stray_order`, `fatal`, `exit_flat`, `exit`), `bridge.prom` its metrics (`hft_bridge_*`). If any of the three dies the trio restarts; the new bridge cancels everything first. Bridge exit 2 or 4 is fatal for the supervisor (exit 4). The extra drills: bridge_flow, kill_bridge, kill_live_bridge, exchange_down, bad_credentials, bridge_hang, all against `scripts/fake_exchange.py`.
+
 ## What this does not show
 
 - A paper venue lives inside `hft_live`. After a SIGKILL its state is gone with the process. Against a real exchange the orders would stay working unless the exchange cancels on disconnect or a restarted process cancels what it finds. The drills cannot test that, and nothing here claims it is handled. It is the first thing real order entry must solve.

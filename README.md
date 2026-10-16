@@ -22,7 +22,9 @@ The range is run to run on the same VM, hours apart (128 ns early in the session
 
 `hft_live` runs the same pipeline on the live public feed in real time against that paper venue (`capture_l2.py --out - | hft_live`): it pulls every quote when the connection drops, the price leaves the grid or the feed goes silent for 3 s, checks the book against the independent model as it runs, and on Ctrl-C or SIGTERM latches the kill switch and cancels everything. Fed the same lines, it puts the same bytes on the wire as the offline replay. At real market spacing, one update message costs about 60-65 us end to end in this tool (JSON parsing included), against about 17-18 us when the same messages are replayed back to back. No order leaves the machine. See [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md).
 
-`scripts/supervise.py` keeps the capture and `hft_live` running (restart with backoff, crash-loop limit, a watchdog on the metrics file, SIGTERM as the kill path, no restart after an integrity verdict), and `hft_live` writes a JSON event log and Prometheus metrics. `scripts/drill.py` injects eleven faults (connection drop, silence, kill -9 of either process, a hang, SIGTERM, a crash loop, an integrity exit and others) against a local fake feed and checks the outcome. See [docs/OPERATIONS.md](docs/OPERATIONS.md). Everything runs against the paper venue; what a real exchange does with orders left working after a kill -9 is not shown.
+`scripts/supervise.py` keeps the capture and `hft_live` running (restart with backoff, crash-loop limit, a watchdog on the metrics file, SIGTERM as the kill path, no restart after an integrity verdict), and `hft_live` writes a JSON event log and Prometheus metrics. `scripts/drill.py` injects eleven faults (connection drop, silence, kill -9 of either process, a hang, SIGTERM, a crash loop, an integrity exit and others) against a local fake feed and checks the outcome. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+`scripts/order_bridge.py` mirrors the strategy's orders to the Coinbase Exchange sandbox over signed REST (post-only, paced under the rate limit, coalesced, cancel-all at start and exit, sandbox URL only, keys from environment variables only). It is a mirror, not a closed loop: the exchange's reports do not reach the strategy. It has been tested against a local fake exchange only; no sandbox key was available. See [docs/SANDBOX.md](docs/SANDBOX.md). Everything runs against the paper venue; what a real exchange does with orders left working after a kill -9 is not shown.
 
 ## What is in the box
 
@@ -52,6 +54,7 @@ Presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fuzz`. R
 | [docs/LIVE_FEED.md](docs/LIVE_FEED.md) | capture, convert and replay real market data; what is proven and what is not |
 | [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md) | the live paper session: guards, drills, real-feed runs, limits |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | logs, metrics, supervisor, fault drills, what they do not show |
+| [docs/SANDBOX.md](docs/SANDBOX.md) | sandbox order entry (mirror): rules, how to run it with your own key, what was and was not tested |
 | [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | measured budget, method, noise, how to reproduce |
 | [docs/FAILURE_MODES.md](docs/FAILURE_MODES.md) | what fails, what the engine does, what proves it |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | startup checks, alarms, kill switch, tooling triage |

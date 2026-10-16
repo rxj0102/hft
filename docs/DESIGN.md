@@ -425,3 +425,7 @@ Honest limits: see LIVE_PAPER.md. Biggest: a simulated venue that never fills, r
 ## 17. Phase 11: operations
 
 Full write-up in OPERATIONS.md. Built: event log and metrics in `hft_live`, `scripts/supervise.py`, `scripts/drill.py`, ADR 24. Events are derived in the tool from changes in the session's counters, so the session still knows nothing about logging. The watchdog watches a file the main loop refreshes, not the feed, so a quiet market is not a hang. Limits: a script is not a service manager, and the paper venue cannot show what a real exchange does after a kill -9.
+
+## 18. Phase 12: sandbox order entry
+
+See SANDBOX.md and ADR 25. The tick-to-trade path gains one nullable function-pointer call per sent frame; everything else (REST, signing, pacing, reconciliation) is in a separate process fed by a pipe. The design choice is the mirror: decisions stay deterministic against the paper venue, the exchange follows. What it gives up is feedback from the exchange.
