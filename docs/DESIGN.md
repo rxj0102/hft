@@ -1,6 +1,8 @@
-# HFT Tick-to-Trade Engine: Design Document (Phase 0)
+# HFT Tick-to-Trade Engine: Design Document
 
-Status: draft for review. Language: C++20. Platform: Linux x86-64 (TSC, hugepages, perf).
+This is the phase-by-phase design log. Sections 1-9 are the Phase 0 plan and were not rewritten: the pipeline as built is single-threaded run-to-completion, not SPSC-linked stages, and FIX 4.4 was not built. For the as-built picture read ARCHITECTURE.md; later sections hold the measurements.
+
+Phase 0 status: draft for review. Language: C++20. Platform: Linux x86-64 (TSC, hugepages, perf).
 
 ## 1. Goals and non-goals
 

@@ -1,17 +1,56 @@
 # hft
 
-Production-style tick-to-trade engine in C++20. Built in phase gates; see docs/DESIGN.md.
+A tick-to-trade engine in C++20, built in phase gates with measurement at every step: ITCH-style market data in, order book, a market-making strategy, pre-trade risk, an OMS and an order-entry gateway, with a matching-engine exchange simulator and a queue-aware backtester around it.
+
+It runs against a synthetic exchange. There is no live connectivity, no NIC driver and no deployable trading binary. Read "Limits" before quoting any number.
+
+## Measured latency
+
+Packet bytes in to reaction frames staged, hot caches, shared 2-vCPU VM at 2.8 GHz, synthetic market (7233 of 311k packets caused an order):
+
+| | p50 | p99 | p99.9 |
+|---|---|---|---|
+| tick-to-trade | 128-160 ns | 230-380 ns | 450-560 ns |
+| tick-to-decision (no order) | about 72 ns | about 150 ns | 370 ns |
+| tick-to-trade, cold L1/L2 | about 0.97 us | 2.1-2.9 us | |
+
+The range is run to run on the same VM, hours apart (128 ns early in the session, about 160 ns later, both gcc builds equal). A shorter 100,000-request run gave 248 ns because it has only 2414 order ticks and a cold start; use 300,000 requests or more. Per-stage budget, cache analysis and method are in [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md). Cache and branch figures come from a simulator because the sandbox has no hardware counters, and are labelled that way.
+
+## What is in the box
+
+- Hot path with no heap, exceptions, RTTI, virtual calls, locks or syscalls (compiled with `-fno-exceptions -fno-rtti`; allocation-free by test; page-fault-free by bench check).
+- Byte-exact replay oracle: a backtest is recorded and replayed through the production pipeline; the wire bytes must match before any latency number is printed.
+- Order book, A/B feed arbitration with gap handling and snapshot recovery, OMS with an eight-state machine, pre-trade risk with a latched kill switch, length-prefixed order-entry protocol.
+- Matching engine and exchange simulator, backtester with queue-position fills validated against the engine.
+- Six libFuzzer targets, mutation checks at every phase, ASan/UBSan/TSan, gcc and clang, a callgrind instruction-count regression gate.
 
 ## Build
 
 ```
 cmake --preset release && cmake --build --preset release
-ctest --preset release
-./build/release/bench/bench_harness
+ctest --test-dir build/release --output-on-failure -j2
+./build/release/bench/bench_t2t --requests 300000
 ```
 
-Other presets: relwithdebinfo, asan, ubsan, tsan.
+Presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fuzz`. Requires CMake 3.25+, gcc 13 or clang 18. `test_sim_gate` takes about 4 minutes.
 
-## Status
+## Documentation
 
-Phase 0 (skeleton, clock, histogram, harness). No benchmark claims are made in this README; run the harness to produce numbers for your machine.
+| | |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | as-built architecture and module map |
+| [docs/DESIGN.md](docs/DESIGN.md) | phase-by-phase design log with measurements |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | decision records, including rejected options |
+| [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | measured budget, method, noise, how to reproduce |
+| [docs/FAILURE_MODES.md](docs/FAILURE_MODES.md) | what fails, what the engine does, what proves it |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | startup checks, alarms, kill switch, tooling triage |
+| [CHANGELOG.md](CHANGELOG.md) | per-phase changes |
+
+## Limits
+
+- Synthetic data only. The mechanics are tested; the returns and the market are not real.
+- Timings come from a shared VM with hypervisor stalls: p99.9 and max are mostly noise from the machine. Bare-metal confirmation has not been done.
+- The measured path excludes the NIC, kernel and exchange.
+- Not built: FIX 4.4 parser, AVX2, MSan, AF_XDP/DPDK ingress, GoogleTest/vcpkg wiring, multi-instrument operation.
+- The GitHub Actions workflow has not been run on GitHub; its commands were run locally.
+- No automatic flatten after a kill; that is a human decision (see the runbook).

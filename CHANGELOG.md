@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
+
+### Phase 8
+- Documentation and release: README (measured numbers, limits), docs/ARCHITECTURE.md (as built), docs/DECISIONS.md plus 14 records in docs/adr (including rejected options and one correction the fuzzer forced), docs/LATENCY_BUDGET.md, docs/FAILURE_MODES.md, docs/RUNBOOK.md. DESIGN.md now says up front that sections 1-9 are the Phase 0 plan and where the build differs (single thread, no FIX).
+- No code changes in this phase.
+- Deferred (not built): FIX 4.4 parser, AVX2, MSan, AF_XDP/DPDK ingress, GoogleTest/vcpkg wiring, bare-metal latency confirmation, event-relevance filter for the strategy.
+
 
 ### Phase 7
 - Tick-to-trade pipeline (include/hft/t2t/pipeline.hpp): feed packet -> MdHandler (A/B arbitration, decode) -> OrderBook -> MarketMaker -> Gateway (risk, OMS, encode) -> send, as one object with no heap, exceptions, RTTI, virtual calls, locks or syscalls on the path (compiled with -fno-exceptions -fno-rtti in hft_hotpath_check). The strategy now runs on either TapeBook or the production book through book::BookView. When the feed handler loses the book, the pipeline pulls quotes with Gateway::cancel_all (counted as pulled_cancels, not the kill switch) and resumes by itself after a snapshot.
