@@ -187,9 +187,87 @@ void order_tap(void* ctx, std::uint64_t seg, const std::uint8_t* d, std::size_t 
     o->line("{\"t\":\"can\",\"seg\":%llu,\"id\":%llu}\n", sg, id);
 }
 
+// ---- reports from the exchange (--exchange-fd) -------------------------------------------------------------------
+// One JSON line per report, written by scripts/order_bridge.py --loop:
+//   {"t":"rep","seg":S,"rt":"accepted|rejected|fill|canceled|replaced|cancel_rejected|replace_rejected","id":I,
+//    "px":P,"qty":Q,"leaves":L, ...}   (other keys, such as side and reason, are for people and are ignored)
+// px is scaled by 1e4, qty and leaves are lots. Anything that does not parse is counted and dropped.
+bool field_i64(std::string_view s, const char* key, std::int64_t& out) {
+  const std::string k = std::string("\"") + key + "\":";
+  const std::size_t p = s.find(k);
+  if (p == std::string_view::npos) return false;
+  std::size_t i = p + k.size();
+  while (i < s.size() && s[i] == ' ') ++i;
+  bool neg = false;
+  if (i < s.size() && s[i] == '-') {
+    neg = true;
+    ++i;
+  }
+  if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;
+  std::int64_t v = 0;
+  int digits = 0;
+  while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+    if (++digits > 18) return false;
+    v = v * 10 + (s[i++] - '0');
+  }
+  out = neg ? -v : v;
+  return true;
+}
+
+bool field_str(std::string_view s, const char* key, std::string_view& out) {
+  const std::string k = std::string("\"") + key + "\":";
+  const std::size_t p = s.find(k);
+  if (p == std::string_view::npos) return false;
+  std::size_t b = p + k.size();
+  while (b < s.size() && s[b] == ' ') ++b;
+  if (b >= s.size() || s[b] != '"') return false;
+  ++b;
+  const std::size_t e = s.find('"', b);
+  if (e == std::string_view::npos) return false;
+  out = s.substr(b, e - b);
+  return true;
+}
+
+bool parse_report(std::string_view line, std::uint64_t& seg, sim::Report& r) {
+  std::string_view t;
+  if (!field_str(line, "t", t) || t != "rep") return false;
+  std::int64_t sg = 0, id = 0, px = 0, qty = 0, leaves = 0;
+  if (!field_i64(line, "seg", sg) || !field_i64(line, "id", id) || sg <= 0 || id <= 0) return false;
+  std::string_view rt;
+  if (!field_str(line, "rt", rt)) return false;
+  r = sim::Report{};
+  if (rt == "accepted") r.type = sim::ReportType::Accepted;
+  else if (rt == "rejected") r.type = sim::ReportType::Rejected;
+  else if (rt == "fill") r.type = sim::ReportType::Fill;
+  else if (rt == "canceled") r.type = sim::ReportType::Canceled;
+  else if (rt == "replaced") r.type = sim::ReportType::Replaced;
+  else if (rt == "cancel_rejected") r.type = sim::ReportType::CancelRejected;
+  else if (rt == "replace_rejected") r.type = sim::ReportType::ReplaceRejected;
+  else return false;
+  field_i64(line, "px", px);
+  field_i64(line, "qty", qty);
+  field_i64(line, "leaves", leaves);
+  if (px < 0 || qty < 0 || leaves < 0) return false;
+  r.id = static_cast<core::OrderId>(id);
+  r.price = core::Price::from_raw(px);
+  r.qty = qty;
+  r.leaves = leaves;
+  // The OMS keeps the side, the reason and the liquidity flag of its own record; what the report says about them is
+  // informational (the bridge sends them for people reading its output) and is not read here.
+  seg = static_cast<std::uint64_t>(sg);
+  return true;
+}
+
+struct ReportIn {
+  int fd = -1;
+  bool lost = false;
+  std::string carry;
+  std::uint64_t lines = 0, bad = 0;
+};
+
 struct Observer {
   std::uint64_t segments = 0, stale = 0, resnaps = 0, sums = 0, mirrored = 0, bad_lines = 0, regress = 0;
-  bool halted = false, lost_logged = false;
+  bool halted = false, lost_logged = false, exchange_lost_logged = false;
 };
 
 std::string num(const char* k, unsigned long long v) { return std::string("\"") + k + "\":" + std::to_string(v); }
@@ -226,7 +304,7 @@ void observe(EventLog& log, Observer& o, const feed::LiveSession& s, double mono
     std::string b = std::string("\"reason\":\"") + feed::end_reason_name(sm.reason) + "\"," + num("segment", o.sums) + "," +
                     num("packets", sm.packets) + "," + num("flat", sm.flat) + "," + num("kill_latched", sm.kill_latched) + "," +
                     num("book_matched_model", sm.book_matched_model) + "," + num("flatten_rounds", sm.flatten_rounds) + "," +
-                    num("flatten_sim_ns", sm.flatten_sim_ns) + "," + num("open_before_flatten", sm.open_before_flatten);
+                    num("flatten_sim_ns", sm.flatten_sim_ns) + "," + num("open_before_flatten", sm.open_before_flatten) + ",\"position_lots\":" + std::to_string(sm.net_position_lots) + "," + num("fills", sm.fills);
     log.emit("segment_end", mono_s, b);
   }
   if (st.time_regressions != o.regress) {
@@ -257,6 +335,7 @@ void write_metrics(const std::string& path, const feed::LiveSession& s, double u
   c("hft_live_quoting", "1 while a segment is live and quotes may be out.", s.active() ? 1 : 0, "gauge");
   c("hft_live_halted", "1 once the session has halted for good.", s.halted() ? 1 : 0, "gauge");
   c("hft_live_open_orders", "Orders working now (OMS view).", s.open_orders(), "gauge");
+  std::fprintf(f, "# HELP hft_live_position_lots Net filled quantity of the running segment, in lots.\n# TYPE hft_live_position_lots gauge\nhft_live_position_lots %lld\n", static_cast<long long>(s.position_lots()));
   c("hft_live_lines_total", "Input lines.", st.lines);
   c("hft_live_feed_messages_total", "Feed messages parsed.", st.messages);
   c("hft_live_feed_bad_total", "Damaged feed messages.", st.bad);
@@ -270,6 +349,10 @@ void write_metrics(const std::string& path, const feed::LiveSession& s, double u
   c("hft_live_orders_new_total", "New orders sent.", st.sent_new + (g ? g->sent_new : 0));
   c("hft_live_orders_replace_total", "Replaces sent.", st.sent_replace + (g ? g->sent_replace : 0));
   c("hft_live_orders_cancel_total", "Cancels sent.", st.sent_cancel + (g ? g->sent_cancel : 0));
+  c("hft_live_fills_total", "Fills in finished segments.", st.fills);
+  c("hft_live_exchange_reports_total", "Reports from the exchange applied.", st.exchange_reports);
+  c("hft_live_exchange_reports_stale_total", "Reports for a segment that no longer exists.", st.reports_stale);
+  c("hft_live_snapshots_dropped_ending_total", "Snapshots that arrived while a segment was still being flattened.", st.snapshots_dropped_ending);
   c("hft_live_risk_rejects_total", "Orders refused by risk.", st.risk_rejects + (g ? g->risk_rejects : 0));
   std::fprintf(f, "# HELP hft_live_segments_ended_total Segments ended, by reason.\n# TYPE hft_live_segments_ended_total counter\n");
   for (int r = 0; r < static_cast<int>(feed::EndReason::kCount); ++r)
@@ -295,7 +378,7 @@ int main(int argc, char** argv) {
   double metrics_s = 5.0;
   double pace = 0.0, report_s = 10.0, max_seconds = 0.0;
   bool spin = false;
-  int orders_fd = -1;
+  int orders_fd = -1, exchange_fd = -1;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     auto num = [&](double& v) {
@@ -320,10 +403,12 @@ int main(int argc, char** argv) {
     else if (a == "--metrics" && i + 1 < argc) metrics_path = argv[++i];
     else if (a == "--metrics-s" && num(v) && v > 0) metrics_s = v;
     else if (a == "--orders-fd" && num(v) && v >= 3 && v < 1024) orders_fd = static_cast<int>(v);
+    else if (a == "--exchange-fd" && num(v) && v >= 3 && v < 1024) exchange_fd = static_cast<int>(v);
+    else if (a == "--flatten-timeout-s" && num(v) && v > 0) lc.flatten_timeout_ns = static_cast<std::uint64_t>(v * 1e9);
     else {
       std::fprintf(stderr,
                    "usage: hft_live [--from capture.l2 [--pace X]] [--stale-ms N] [--rtt-us N] [--lots N] [--levels N]\n"
-                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N]\n"
+                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S]]\n"
                    "reads capture-format lines from stdin unless --from is given\n");
       return 1;
     }
@@ -349,6 +434,20 @@ int main(int argc, char** argv) {
     oout.line("{\"t\":\"hello\",\"v\":1,\"px_scale\":10000,\"qty_scale\":100000}\n");
   }
   OrderOut* oo = orders_fd >= 0 ? &oout : nullptr;
+  ReportIn rin;
+  if (exchange_fd >= 0) {
+    if (orders_fd < 0 || !from.empty()) {
+      std::fprintf(stderr, "--exchange-fd needs --orders-fd and a live pipe (not --from)\n");
+      return 1;
+    }
+    const int fl = fcntl(exchange_fd, F_GETFL);
+    if (fl < 0 || fcntl(exchange_fd, F_SETFL, fl | O_NONBLOCK) < 0) {
+      std::fprintf(stderr, "--exchange-fd %d is not an open descriptor\n", exchange_fd);
+      return 1;
+    }
+    rin.fd = exchange_fd;
+    lc.external_venue = true;
+  }
   feed::LiveSession session(lc);
   const std::uint64_t t_start = mono_ns();
   auto now_ns = [&] { return mono_ns() - t_start; };
@@ -368,6 +467,38 @@ int main(int argc, char** argv) {
   auto after_line = [&] {
     if (session.take_resnap()) touch(resnap_file);
     observe(elog, obs, session, secs(), oo);
+  };
+  bool exchange_lost = false, lost_handled = false;
+  // Reads whatever reports are waiting and hands them to the session. A closed pipe means the bridge is gone.
+  auto pump_reports = [&] {
+    if (rin.fd < 0) return;
+    char b[1 << 14];
+    for (;;) {
+      const ssize_t n = ::read(rin.fd, b, sizeof b);
+      if (n > 0) {
+        rin.carry.append(b, static_cast<std::size_t>(n));
+        std::size_t pos = 0, nl;
+        while ((nl = rin.carry.find('\n', pos)) != std::string::npos) {
+          ++rin.lines;
+          std::uint64_t seg = 0;
+          sim::Report r;
+          if (parse_report(std::string_view(rin.carry).substr(pos, nl - pos), seg, r)) session.on_exchange_report(seg, r, now_ns());
+          else ++rin.bad;
+          pos = nl + 1;
+        }
+        rin.carry.erase(0, pos);
+        if (rin.carry.size() > (1u << 16)) rin.carry.clear();
+        continue;
+      }
+      if (n == 0) {
+        ::close(rin.fd);
+        rin.fd = -1;
+        rin.lost = true;
+      } else if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
   };
   auto periodic = [&] {
     if (secs() >= next_report) {
@@ -419,10 +550,11 @@ int main(int argc, char** argv) {
     char buf[1 << 16];
     bool eof = false;
     while (!g_stop && !eof) {
-      pollfd p{0, POLLIN, 0};
-      const int r = ::poll(&p, 1, spin ? 0 : 1);  // --spin: never sleep, the way a real feed handler polls
+      pollfd p[2] = {{0, POLLIN, 0}, {rin.fd, POLLIN, 0}};  // a negative descriptor is ignored by poll
+      const int r = ::poll(p, 2, spin ? 0 : 1);  // --spin: never sleep, the way a real feed handler polls
       if (r < 0) continue;  // EINTR: the loop condition looks at g_stop
-      if (r > 0) {
+      if (p[1].revents || rin.fd >= 0) pump_reports();
+      if (p[0].revents) {
         const ssize_t n = ::read(0, buf, sizeof buf);
         if (n == 0) {
           eof = true;
@@ -437,16 +569,32 @@ int main(int argc, char** argv) {
           carry.erase(0, pos);
           if (carry.size() > (1u << 22)) carry.clear();  // a "line" this long is not from our capture script
         }
-      } else {
+      } else if (r == 0 || session.busy()) {
         session.poll(now_ns());
         after_line();
       }
+      if (rin.lost && !lost_handled) {  // the bridge died: nobody will confirm anything; stop and say so
+        lost_handled = exchange_lost = true;
+        elog.emit("exchange_lost", secs());
+        break;
+      }
+      after_line();
       periodic();
       if (max_seconds > 0 && secs() >= max_seconds) break;
     }
     last_now = now_ns();
-    if (g_stop) session.kill(last_now);
+    if (g_stop || exchange_lost) session.kill(last_now);
     else session.shutdown(last_now);
+    // External venue: the segment is over only when the exchange has confirmed the cancels (or the timeout passed).
+    const double give_up = secs() + static_cast<double>(lc.flatten_timeout_ns) / 1e9 + 2.0;
+    while (session.busy() && secs() < give_up) {
+      pollfd q{rin.fd, POLLIN, 0};
+      ::poll(&q, 1, 2);
+      pump_reports();
+      session.poll(now_ns());
+      after_line();
+      oout.flush();
+    }
   }
 
   observe(elog, obs, session, secs(), oo);
@@ -489,6 +637,11 @@ int main(int argc, char** argv) {
               static_cast<unsigned long long>(lc.venue_rtt_ns / 1000), static_cast<unsigned long long>(st.acc),
               static_cast<unsigned long long>(st.rep), static_cast<unsigned long long>(st.canc),
               static_cast<unsigned long long>(st.rej_cross));
+  if (lc.external_venue)
+    std::printf("  exchange: %llu reports applied, %llu for a finished segment, %llu unparsable; %llu snapshots dropped while flattening, %llu feed messages ignored while flattening\n",
+                static_cast<unsigned long long>(st.exchange_reports), static_cast<unsigned long long>(st.reports_stale),
+                static_cast<unsigned long long>(rin.bad), static_cast<unsigned long long>(st.snapshots_dropped_ending),
+                static_cast<unsigned long long>(st.ignored_ending));
   std::printf("  flatten: %llu failures; worst case %llu rounds, %llu us of simulated venue time\n",
               static_cast<unsigned long long>(st.flatten_failures), static_cast<unsigned long long>(st.max_flatten_rounds),
               static_cast<unsigned long long>(st.max_flatten_sim_ns / 1000));
@@ -514,6 +667,7 @@ int main(int argc, char** argv) {
   }
   if (session.summaries().size() > 20) std::printf("  ... %zu more segments\n", session.summaries().size() - 20);
 
+  if (exchange_lost) return 6;  // restartable: a new bridge cancels whatever is left on the exchange
   if (st.check_failures || st.final_mismatches || st.flatten_failures || st.desyncs || st.book_errors) return 4;
   if (st.segments == 0) return 5;
   return 0;

@@ -434,11 +434,105 @@ async def drill_bridge_hang(feed, port):
     r.cleanup()
 
 
+# ---- closed loop: the exchange's reports drive the OMS ---------------------------------------------------------
+def loop_run(feed, port, ex, **kw):
+    env = {"HFT_CB_KEY": KEY, "HFT_CB_SECRET": SECRET, "HFT_CB_PASSPHRASE": PASS}
+    env.update(kw.pop("env", {}))
+    args = "--test-exchange --base-url %s --rate 20 --max-notional 100000 --max-errors 3 --sync-s 0.5" % ex.url
+    return Run(feed, port, extra=["--loop", "--bridge-args", args] + kw.pop("extra", []), env=env, **kw)
+
+
+def live_metric(r, name):
+    try:
+        for l in open(os.path.join(r.dir, "metrics.prom")):
+            if l.startswith(name + " "):
+                return float(l.split()[1])
+    except OSError:
+        pass
+    return None
+
+
+async def drill_loop_flow(feed, port):
+    ex = new_exchange()
+    r = loop_run(feed, port, ex)
+    check(await until(lambda: ex.open_orders(), 20), "orders rest on the exchange")
+    check(await until(lambda: (live_metric(r, "hft_live_exchange_reports_total") or 0) >= 2, 15), "and their acknowledgements reached hft_live (%s reports)" % live_metric(r, "hft_live_exchange_reports_total"))
+    # a reconnect: the segment ends only when the exchange has confirmed the cancels
+    feed.drop = True
+    await asyncio.sleep(0.4)
+    feed.drop = False
+    ok = await until(lambda: r.live_events("segment_end"), 20)
+    check(ok, "segment ended")
+    e = r.live_events("segment_end")[0]
+    check(e["flat"] == 1 and e["open_before_flatten"] > 0 and e["flatten_sim_ns"] > 1_000_000, "flat after real confirmations (%.0f ms), orders were out: %s" % (e["flatten_sim_ns"] / 1e6, e))
+    check(await until(lambda: len(r.live_events("segment_start")) >= 2 and ex.open_orders(), 20), "a new segment quotes again")
+    check(len(r.sup("pair_start")) == 1, "no process restart")
+    rc = await r.stop()
+    ends = r.live_events("segment_end")
+    check(rc == 0 and ends[-1]["reason"] == "kill" and ends[-1]["flat"] == 1 and ends[-1]["kill_latched"] == 1, "SIGTERM: kill path, flat after confirmations: %s" % ends[-1])
+    check(len(ex.open_orders()) == 0, "nothing left on the exchange")
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_loop_fill(feed, port):
+    ex = new_exchange()
+    r = loop_run(feed, port, ex)
+    await until(lambda: len(ex.open_orders()) >= 1, 20)
+    n0 = live_metric(r, "hft_live_exchange_reports_total") or 0
+    victim = ex.open_orders()[0]
+    check(ex.fill(victim["id"]), "the market trades through one of our orders (%s %s)" % (victim["side"], victim["price"]))
+    check(await until(lambda: (live_metric(r, "hft_live_exchange_reports_total") or 0) > n0, 15), "the fill report reached hft_live")
+    want = 5 if victim["side"] == "buy" else -5
+    check(await until(lambda: live_metric(r, "hft_live_position_lots") == want, 10), "and its position is %+d lots (metric says %s)" % (want, live_metric(r, "hft_live_position_lots")))
+    check(await until(lambda: len(r.sup("pair_start")) == 1 and not r.sup("pair_stopped"), 1), "no restart")
+    rc = await r.stop()
+    ends = r.live_events("segment_end")
+    check(rc == 0 and len(ex.open_orders()) == 0, "clean stop, no orders left")
+    check(ends[-1]["position_lots"] == want and ends[-1]["fills"] == 1, "the segment end records the position it ends with: %s" % {k: ends[-1][k] for k in ("flat", "position_lots", "fills")})
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_loop_exchange_slow(feed, port):
+    ex = new_exchange()
+    ex.latency = 0.4
+    r = loop_run(feed, port, ex, extra=["--watchdog-s", "20"])
+    check(await until(lambda: ex.open_orders(), 30), "orders rest on a slow exchange")
+    rc = await r.stop()
+    ends = r.live_events("segment_end")
+    check(rc == 0 and ends and ends[-1]["flat"] == 1, "SIGTERM with 0.4 s per request: still flat: %s" % (ends[-1:] ,))
+    check(ends[-1]["flatten_sim_ns"] > 400_000_000, "and the flatten took real time (%.0f ms)" % (ends[-1]["flatten_sim_ns"] / 1e6))
+    check(len(ex.open_orders()) == 0, "nothing left on the exchange")
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_loop_exchange_dead_at_stop(feed, port):
+    ex = new_exchange()
+    r = loop_run(feed, port, ex, extra=["--term-grace-s", "20"])
+    await until(lambda: ex.open_orders(), 20)
+    ex.mode = "down"
+    await asyncio.sleep(0.3)
+    t0 = time.monotonic()
+    rc = await r.stop()
+    ends = r.live_events("segment_end")
+    check(rc == 4 and r.sup("stop_not_flat"), "the supervisor does not call that a clean stop (exit %s)" % rc)
+    check(ends and ends[-1]["flat"] == 0, "the exchange is down, so hft_live cannot call itself flat: %s" % (ends[-1:],))
+    check(r.live_events("halted") or ends[-1]["kill_latched"] == 1, "and it stopped trading")
+    print("      stop took %.1f s" % (time.monotonic() - t0))
+    ex.mode = "ok"
+    ex.stop()
+    r.cleanup()
+
+
 DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill_kill_capture),
           ("kill_live", drill_kill_live), ("hang", drill_hang), ("sigterm", drill_sigterm), ("term_ignored", drill_term_ignored),
           ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity),
           ("bridge_flow", drill_bridge_flow), ("kill_bridge", drill_kill_bridge), ("kill_live_bridge", drill_kill_live_bridge),
-          ("exchange_down", drill_exchange_down), ("bad_credentials", drill_bad_credentials), ("bridge_hang", drill_bridge_hang)]
+          ("exchange_down", drill_exchange_down), ("bad_credentials", drill_bad_credentials), ("bridge_hang", drill_bridge_hang),
+          ("loop_flow", drill_loop_flow), ("loop_fill", drill_loop_fill), ("loop_slow", drill_loop_exchange_slow),
+          ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop)]
 
 
 async def main(only):

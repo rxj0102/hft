@@ -93,6 +93,7 @@ def main(argv=None):
     ap.add_argument("--term-grace-s", type=float, default=10.0)
     ap.add_argument("--metrics-s", type=float, default=2.0)
     ap.add_argument("--bridge", action="store_true", help="also run scripts/order_bridge.py (sandbox order entry; keys from HFT_CB_* env)")
+    ap.add_argument("--loop", action="store_true", help="closed loop (implies --bridge): the exchange's reports go back into hft_live")
     ap.add_argument("--bridge-args", default="", help="extra order_bridge.py options, shell-split (e.g. --rate 6 --max-notional 10)")
     ap.add_argument("--bridge-cmd", default=None, help="replace the bridge command (shell-split)")
     a = ap.parse_args(argv)
@@ -123,12 +124,14 @@ def main(argv=None):
                     "--report-s", "60", "--stale-ms", str(a.stale_ms)]
 
     bridge_cmd = None
+    if a.loop:
+        a.bridge = True
     if a.bridge or a.bridge_cmd:
         if a.bridge_cmd:
             bridge_cmd = fmt(shlex.split(a.bridge_cmd))
         else:
             bridge_cmd = [sys.executable, os.path.join(HERE, "order_bridge.py"), "--log", bridge_events, "--metrics", bridge_metrics,
-                          "--metrics-s", "1"] + shlex.split(a.bridge_args)
+                          "--metrics-s", "1"] + (["--loop"] if a.loop else []) + shlex.split(a.bridge_args)
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
@@ -157,13 +160,23 @@ def main(argv=None):
             # hft_live writes its order flow into this pipe; the bridge reads it. Neither can be re-attached to a new
             # partner, so if either dies the trio restarts (the bridge cancels everything on the exchange at start).
             orr, orw = os.pipe()
-            live = subprocess.Popen(live_cmd + ["--orders-fd", str(orw)], stdin=r, stdout=live_out, stderr=live_err,
-                                    start_new_session=True, pass_fds=(orw,))
+            extra_live, keep = ["--orders-fd", str(orw)], [orw]
+            rr = rw = None
+            if a.loop:  # the bridge's reports come back to hft_live through a second pipe
+                rr, rw = os.pipe()
+                extra_live += ["--exchange-fd", str(rr)]
+                keep.append(rr)
+            live = subprocess.Popen(live_cmd + extra_live, stdin=r, stdout=live_out, stderr=live_err,
+                                    start_new_session=True, pass_fds=tuple(keep))
             bridge_out = open(os.path.join(a.run_dir, "bridge.out"), "ab")
             bridge_err = open(os.path.join(a.run_dir, "bridge.err"), "ab")
-            bridge = subprocess.Popen(bridge_cmd, stdin=orr, stdout=bridge_out, stderr=bridge_err, start_new_session=True)
+            bridge = subprocess.Popen(bridge_cmd, stdin=orr, stdout=rw if rw is not None else bridge_out, stderr=bridge_err,
+                                      start_new_session=True)
             os.close(orr)
             os.close(orw)
+            if a.loop:
+                os.close(rr)
+                os.close(rw)
         else:
             live = subprocess.Popen(live_cmd, stdin=r, stdout=live_out, stderr=live_err, start_new_session=True)
         os.close(r)
@@ -255,6 +268,9 @@ def main(argv=None):
 
         if why == "stop_requested":
             exit_code = 0
+            if live.returncode == 4:  # asked to stop, and it could not say it was flat: do not report a clean stop
+                log.emit("stop_not_flat", run=run_no, detail="hft_live exited 4 during the stop; orders may still rest on the exchange")
+                exit_code = 4
             break
         if live.returncode == 4:
             log.emit("fatal_halt", run=run_no, detail="hft_live reported an integrity failure; not restarting, a person must look")

@@ -286,6 +286,170 @@ void test_order_tap() {
   CHECK(plain.summaries()[1].frames_total == s.summaries()[1].frames_total);
 }
 
+// ---- external venue: the exchange's reports come back through on_exchange_report ----------------------------------
+
+LiveConfig ext_cfg() {
+  LiveConfig c = small_cfg();
+  c.external_venue = true;
+  c.flatten_timeout_ns = 5'000'000'000ULL;
+  return c;
+}
+
+sim::Report report_for(sim::ReportType t, std::uint64_t id, std::int64_t qty = 5, std::int64_t leaves = 5) {
+  sim::Report r{};
+  r.type = t;
+  r.id = id;
+  r.qty = qty;
+  r.leaves = leaves;
+  r.price = core::Price::from_raw(1'000'000);
+  r.side = core::Side::Buy;
+  return r;
+}
+
+// Answers every frame in log.recs[from..] the way an exchange would: new -> accepted, cancel -> canceled.
+std::size_t answer(LiveSession& s, const TapLog& log, std::size_t from, std::uint64_t now) {
+  const std::size_t to = log.recs.size();
+  for (std::size_t i = from; i < to; ++i) {
+    const auto& r = log.recs[i];
+    if (r.kind == gw::kMsgNew) s.on_exchange_report(r.seg, report_for(sim::ReportType::Accepted, r.id), now);
+    if (r.kind == gw::kMsgCancel) s.on_exchange_report(r.seg, report_for(sim::ReportType::Canceled, r.id, 5, 0), now);
+  }
+  return to;
+}
+
+void test_external_flatten_waits_for_the_exchange() {
+  TapLog log;
+  LiveConfig c = ext_cfg();
+  c.order_tap = tap_collect;
+  c.order_tap_ctx = &log;
+  LiveSession s(c);
+  warm_up(s, 1'000'000);
+  CHECK(s.active() && s.open_orders() > 0 && s.venue_live() == 0);  // quoting, and the paper venue is not involved
+  CHECK(s.gateway_stats()->reports == 0);                            // nothing has been acknowledged
+  const std::uint32_t quoted = s.open_orders();
+  std::size_t seen = log.recs.size();
+  s.on_line("#1006000\treconnect", 1'006'000);
+  CHECK(s.busy() && s.active());                    // the orders are PendingNew: they cannot be cancelled yet
+  CHECK(s.summaries().empty());                     // so the segment has not ended
+  CHECK(log.recs.size() == seen);                   // and no cancel went out yet (nothing cancellable)
+  // updates and a snapshot during the wait: ignored / dropped, and a resubscribe is asked for
+  s.on_line(upd(1'007'000, "buy", "100.00", "9"), 1'007'000);
+  CHECK(s.stats().ignored_ending == 1);
+  s.on_line(snapshot_line(1'008'000), 1'008'000);
+  CHECK(s.stats().snapshots_dropped_ending == 1 && s.take_resnap() && s.busy());
+  // acks arrive: now the orders can be cancelled, and they are
+  for (std::size_t i = 0; i < seen; ++i)
+    if (log.recs[i].kind == gw::kMsgNew) s.on_exchange_report(log.recs[i].seg, report_for(sim::ReportType::Accepted, log.recs[i].id), 1'020'000);
+  std::size_t cancels = 0;
+  for (std::size_t i = seen; i < log.recs.size(); ++i) cancels += log.recs[i].kind == gw::kMsgCancel;
+  CHECK(cancels == quoted);                         // one cancel per order, no new orders: the strategy did not see the acks
+  for (std::size_t i = seen; i < log.recs.size(); ++i) CHECK(log.recs[i].kind == gw::kMsgCancel);
+  CHECK(s.busy());                                   // not flat until the exchange confirms
+  answer(s, log, seen, 1'030'000);
+  CHECK(!s.busy() && !s.active());
+  CHECK(s.summaries().size() == 1);
+  const SegmentSummary& sm = s.summaries()[0];
+  CHECK(sm.reason == EndReason::Marker && sm.flat && !sm.kill_latched && sm.open_before_flatten == quoted);
+  CHECK(sm.flatten_sim_ns == 1'030'000 - 1'006'000);  // the wait, on the caller's clock: marker to the last confirmation
+  CHECK(s.stats().flatten_failures == 0 && !s.halted());
+  CHECK(s.stats().exchange_reports >= quoted * 2);
+  // quoting resumes at the next snapshot
+  warm_up(s, 2'000'000);
+  CHECK(s.active() && !s.busy() && s.open_orders() > 0);
+}
+
+// While a segment waits for the exchange, silence is not a second end of trust: no stale event, no extra resubscribe,
+// and a kill during the wait does not change why the segment ended (the first reason stands, the kill switch is latched).
+void test_external_wait_is_not_stale_and_first_reason_stands() {
+  LiveConfig c = ext_cfg();
+  c.stale_ns = 2'000'000'000ULL;
+  c.flatten_timeout_ns = 60'000'000'000ULL;
+  LiveSession s(c);
+  warm_up(s, 1'000'000);
+  s.on_line("#1006000\treconnect", 1'006'000);
+  CHECK(s.busy());
+  s.poll(1'006'000 + 10 * c.stale_ns);                       // ten stale limits of silence while waiting
+  CHECK(s.busy() && s.stats().stale_events == 0 && s.stats().resnap_requests == 0);
+  s.on_line("#" + std::to_string((1'006'000 + 10 * c.stale_ns) / 1000) + "\tnoise", 1'006'000 + 10 * c.stale_ns);  // a line after the silence
+  CHECK(s.busy() && s.stats().stale_events == 0);
+  s.kill(1'006'000 + 10 * c.stale_ns + 1);
+  CHECK(s.halted() && s.busy());
+  s.poll(1'006'000 + 61 * 1'000'000'000ULL);                 // the deadline passes
+  CHECK(!s.busy() && s.summaries().size() == 1);
+  CHECK(s.summaries()[0].reason == EndReason::Marker && s.summaries()[0].kill_latched);
+  CHECK(s.stats().ended[static_cast<int>(EndReason::Marker)] == 1 && s.stats().ended[static_cast<int>(EndReason::Kill)] == 0);
+}
+
+void test_external_flatten_times_out() {
+  LiveConfig c = ext_cfg();
+  c.flatten_timeout_ns = 1'000'000'000ULL;
+  LiveSession s(c);
+  warm_up(s, 1'000'000);
+  s.on_line("#1006000\treconnect", 1'006'000);
+  CHECK(s.busy());
+  s.poll(1'006'000 + c.flatten_timeout_ns - 1);
+  CHECK(s.busy() && s.stats().flatten_failures == 0);   // one nanosecond short
+  s.poll(1'006'000 + c.flatten_timeout_ns);
+  CHECK(!s.busy() && s.summaries().size() == 1);
+  CHECK(!s.summaries()[0].flat && s.summaries()[0].kill_latched);
+  CHECK(s.stats().flatten_failures == 1 && s.halted());  // could not get flat: stop
+}
+
+void test_external_kill_and_shutdown() {
+  for (int kill = 0; kill < 2; ++kill) {
+    TapLog log;
+    LiveConfig c = ext_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    warm_up(s, 1'000'000);
+    answer(s, log, 0, 1'010'000);                       // acks for the quotes
+    const std::size_t seen = log.recs.size();
+    CHECK(s.open_orders() > 0);
+    if (kill) s.kill(1'020'000);
+    else s.shutdown(1'020'000);
+    CHECK(s.halted() && s.busy());                      // the cancels are out, the exchange has not answered
+    std::size_t cancels = 0;
+    for (std::size_t i = seen; i < log.recs.size(); ++i) cancels += log.recs[i].kind == gw::kMsgCancel;
+    CHECK(cancels > 0);
+    answer(s, log, seen, 1'030'000);
+    CHECK(!s.busy() && s.summaries().size() == 1 && s.summaries()[0].flat);
+    CHECK(s.summaries()[0].kill_latched == (kill == 1));
+    CHECK(s.summaries()[0].reason == (kill ? EndReason::Kill : EndReason::Shutdown));
+  }
+}
+
+void test_external_fill_and_stale_reports() {
+  TapLog log;
+  LiveConfig c = ext_cfg();
+  c.order_tap = tap_collect;
+  c.order_tap_ctx = &log;
+  LiveSession s(c);
+  warm_up(s, 1'000'000);
+  answer(s, log, 0, 1'010'000);
+  const std::uint32_t before = s.open_orders();
+  std::uint64_t victim = 0;
+  for (const auto& r : log.recs)
+    if (r.kind == gw::kMsgNew) {
+      victim = r.id;
+      break;
+    }
+  sim::Report f = report_for(sim::ReportType::Fill, victim, 5, 0);
+  f.liq = sim::Liquidity::Maker;
+  s.on_exchange_report(1, f, 1'020'000);
+  CHECK(s.open_orders() + 1 == before);                  // a full fill closes the order
+  CHECK(s.position_lots() == 5);                         // and the position is the filled quantity (a buy fill)
+  s.on_exchange_report(77, report_for(sim::ReportType::Canceled, victim, 5, 0), 1'021'000);
+  CHECK(s.stats().reports_stale == 1 && s.open_orders() + 1 == before);  // a report for another segment is not applied
+  s.on_exchange_report(1, report_for(sim::ReportType::Canceled, 999999, 5, 0), 1'022'000);  // unknown order: counted by the OMS, no harm
+  CHECK(s.open_orders() + 1 == before && !s.halted());
+  s.shutdown(1'030'000);
+  answer(s, log, 0, 1'031'000);
+  CHECK(!s.busy() && s.summaries().size() == 1);
+  CHECK(s.summaries()[0].flat && s.summaries()[0].net_position_lots == 5 && s.summaries()[0].fills == 1);  // flat of orders, not of position
+  CHECK(s.stats().fills == 1);
+}
+
 void test_stale_feed() {
   LiveConfig c = small_cfg();
   c.stale_ns = 3'000'000'000ULL;
@@ -544,6 +708,11 @@ int main() {
   test_deterministic();
   test_flatten_with_orders_in_flight();
   test_order_tap();
+  test_external_flatten_waits_for_the_exchange();
+  test_external_wait_is_not_stale_and_first_reason_stands();
+  test_external_flatten_times_out();
+  test_external_kill_and_shutdown();
+  test_external_fill_and_stale_reports();
   test_stale_feed();
   test_stale_found_by_next_line();
   test_heartbeats_keep_the_feed_alive();

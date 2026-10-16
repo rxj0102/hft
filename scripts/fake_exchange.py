@@ -27,6 +27,8 @@ class FakeExchange:
         self.key, self.secret, self.passphrase = key, base64.b64decode(secret_b64), passphrase
         self.lock = threading.Lock()
         self.orders = {}        # id -> dict (open orders only)
+        self.done = {}          # id -> dict (finished orders: done_reason "filled" or "canceled")
+        self.latency = 0.0      # seconds added to every answer
         self.by_coid = {}
         self.log = []           # (t, method, path, status)
         self.mode, self.delay, self.skew = "ok", 0.0, 0.0
@@ -39,6 +41,33 @@ class FakeExchange:
     @property
     def url(self):
         return "http://127.0.0.1:%d" % self.httpd.server_address[1]
+
+    def fill(self, oid, size=None):
+        """The market trades through a resting order. size=None: fill the rest. Returns True if it was open."""
+        with self.lock:
+            o = self.orders.get(oid)
+            if not o:
+                return False
+            total, done = float(o["size"]), float(o["filled_size"])
+            add = total - done if size is None else min(float(size), total - done)
+            done += add
+            o["filled_size"] = "%.8f" % done
+            o["executed_value"] = "%.8f" % (done * float(o["price"]))
+            if done >= total - 1e-12:
+                o["status"] = "done"
+                o["done_reason"] = "filled"
+                self.done[oid] = self.orders.pop(oid)
+            return True
+
+    def cancel_elsewhere(self, oid):
+        """Cancelled behind the bridge's back (by the exchange or another client)."""
+        with self.lock:
+            o = self.orders.pop(oid, None)
+            if o:
+                o["status"] = "done"
+                o["done_reason"] = "canceled"
+                self.done[oid] = o
+            return o is not None
 
     def open_orders(self):
         with self.lock:
@@ -79,6 +108,8 @@ class FakeExchange:
                     self.close_connection = True
                     self.connection.close()
                     return
+                if ex.latency:
+                    time.sleep(ex.latency)
                 data = json.dumps(payload).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -152,7 +183,7 @@ class FakeExchange:
                     return 400, {"message": "client_oid already used"}
                 oid = str(uuid.uuid4())
                 rec = {"id": oid, "client_oid": o["client_oid"], "side": o["side"], "price": o["price"], "size": o["size"],
-                       "product_id": o.get("product_id"), "status": "open"}
+                       "product_id": o.get("product_id"), "status": "open", "filled_size": "0.00000000", "executed_value": "0.00000000"}
                 self.orders[oid] = rec
                 self.by_coid[o["client_oid"]] = oid
                 return 200, rec
@@ -171,9 +202,15 @@ class FakeExchange:
             if method == "DELETE" and u.path.startswith("/orders/"):
                 oid = u.path[len("/orders/"):]
                 if oid in self.orders:
-                    del self.orders[oid]
+                    o = self.orders.pop(oid)
+                    o["status"], o["done_reason"] = "done", "canceled"
+                    self.done[oid] = o
                     return 200, oid
                 return 404, {"message": "NotFound"}
+            if method == "GET" and u.path.startswith("/orders/") and not u.path.startswith("/orders/client:"):
+                oid = u.path[len("/orders/"):]
+                rec = self.orders.get(oid) or self.done.get(oid)
+                return (200, rec) if rec else (404, {"message": "NotFound"})
             if method == "GET" and u.path == "/orders":
                 pid = (q.get("product_id") or [None])[0]
                 return 200, [r for r in self.orders.values() if pid is None or r["product_id"] == pid]

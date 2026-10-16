@@ -1,0 +1,57 @@
+# Closed loop: the exchange's reports drive the OMS
+
+Phase 12 mirrored the strategy's orders to the sandbox. Phase 13 closes the loop: the exchange's answers (accepted, rejected, replaced, cancelled, filled) go back into the gateway and OMS, the strategy reacts to them, and an end of trust is over only when the exchange has confirmed that the orders are gone.
+
+```
+capture_l2.py --out - | hft_live --orders-fd 3 --exchange-fd 4  3>| order_bridge.py --loop |4<     (scripts/supervise.py --loop starts all three)
+                          orders ------------------>             reports <-----------------
+```
+
+Everything below was run against `scripts/fake_exchange.py` only. **The real sandbox has not been used** (no key). Treat the report mapping, the fill detection and the timings as unverified against Coinbase.
+
+## What changed in the live session
+
+`LiveConfig::external_venue` (set by `--exchange-fd`):
+- Orders go only to the tap; the paper venue is not used (its state stays empty, a test checks `venue_live() == 0`).
+- `LiveSession::on_exchange_report(seg, report, now)` takes a report for segment `seg`, numbers it for the segment's gateway (which insists on a gapless sequence) and delivers it. Reports for a segment that no longer exists are counted and dropped.
+- An end of trust (reconnect marker, new snapshot, window exit, stale feed, integrity failure, kill, shutdown) no longer finishes in one call. It cancels what can be cancelled and the segment stays `busy()` until the OMS shows nothing working, or `--flatten-timeout-s` (5 s) passes. Each report and each `poll()` re-issues cancels for orders whose ack has just arrived (an order that is still PendingNew cannot be cancelled). The strategy does not see reports during this wait, so it cannot quote again.
+- While a segment is busy, feed updates are ignored (counted) and a snapshot is dropped and a resubscribe requested, so the next snapshot comes after the segment has finished.
+- Timeout: the segment ends NOT FLAT, the kill switch is latched and the session halts. `hft_live` exits 4. This is the same rule as the paper venue's 64-round limit, now in time.
+- If the bridge's report pipe closes, `hft_live` logs `exchange_lost`, kills, waits for the flatten to time out and exits 6 (restartable; a new bridge cancels everything on the exchange first).
+- `segment_end` records `position_lots` and `fills`. The flatten cancels orders; it does not close a position. `flatten_sim_ns` is the real wait in this mode.
+
+The paper path is untouched: the same tests, the same wire hashes, the perf gate (797.80).
+
+## What the bridge does with `--loop`
+
+Every request is carried out and answered by exactly one report line on stdout (`order_bridge.py --loop`), tagged with the segment of the request.
+
+| Request | Exchange calls | Report |
+|---|---|---|
+| new | POST (post-only limit) | `accepted`; `rejected` with reason `cross` (post-only), `badqty`/`badprice` (exchange text, or the local size and notional caps), `other` (a reply that was lost: the order is also cancelled by client id) |
+| replace | DELETE old, POST new | `replaced`; if the new order is refused the old one is already gone, so `canceled`; if the cancel finds nothing, `replace_rejected` (the sync then says what happened) |
+| cancel | DELETE | `canceled` (size removed); `cancel_rejected` when the order is unknown or already gone |
+| (sync, every `--sync-s`) | GET open orders, GET one order | `fill` for new fills (price is the order's limit price, not the exchange's executed value), `canceled` for an order that vanished, stray orders cancelled silently |
+| end of segment | DELETE for orders still resting | none (orphans from a flatten that failed) |
+
+The OMS allows one request in flight per order, so nothing is coalesced here; the rate limit (`--rate`, default 8/s) just queues requests. A replace costs two calls, so each quote move takes at least two round trips.
+
+## What it costs, honestly
+
+- The strategy now trades against exchange latency. A quote move takes the time of two REST calls; in the drills with 0.4 s per call, a stop took about 1.9 s to confirm. Against the real sandbox this is unmeasured.
+- A reconnect or a window exit used to take about 120 ms to quote again; it now also includes the wait for cancel confirmations.
+- Fills are found by polling. With `--sync-s 5` a filled order can look alive for up to five seconds. Use a shorter interval in loop mode (`--sync-s 1`), at the price of more calls.
+- There is no replay of an exchange run: it depends on timing. The paper mode stays the deterministic one.
+- A position built by fills is not closed by anything. Risk limits cap it; the metric `hft_live_position_lots` and `segment_end.position_lots` show it.
+
+## Evidence
+
+- `test_live` (C++): flatten waits for acks then cancels then confirmations and no new order goes out; updates are ignored and a snapshot dropped with a resubscribe; timeout one nanosecond short and at the limit; kill and shutdown wait for the exchange; fill moves the position; reports for another segment are not applied.
+- `test_live_tool.py`: a scripted exchange over real pipes; garbage report lines; reports for another segment; an exchange that never answers (NOT FLAT, exit 4); the report pipe closing (exit 6); bad option combinations.
+- `test_bridge.py`: one report per request, replace as cancel then new, refusals, a lost reply, partial and full fills, an order cancelled elsewhere, fill while cancelling, orphans at segment end, a slow exchange, the same id in two segments.
+- Drills (`scripts/drill.py`): `loop_flow` (acks reach hft_live; a reconnect ends flat after 60 ms of real confirmations; SIGTERM flat), `loop_fill` (a fill moves the position to +5 lots, no restart), `loop_slow` (0.4 s per call: flat, 1.9 s), `loop_dead_at_stop` (exchange down: NOT FLAT, supervisor exits 4 with `stop_not_flat`).
+- Mutation check: see CHANGELOG, Phase 13.
+
+## Not done
+
+Real sandbox run; the authenticated websocket for fills instead of polling; partial-fill handling beyond what the sync sees; closing positions; a venue reject taxonomy beyond what the fake produces; replay or fuzzing of the exchange link; any run longer than minutes.

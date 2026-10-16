@@ -429,3 +429,7 @@ Full write-up in OPERATIONS.md. Built: event log and metrics in `hft_live`, `scr
 ## 18. Phase 12: sandbox order entry
 
 See SANDBOX.md and ADR 25. The tick-to-trade path gains one nullable function-pointer call per sent frame; everything else (REST, signing, pacing, reconciliation) is in a separate process fed by a pipe. The design choice is the mirror: decisions stay deterministic against the paper venue, the exchange follows. What it gives up is feedback from the exchange.
+
+## 19. Phase 13: closing the loop
+
+See CLOSED_LOOP.md and ADR 26. The session gains an external-venue mode in which the flatten of ADR 22 is a state finished by exchange reports or a deadline. The paper path and the pipeline are untouched. Cost: quotes follow exchange latency, and runs are no longer reproducible.

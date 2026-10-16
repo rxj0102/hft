@@ -421,7 +421,7 @@ struct HashSend {
     *hash = h;
     ++*frames;
     *bytes += n;
-    venue->on_frame(d, n);
+    if (venue) venue->on_frame(d, n);
   }
 };
 

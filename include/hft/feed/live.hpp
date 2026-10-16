@@ -64,6 +64,10 @@ struct LiveConfig {
   std::size_t arena_bytes = 256u << 20;       // working memory per segment (lazily committed)
   bool timed = false;                         // time each line with the steady clock (parse + convert + pipeline)
   std::uint32_t max_flatten_rounds = 64;      // cancel/answer rounds before giving up and killing
+  // External venue: orders go only to order_tap (the paper venue is not used) and the exchange's reports come back through
+  // on_exchange_report(). Flatten then waits for real cancel confirmations, at most flatten_timeout_ns of the caller's clock.
+  bool external_venue = false;
+  std::uint64_t flatten_timeout_ns = 5'000'000'000ULL;
   OrderTap order_tap = nullptr;               // mirror of the order flow for an order-entry bridge (nullptr: none)
   void* order_tap_ctx = nullptr;
 };
@@ -90,7 +94,9 @@ struct SegmentSummary {
   std::uint64_t frames_before_flatten = 0, hash_before_flatten = 0;  // the order flow the feed itself caused
   std::uint64_t frames_total = 0;
   std::uint64_t flatten_rounds = 0, flatten_sim_ns = 0;
-  std::uint32_t open_before_flatten = 0;  // orders the flatten had to take down
+  std::uint32_t open_before_flatten = 0;
+  std::int64_t net_position_lots = 0;  // signed filled quantity at the end of the segment (flatten cancels orders, it does not close positions)
+  std::uint64_t fills = 0;  // orders the flatten had to take down
   bool flat = false;            // nothing left working at the venue or in the OMS
   bool kill_latched = false;    // the risk engine's kill switch was on when the segment ended
   bool book_matched_model = false;
@@ -110,6 +116,9 @@ struct LiveStats {
   std::uint64_t messages_applied = 0, decisions = 0, feed_losses = 0, pull_sweeps = 0, desyncs = 0, book_errors = 0;
   std::uint64_t sent_new = 0, sent_replace = 0, sent_cancel = 0, risk_rejects = 0, pulled_cancels = 0, kill_cancels = 0;
   std::uint64_t reports = 0, acc = 0, rep = 0, canc = 0, rej_cross = 0;
+  std::uint64_t fills = 0;
+  // external venue
+  std::uint64_t exchange_reports = 0, reports_stale = 0, snapshots_dropped_ending = 0, ignored_ending = 0;
   std::uint64_t conv_adds = 0, conv_reduces = 0, conv_deletes = 0, out_of_window = 0, crossed = 0;
 };
 
@@ -167,6 +176,12 @@ class LiveSession {
       case L2Message::Kind::Snapshot:
         last_feed_ = now;
         end_segment(now, EndReason::NewSnapshot);
+        if (seg_) {  // external venue: the old segment is still waiting for its cancels. Ask for another snapshot instead.
+          ++st_.snapshots_dropped_ending;
+          if (!resnap_) ++st_.resnap_requests;
+          resnap_ = true;
+          return;
+        }
         start_segment(m, now);
         work = true;
         snapshot = true;
@@ -175,6 +190,10 @@ class LiveSession {
         last_feed_ = now;
         if (!seg_) {
           ++st_.dropped_no_segment;
+          return;
+        }
+        if (seg_->ending) {
+          ++st_.ignored_ending;
           return;
         }
         apply_update(m, now);
@@ -192,6 +211,10 @@ class LiveSession {
   // gone silent.
   void poll(std::uint64_t now) {
     now = clamp(now);
+    if (seg_ && seg_->ending) {  // waiting for the exchange to confirm the cancels
+      step_flatten(now);
+      return;
+    }
     if (halted_) return;
     check_stale(now);
     if (!seg_) return;
@@ -230,6 +253,33 @@ class LiveSession {
     return r;
   }
 
+  // External venue only. A report from the exchange for segment `seg` (the number the order tap was given). Reports for a
+  // segment that is gone are counted and dropped. During a flatten the strategy does not see them.
+  void on_exchange_report(std::uint64_t seg, const sim::Report& r, std::uint64_t now) {
+    now = clamp(now);
+    if (!seg_ || seg != seg_->number) {
+      ++st_.reports_stale;
+      return;
+    }
+    Seg& s = *seg_;
+    std::uint8_t buf[gw::kMaxFrame];
+    sim::Report rr = r;
+    rr.seq = ++s.xseq;
+    rr.ts = now;
+    const std::size_t n = gw::encode_report(buf, s.xseq, rr);
+    ++st_.exchange_reports;
+    if (s.ending) {
+      s.pipe->gateway().on_bytes(buf, n, now);
+      step_flatten(now);
+    } else {
+      s.pipe->on_report(buf, n, now);
+    }
+  }
+  // True while a segment is waiting for the exchange to confirm its cancels (external venue). The caller must keep
+  // feeding reports and calling poll() until this is false.
+  bool busy() const noexcept { return seg_ && seg_->ending; }
+  std::uint64_t segment_number() const noexcept { return seg_ ? seg_->number : 0; }
+
   bool halted() const noexcept { return halted_; }
   bool killed() const noexcept { return killed_; }
   bool active() const noexcept { return seg_ != nullptr; }
@@ -239,6 +289,7 @@ class LiveSession {
   const core::Histogram& start_ns() const noexcept { return start_ns_; }  // snapshot line to ready, one per segment
   // The running segment's pipeline, for inspection by tests and status lines.
   const book::OrderBook* book() const noexcept { return seg_ ? &seg_->pipe->book() : nullptr; }
+  std::int64_t position_lots() const noexcept { return seg_ ? seg_->pipe->gateway().oms().position().pos : 0; }
   std::uint32_t open_orders() const noexcept { return seg_ ? seg_->pipe->gateway().oms().open_orders() : 0; }
   std::size_t venue_live() const noexcept { return seg_ ? seg_->venue.live() : 0; }
   const gw::GatewayStats* gateway_stats() const noexcept { return seg_ ? &seg_->pipe->gateway().stats() : nullptr; }
@@ -252,7 +303,7 @@ class LiveSession {
     void* ctx;
     std::uint64_t seg;
     void operator()(const std::uint8_t* d, std::size_t n) noexcept {
-      h(d, n);
+      h(d, n);  // hashes and counts; hands the frame to the paper venue unless there is none
       if (tap) tap(ctx, seg, d, n);
     }
   };
@@ -274,6 +325,12 @@ class LiveSession {
     std::unique_ptr<Pipe> pipe;
     std::uint64_t hash = 0xCBF29CE484222325ULL, frames = 0, bytes = 0;
     std::uint64_t pkts = 0, last_cp = 0;
+    // external venue
+    std::uint64_t number = 0, xseq = 0;
+    bool ending = false;
+    EndReason end_why = EndReason::Marker;
+    std::uint64_t end_started = 0, end_deadline = 0;
+    SegmentSummary pending;
   };
 
   std::uint64_t clamp(std::uint64_t now) noexcept {
@@ -285,7 +342,7 @@ class LiveSession {
   }
 
   void check_stale(std::uint64_t now) {
-    if (seg_ && now >= last_feed_ && now - last_feed_ >= cfg_.stale_ns) {
+    if (seg_ && !seg_->ending && now >= last_feed_ && now - last_feed_ >= cfg_.stale_ns) {
       ++st_.stale_events;
       resnap_ = true;
       ++st_.resnap_requests;
@@ -315,8 +372,9 @@ class LiveSession {
     pc.live_at_start = true;
     s.region = core::Region::create(cfg_.arena_bytes, core::RegionOptions{false, false, true, -1});
     s.arena = core::Arena(s.region);
-    s.pipe.reset(new Pipe(LiveSend{detail::HashSend{&s.hash, &s.frames, &s.bytes, &s.venue}, cfg_.order_tap, cfg_.order_tap_ctx,
-                                   st_.segments + 1},
+    s.number = st_.segments + 1;
+    s.pipe.reset(new Pipe(LiveSend{detail::HashSend{&s.hash, &s.frames, &s.bytes, cfg_.external_venue ? nullptr : &s.venue},
+                                   cfg_.order_tap, cfg_.order_tap_ctx, s.number},
                           pc.mm));
     if (s.region.data() == nullptr || !s.pipe->init(s.arena, pc)) {
       ++st_.init_failures;
@@ -394,20 +452,32 @@ class LiveSession {
   // working. Reports go to the gateway only: the strategy must not get a look,
   // or it would quote again. An order still PendingNew cannot be cancelled until
   // its ack arrives, hence the rounds. The venue's time is simulated, so the
-  // loop does not wait.
+  // loop does not wait. With an external venue the same job is a state: the cancels go out,
+  // and the segment ends when the exchange has confirmed them (step_flatten) or the timeout passes.
   void end_segment(std::uint64_t now, EndReason why) {
     if (!seg_) return;
     Seg& s = *seg_;
+    if (s.ending) return;  // already on its way out; the first reason stands
     SegmentSummary sm;
     sm.reason = why;
     sm.packets = s.pkts;
     sm.frames_before_flatten = s.frames;
     sm.hash_before_flatten = s.hash;
     sm.open_before_flatten = s.pipe->gateway().oms().open_orders();
+    auto& g = s.pipe->gateway();
+    if (cfg_.external_venue) {
+      s.ending = true;
+      s.end_why = why;
+      s.end_started = now;
+      s.end_deadline = now + cfg_.flatten_timeout_ns;
+      s.pending = sm;
+      g.cancel_all(now);
+      step_flatten(now);
+      return;
+    }
 
     std::uint64_t t = now;
     std::uint8_t rep[gw::kMaxFrame];
-    auto& g = s.pipe->gateway();
     std::uint64_t rounds = 0;
     bool flat = false;
     while (rounds < cfg_.max_flatten_rounds) {
@@ -426,6 +496,28 @@ class LiveSession {
         break;
       }
     }
+    finish_segment(sm, flat, rounds, t, now, why);
+  }
+
+  // External venue: called after every report and every poll while a segment is ending.
+  void step_flatten(std::uint64_t now) {
+    Seg& s = *seg_;
+    auto& g = s.pipe->gateway();
+    if (g.oms().open_orders() == 0) {
+      finish_segment(s.pending, true, 0, now, s.end_started, s.end_why);
+    } else if (now >= s.end_deadline) {
+      finish_segment(s.pending, false, 0, now, s.end_started, s.end_why);
+    } else {
+      g.cancel_all(now);  // an order whose ack just arrived can be cancelled now
+    }
+  }
+
+  void finish_segment(SegmentSummary sm, bool flat, std::uint64_t rounds, std::uint64_t t, std::uint64_t now, EndReason why) {
+    Seg& s = *seg_;
+    auto& g = s.pipe->gateway();
+    sm.net_position_lots = g.oms().position().pos;
+    sm.fills = g.oms().position().fills;
+    st_.fills += sm.fills;
     sm.flat = flat;
     sm.flatten_rounds = rounds;
     sm.flatten_sim_ns = t - now;

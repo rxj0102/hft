@@ -3,7 +3,15 @@
 
   hft_live --orders-fd 3 ... 3>pipe  |  order_bridge.py   (scripts/supervise.py --bridge wires this up)
 
-What it is: a reconciler. hft_live's paper venue stays the source of truth for the strategy; this process
+Two modes. Default (mirror): described below. With --loop (closed loop): every request hft_live sends (new,
+replace, cancel) is carried out and answered with exactly one report on stdout (a JSON line, read by
+hft_live --exchange-fd): accepted / rejected / replaced / canceled / cancel_rejected / replace_rejected, plus
+fills found by the periodic sync. Nothing is coalesced then: hft_live has at most one request in flight per
+order, and what the exchange says is what its OMS believes. Reports carry the segment number of the request.
+A replace is cancel + new; if the new order is refused (post-only would cross) the order is gone and the
+answer is `canceled`. Fill prices are the order's limit price (the exchange's executed value is not used).
+
+What the mirror mode is: a reconciler. hft_live's paper venue stays the source of truth for the strategy; this process
 keeps the sandbox account's resting orders equal to the orders hft_live believes are working, as far as the
 exchange's rate limit allows. It does not feed acks or fills back to hft_live (see docs/SANDBOX.md).
 
@@ -339,7 +347,8 @@ class Bridge:
         g("hft_bridge_seconds_since_ok", "Seconds since the last successful exchange call.", round(time.monotonic() - self.last_ok, 1), "gauge")
         for name in ("events_in", "requests", "placed", "cancels", "cancels_already_gone", "rejected", "rate_limited", "net_errors",
                      "http_5xx", "place_unknown", "refused_local", "refused_max_open", "vanished", "strays", "bad_lines",
-                     "cancel_all_cancelled"):
+                     "cancel_all_cancelled", "fills", "orphans", "reports_accepted", "reports_rejected", "reports_canceled",
+                     "reports_replaced", "reports_fill", "reports_cancel_rejected", "reports_replace_rejected"):
             g("hft_bridge_%s_total" % name, name.replace("_", " ") + ".", self.cnt[name])
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -361,6 +370,197 @@ class Bridge:
                 time.sleep(0.01)
 
 
+class LoopBridge(Bridge):
+    """Closed loop: carry out each request, answer each with a report."""
+
+    def __init__(self, a, client, log, out):
+        super().__init__(a, client, log)
+        self.out = out
+        self.queue = collections.deque()   # requests in arrival order
+        self.filled = {}                   # key -> lots already reported as filled
+        self.reports_dead = False
+
+    # ---- reports ------------------------------------------------------------------------------------------
+    def report(self, key, rt, px=0, qty=0, leaves=0, reason="none", side=None):
+        rec = {"t": "rep", "seg": key[0], "rt": rt, "id": key[1], "px": px, "qty": qty, "leaves": leaves, "reason": reason}
+        if side:
+            rec["side"] = side
+        self.cnt["reports_" + rt] += 1
+        if self.reports_dead:
+            return
+        try:
+            self.out.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            self.out.flush()
+        except (BrokenPipeError, ValueError, OSError):
+            self.reports_dead = True
+            self.log.emit("reports_pipe_closed")
+
+    # ---- input --------------------------------------------------------------------------------------------
+    def apply(self, m):
+        t = m.get("t")
+        with self.lock:
+            self.cnt["events_in"] += 1
+            if t == "hello":
+                self.px_scale, self.qty_scale = int(m["px_scale"]), int(m["qty_scale"])
+            elif t in ("new", "rep", "can"):
+                self.queue.append(m)
+            elif t == "end":
+                self.queue.append(m)
+            else:
+                self.cnt["unknown_events"] += 1
+
+    # ---- carrying out one request ----------------------------------------------------------------------------------
+    def post(self, k, side, px_raw, lots):
+        """POST one order. Returns ('ok', oid, coid) | ('refused', reason) | ('unknown',)"""
+        px, sz = fmt_price(px_raw, self.px_scale), fmt_size(lots, self.qty_scale)
+        notional = (px_raw / self.px_scale) * (lots / self.qty_scale)
+        if px is None:
+            self.cnt["refused_local"] += 1
+            return ("refused", "badprice")
+        if sz is None or notional > self.a.max_notional:
+            self.cnt["refused_local"] += 1
+            self.log.emit("refused_local", seg=k[0], id=k[1], notional=round(notional, 2))
+            return ("refused", "badqty")
+        self.placements[k] += 1
+        coid = str(uuid.uuid5(NS, "%s:%d:%d:%d" % (self.run, k[0], k[1], self.placements[k])))
+        body = {"type": "limit", "side": side, "product_id": self.a.product, "price": px, "size": sz, "post_only": True,
+                "client_oid": coid}
+        for _ in range(20):
+            st, js = self.req("POST", "/orders", body)
+            if st != 429:  # on 429 req() has already paused
+                break
+        else:
+            st, js = None, None
+        if st == 200 and isinstance(js, dict) and "id" in js:
+            self.cnt["placed"] += 1
+            return ("ok", js["id"], coid)
+        if st is None:
+            self.cnt["place_unknown"] += 1
+            self.req("DELETE", "/orders/client:" + coid)  # the order may exist; make sure it does not
+            return ("unknown",)
+        self.cnt["rejected"] += 1
+        msg = (js or {}).get("message", "") if isinstance(js, dict) else ""
+        self.log.emit("order_rejected", seg=k[0], id=k[1], status=st, message=msg[:120])
+        low = msg.lower()
+        reason = "cross" if "post only" in low else "badqty" if "size" in low else "badprice" if "price" in low else "other"
+        return ("refused", reason)
+
+    def delete(self, oid):
+        """DELETE one order. Returns 'ok' | 'gone' | 'error'"""
+        for _ in range(20):
+            st, _ = self.req("DELETE", "/orders/" + oid)
+            if st != 429:
+                break
+        else:
+            st = None
+        if st == 200:
+            return "ok"
+        if st == 404:
+            return "gone"
+        return "error"
+
+    def handle(self, m):
+        t = m["t"]
+        if t == "end":
+            seg = m["seg"]
+            self.log.emit("segment_end", seg=seg, reason=m.get("reason"))
+            # anything still resting from that segment is an orphan (a flatten that failed): cancel it, no report
+            for k in [k for k in self.live if k[0] == seg]:
+                v = self.live.pop(k)
+                self.cnt["orphans"] += 1
+                self.log.emit("orphan_order", seg=seg, id=k[1])
+                self.delete(v["oid"])
+            return
+        k = (m["seg"], m["id"])
+        if t == "new":
+            if len(self.live) >= self.a.max_open:
+                self.cnt["refused_max_open"] += 1
+                self.report(k, "rejected", reason="badqty", side=m["side"])
+                return
+            r = self.post(k, m["side"], m["px"], m["qty"])
+            if r[0] == "ok":
+                self.live[k] = {"oid": r[1], "coid": r[2], "px": m["px"], "qty": m["qty"], "side": m["side"]}
+                self.filled[k] = 0
+                self.report(k, "accepted", px=m["px"], qty=m["qty"], leaves=m["qty"], side=m["side"])
+            else:
+                self.report(k, "rejected", px=m["px"], qty=m["qty"], reason=r[1] if r[0] == "refused" else "other", side=m["side"])
+        elif t == "can":
+            v = self.live.get(k)
+            if v is None:
+                self.report(k, "cancel_rejected", reason="unknown")
+                return
+            res = self.delete(v["oid"])
+            if res == "ok":
+                left = v["qty"] - self.filled.get(k, 0)
+                self.live.pop(k)
+                self.report(k, "canceled", px=v["px"], qty=left, leaves=0, reason="user", side=v["side"])
+            else:  # gone (filled or cancelled elsewhere: the sync will say which) or an error: the order stays ours
+                self.report(k, "cancel_rejected", reason="unknown")
+        elif t == "rep":
+            v = self.live.get(k)
+            if v is None:
+                self.report(k, "replace_rejected", reason="unknown")
+                return
+            res = self.delete(v["oid"])
+            if res != "ok":
+                self.report(k, "replace_rejected", reason="unknown")
+                return
+            self.live.pop(k)
+            r = self.post(k, v["side"], m["px"], m["qty"])
+            if r[0] == "ok":
+                self.live[k] = {"oid": r[1], "coid": r[2], "px": m["px"], "qty": m["qty"], "side": v["side"]}
+                self.filled[k] = 0
+                self.report(k, "replaced", px=m["px"], qty=m["qty"], leaves=m["qty"], side=v["side"])
+            else:  # the old order is gone and the new one was refused or lost: the order no longer exists
+                self.report(k, "canceled", px=v["px"], qty=m["qty"], leaves=0, reason=r[1] if r[0] == "refused" else "other", side=v["side"])
+
+    def step(self):
+        with self.lock:
+            m = self.queue.popleft() if self.queue else None
+        if m is None:
+            return False
+        self.handle(m)
+        return True
+
+    # ---- finding fills and orders that left ------------------------------------------------------------------------------
+    def lots_of(self, size_str):
+        return int(round(float(size_str) * self.qty_scale))
+
+    def sync(self):
+        st, js = self.req("GET", "/orders?product_id=%s&status=open" % self.a.product)
+        if st != 200 or not isinstance(js, list):
+            return
+        on_ex = {o.get("id"): o for o in js}
+        for k, v in list(self.live.items()):
+            o = on_ex.get(v["oid"])
+            if o is not None:
+                done = self.lots_of(o.get("filled_size", "0"))
+                prev = self.filled.get(k, 0)
+                if done > prev:
+                    self.filled[k] = done
+                    self.report(k, "fill", px=v["px"], qty=done - prev, leaves=v["qty"] - done, side=v["side"])
+                continue
+            # not open any more: ask how it ended
+            st2, d = self.req("GET", "/orders/" + v["oid"])
+            prev = self.filled.get(k, 0)
+            if st2 == 200 and isinstance(d, dict) and d.get("done_reason") == "filled":
+                self.cnt["fills"] += 1
+                self.report(k, "fill", px=v["px"], qty=v["qty"] - prev, leaves=0, side=v["side"])
+            elif st2 in (200, 404):
+                self.cnt["vanished"] += 1
+                self.log.emit("order_vanished", seg=k[0], id=k[1])
+                self.report(k, "canceled", px=v["px"], qty=v["qty"] - prev, leaves=0, reason="other", side=v["side"])
+            else:
+                continue  # could not tell; try again at the next sync
+            del self.live[k]
+        known = {v["oid"] for v in self.live.values()}
+        for oid in on_ex:
+            if oid not in known:
+                self.cnt["strays"] += 1
+                self.log.emit("stray_order", oid=oid)
+                self.req("DELETE", "/orders/" + str(oid))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default=SANDBOX_URL)
@@ -375,6 +575,7 @@ def main(argv=None):
     ap.add_argument("--log", default=None)
     ap.add_argument("--metrics", default=None)
     ap.add_argument("--metrics-s", type=float, default=1.0)
+    ap.add_argument("--loop", action="store_true", help="closed loop: answer every request with a report on stdout")
     ap.add_argument("--no-cancel-on-start", action="store_true", help="tests only")
     a = ap.parse_args(argv)
 
@@ -395,7 +596,7 @@ def main(argv=None):
         return e.code
 
     c = Client(base, key, secret, passphrase, a.timeout, a.test_exchange)
-    b = Bridge(a, c, log)
+    b = LoopBridge(a, c, log, sys.stdout) if a.loop else Bridge(a, c, log)
 
     def on_sig(signum, frame):
         b.stop.set()

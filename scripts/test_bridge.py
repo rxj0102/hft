@@ -45,11 +45,28 @@ class Bridge:
     def __init__(self, ex, tmp, extra=(), env=None, test=True):
         self.log = os.path.join(tmp, "bridge.jsonl")
         e = dict(os.environ)
+        e.pop("PYTHONUNBUFFERED", None)  # a bridge that forgets to flush must show up as silence, not be rescued by the environment
         e.update({"HFT_CB_KEY": KEY, "HFT_CB_SECRET": SECRET, "HFT_CB_PASSPHRASE": PASS})
         e.update(env or {})
         cmd = [sys.executable, BRIDGE, "--log", self.log, "--rate", "20", "--metrics-s", "0.2",
                "--metrics", os.path.join(tmp, "b.prom")] + (["--test-exchange", "--base-url", ex.url] if test else []) + list(extra)
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=e)
+
+    def collect_reports(self):
+        import threading
+        self.reports = []
+
+        def run():
+            for l in self.p.stdout:
+                try:
+                    self.reports.append(json.loads(l))
+                except ValueError:
+                    pass
+        self.reader = threading.Thread(target=run, daemon=True)
+        self.reader.start()
+
+    def reps(self, rt=None):
+        return [r for r in list(self.reports) if rt is None or r["rt"] == rt]
 
     def send(self, *objs):
         for o in objs:
@@ -371,6 +388,181 @@ def test_limits_and_secrets():
     ex.stop()
 
 
+def loop_bridge(ex, tmp, extra=()):
+    b = Bridge(ex, tmp, ["--loop"] + list(extra))
+    b.collect_reports()
+    return b
+
+
+def px(dollars):
+    return int(round(dollars * 10000))
+
+
+def test_loop():
+    print("closed loop: every request gets exactly one report")
+    ex, tmp = fresh("lp1")
+    b = loop_bridge(ex, tmp, ["--sync-s", "0.3"])
+    until(lambda: b.events("start_flat"))
+    # new -> accepted
+    b.send(hello(), new(1, px(81000.00)), new(2, px(81020.00), side="sell"))
+    check(until(lambda: len(b.reps("accepted")) == 2), "two orders: two accepted reports")
+    a = {r["id"]: r for r in b.reps("accepted")}
+    check(a[1]["seg"] == 1 and a[1]["px"] == px(81000.00) and a[1]["qty"] == 5 and a[1]["leaves"] == 5 and a[1]["side"] == "buy", "accepted carries segment, price, size, side: %s" % a[1])
+    check(len(ex.open_orders()) == 2, "and both rest on the exchange")
+    # replace -> cancel then new, one replaced report
+    mark = len(ex.requests())
+    b.send({"t": "rep", "seg": 1, "id": 1, "px": px(80990.00), "qty": 7})
+    check(until(lambda: len(b.reps("replaced")) == 1), "replace -> replaced")
+    r = b.reps("replaced")[0]
+    check(r["px"] == px(80990.00) and r["qty"] == 7 and r["leaves"] == 7, "replaced carries the new price and open size: %s" % r)
+    seq = [m for t, m, p, s_ in ex.requests()[mark:] if m in ("DELETE", "POST")]
+    check(seq[:2] == ["DELETE", "POST"], "as a cancel and then a new order: %s" % seq)
+    check(sorted(o["price"] for o in ex.open_orders()) == ["80990.00", "81020.00"], "and the exchange shows the new price")
+    # cancel -> canceled
+    b.send({"t": "can", "seg": 1, "id": 1})
+    check(until(lambda: len(b.reps("canceled")) == 1), "cancel -> canceled")
+    c = b.reps("canceled")[0]
+    check(c["id"] == 1 and c["leaves"] == 0 and c["qty"] == 7 and c["reason"] == "user", "canceled carries the removed size: %s" % c)
+    check(len(ex.open_orders()) == 1, "one order left")
+    # unknown ids
+    b.send({"t": "can", "seg": 1, "id": 99}, {"t": "rep", "seg": 1, "id": 98, "px": px(1.0), "qty": 5})
+    check(until(lambda: len(b.reps("cancel_rejected")) == 1 and len(b.reps("replace_rejected")) == 1), "unknown order: cancel_rejected and replace_rejected")
+    # every request got exactly one report
+    n_req = 6
+    check(len(b.reports) == n_req, "6 requests, %d reports" % len(b.reports))
+    rc, _ = b.finish("eof")
+    check(rc == 0 and not ex.open_orders(), "end of input: flat, exit 0")
+    ex.stop()
+
+
+def test_loop_refusals():
+    print("closed loop: refusals and losses")
+    ex, tmp = fresh("lp2")
+    ex.best_ask = 80000.00
+    b = loop_bridge(ex, tmp, ["--max-open", "1", "--max-notional", "10"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), new(1, px(81000.00)))                     # would cross: refused by the exchange
+    check(until(lambda: b.reps("rejected")), "post-only cross -> rejected")
+    r = b.reps("rejected")[0]
+    check(r["reason"] == "cross" and r["id"] == 1, "reason cross: %s" % r)
+    check(len(ex.requests("POST")) == 1, "not retried")
+    b.send(new(2, px(79000.00)))                              # fine
+    check(until(lambda: b.reps("accepted")), "a valid order is accepted")
+    b.send(new(3, px(79001.00)))                              # beyond max-open 1
+    check(until(lambda: len(b.reps("rejected")) == 2), "beyond --max-open -> rejected, nothing sent")
+    check(b.reps("rejected")[1]["reason"] == "badqty" and len(ex.requests("POST")) == 2, "reason badqty, no request: %s" % b.reps("rejected")[1])
+    b.send({"t": "can", "seg": 1, "id": 2}, new(4, px(79000.00), qty=1000))   # $790 > $10 cap
+    check(until(lambda: len(b.reps("rejected")) == 3), "beyond --max-notional -> rejected")
+    check(b.reps("rejected")[2]["reason"] == "badqty" and not ex.open_orders(), "nothing resting")
+    # replace into a cross: the old order is gone, the answer is canceled
+    b.send(new(5, px(79000.00)))
+    until(lambda: len(b.reps("accepted")) == 2)
+    ex.best_bid, ex.best_ask = 0.0, 78000.00
+    ncan = len(b.reps("canceled"))
+    b.send({"t": "rep", "seg": 1, "id": 5, "px": px(79500.00), "qty": 5})
+    check(until(lambda: len(b.reps("canceled")) == ncan + 1), "replace refused by post-only -> canceled (the order is gone)")
+    check(b.reps("canceled")[-1]["reason"] == "cross" and not ex.open_orders(), "reason cross, exchange empty")
+    # a lost reply to a POST: the order may exist; the answer is rejected and nothing is left behind
+    ex.best_ask = 1e9
+    ex.mode = "drop"
+    b.send(new(6, px(79000.00)))
+    until(lambda: len(b.reps("rejected")) == 4, 15)
+    ex.mode = "ok"
+    time.sleep(0.5)
+    check(len(b.reps("rejected")) == 4 and b.reps("rejected")[3]["reason"] == "other", "lost reply -> rejected(other): %s" % [(r["rt"], r["id"], r["reason"]) for r in b.reports])
+    check(not ex.open_orders(), "and the order that may have been created was cancelled by client id")
+    rc, _ = b.finish("eof")
+    check(rc == 0, "exit 0")
+    ex.stop()
+
+
+def test_loop_fills_and_vanished():
+    print("closed loop: fills and orders that leave")
+    ex, tmp = fresh("lp3")
+    b = loop_bridge(ex, tmp, ["--sync-s", "0.3"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), new(1, px(81000.00), qty=10), new(2, px(81020.00), qty=10, side="sell"), new(3, px(80900.00), qty=10))
+    until(lambda: len(b.reps("accepted")) == 3)
+    oid = {o["client_oid"]: o["id"] for o in ex.open_orders()}
+    by_side = {o["price"]: o["id"] for o in ex.open_orders()}
+    ex.fill(by_side["81000.00"], 0.00004)                     # 4 of 10 lots
+    check(until(lambda: b.reps("fill")), "partial fill is found by the sync")
+    f = b.reps("fill")[0]
+    check(f["id"] == 1 and f["qty"] == 4 and f["leaves"] == 6 and f["px"] == px(81000.00) and f["side"] == "buy", "fill: 4 lots, 6 left: %s" % f)
+    time.sleep(0.8)
+    check(len(b.reps("fill")) == 1, "and reported once, not at every sync")
+    ex.fill(by_side["81000.00"], 0.00003)                     # 3 more: the report carries the new part only
+    check(until(lambda: len(b.reps("fill")) == 2), "a second partial fill")
+    f = b.reps("fill")[1]
+    check(f["qty"] == 3 and f["leaves"] == 3, "3 lots, 3 left: %s" % f)
+    # cancelling a part-filled order removes only what is left
+    b.send({"t": "can", "seg": 1, "id": 1})
+    check(until(lambda: b.reps("canceled")), "cancel of the part-filled order")
+    c = b.reps("canceled")[0]
+    check(c["id"] == 1 and c["qty"] == 3 and c["leaves"] == 0, "the cancel removes the 3 lots that were left: %s" % c)
+    b.send(new(1, px(81000.00), qty=10))                      # reuse the id for the old fill-to-the-end check
+    until(lambda: len(b.reps("accepted")) == 4)
+    by_side = {o["price"]: o["id"] for o in ex.open_orders()}
+    ex.fill(by_side["81000.00"])
+    check(until(lambda: len(b.reps("fill")) == 3), "an order filled in one go")
+    f = b.reps("fill")[2]
+    check(f["qty"] == 10 and f["leaves"] == 0, "10 lots, nothing left: %s" % f)
+    b.send({"t": "can", "seg": 1, "id": 1})
+    check(until(lambda: b.reps("cancel_rejected")), "cancelling a filled order is refused")
+    ex.cancel_elsewhere(by_side["81020.00"])
+    check(until(lambda: len(b.reps("canceled")) == 2), "an order cancelled elsewhere is reported cancelled")
+    c = b.reps("canceled")[1]
+    check(c["id"] == 2 and c["leaves"] == 0 and c["qty"] == 10 and c["reason"] == "other", "cancelled: %s" % c)
+    # an order that finished while we were cancelling it
+    ex.fill(by_side["80900.00"])
+    b.send({"t": "can", "seg": 1, "id": 3})
+    check(until(lambda: len(b.reps("fill")) == 4 or len(b.reps("canceled")) == 3), "filled while being cancelled: resolved")
+    # a stray order placed behind our back is cancelled by the sync (loop mode has its own sync)
+    with ex.lock:
+        ex.orders["stray"] = {"id": "stray", "client_oid": "z", "side": "buy", "price": "1.00", "size": "0.1", "product_id": "BTC-USD",
+                              "filled_size": "0", "executed_value": "0"}
+    check(until(lambda: "stray" not in {o["id"] for o in ex.open_orders()}), "a stray order is cancelled")
+    rc, _ = b.finish("eof")
+    check(rc == 0, "exit 0")
+    ex.stop()
+
+    # end of segment with an order still resting: cancelled, no report. The sync is far away, so only the
+    # segment-end handling can do it.
+    ex, tmp = fresh("lp3b")
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), new(4, px(80800.00)))
+    until(lambda: len(b.reps("accepted")) == 1)
+    n = len(b.reports)
+    b.send({"t": "end", "seg": 1, "reason": "test"})
+    check(until(lambda: not ex.open_orders()), "segment end: an orphan is cancelled")
+    time.sleep(0.3)
+    check(len(b.reports) == n and b.events("orphan_order"), "without a report")
+    rc, _ = b.finish("eof")
+    check(rc == 0, "exit 0")
+    ex.stop()
+
+
+def test_loop_latency_and_segments():
+    print("closed loop: slow exchange, several segments")
+    ex, tmp = fresh("lp4")
+    ex.latency = 0.15
+    b = loop_bridge(ex, tmp)
+    until(lambda: b.events("start_flat"), 20)
+    b.send(hello(), new(1, px(81000.00)), new(1, px(79000.00), seg=2))
+    check(until(lambda: len(b.reps("accepted")) == 2, 20), "same id in two segments: two accepted, each tagged")
+    check(sorted(r["seg"] for r in b.reps("accepted")) == [1, 2], "segments 1 and 2")
+    t0 = time.monotonic()
+    b.send({"t": "rep", "seg": 2, "id": 1, "px": px(79010.00), "qty": 5})
+    until(lambda: b.reps("replaced"), 20)
+    check(time.monotonic() - t0 >= 0.3, "a replace takes two round trips (%.2f s at 0.15 s each way)" % (time.monotonic() - t0))
+    ids = [(r["seg"], r["id"], r["rt"]) for r in b.reports]
+    check(ids == [(1, 1, "accepted"), (2, 1, "accepted"), (2, 1, "replaced")], "reports in request order: %s" % ids)
+    rc, _ = b.finish("eof", 30)
+    check(rc == 0 and not ex.open_orders(), "flat")
+    ex.stop()
+
+
 def test_hft_live_mirror(live):
     if not live:
         return
@@ -408,6 +600,10 @@ if __name__ == "__main__":
     test_signals()
     test_errors()
     test_limits_and_secrets()
+    test_loop()
+    test_loop_refusals()
+    test_loop_fills_and_vanished()
+    test_loop_latency_and_segments()
     test_hft_live_mirror(live)
     print("test_bridge: " + ("all checks passed" if not fails else "%d FAILED" % fails))
     sys.exit(1 if fails else 0)

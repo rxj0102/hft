@@ -119,6 +119,12 @@ Evidence is `scripts/drill.py` against a local fake feed unless stated. The pape
 | exchange fills or drops a resting order | noticed at the next sync, wanted order placed again | `order_vanished` |
 | supervisor and bridge both gone while the exchange is down | orders stay resting | not handled |
 | the real sandbox behaving differently from the fake exchange | unknown | not tested |
+| (closed loop) bridge dies while quoting | `hft_live` sees the report pipe close: `exchange_lost`, kill, flatten times out, exit 6; trio restarts, new bridge cancels all | `exchange_lost`, `bridge_exited` |
+| (closed loop) exchange does not confirm cancels in time | segment ends NOT FLAT, kill switch latched, exit 4 | `segment_end` flat 0, `halted` |
+| (closed loop) stop requested while the exchange is down | NOT FLAT; supervisor exits 4 with `stop_not_flat`; orders may still rest | `stop_not_flat` |
+| (closed loop) exchange slow | quotes lag by two calls per move; flatten takes longer | `flatten_sim_ns` in `segment_end` |
+| (closed loop) fill happens | found at the next sync (up to `--sync-s`); position moves; the filled order may look alive until then | `hft_live_position_lots`, `fills` |
+| (closed loop) unparsable or stale report | counted and dropped | summary line "unparsable", `hft_live_exchange_reports_stale_total` |
 | supervisor itself dies | nothing restarts it | not handled |
 | host reboot | nothing restarts it | not handled |
 | orders left working at a real exchange after a kill -9 | not modelled (paper venue) | not handled |

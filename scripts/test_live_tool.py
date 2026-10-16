@@ -279,6 +279,130 @@ check(set(sides) == {"buy", "sell"} and sides["buy"] < sides["sell"], "mirror: b
 rc = subprocess.run([BIN, "--from", "/dev/null", "--orders-fd", "55"], capture_output=True).returncode
 check(rc == 1, "mirror: --orders-fd on a descriptor that is not open: exit 1")
 
+# 11. external venue: --exchange-fd. A scripted exchange in this process answers the orders hft_live writes.
+import threading
+
+
+class ScriptedExchange:
+    """reads order lines, answers each with a report line, optionally with a defect"""
+    def __init__(self, orders_r, reports_w, mode="ok"):
+        self.orders_r, self.reports_w, self.mode = orders_r, reports_w, mode
+        self.seen, self.sent = [], []
+        self.garbage_events = 0
+        self.th = threading.Thread(target=self.run)
+        self.th.start()
+
+    def reply(self, rec, rt, **kw):
+        out = {"t": "rep", "seg": rec["seg"], "rt": rt, "id": rec["id"], "px": rec.get("px", 0), "qty": rec.get("qty", 5),
+               "leaves": kw.pop("leaves", rec.get("qty", 5)), "reason": kw.pop("reason", "none"), "side": rec.get("side", "buy")}
+        out.update(kw)
+        line = json.dumps(out) + "\n"
+        self.sent.append(out)
+        try:
+            os.write(self.reports_w, line.encode())
+        except OSError:
+            pass
+
+    def run(self):
+        with os.fdopen(self.orders_r, "r") as f:
+            for line in f:
+                rec = json.loads(line)
+                self.seen.append(rec)
+                t = rec["t"]
+                if self.mode == "silent" or t in ("hello", "end"):
+                    continue
+                if self.mode == "garbage" and len(self.seen) % 3 == 0:
+                    self.garbage_events += 1
+                    os.write(self.reports_w, b"this is not json\n{\"t\":\"rep\",\"seg\":1}\n"
+                             b"{\"t\":\"rep\",\"seg\":1,\"rt\":\"accepted\",\"id\":1,\"px\":5,\"qty\":-5,\"leaves\":5}\n")
+                if t == "new":
+                    self.reply(rec, "accepted", seg=rec["seg"] + (50 if self.mode == "wrongseg" else 0))
+                elif t == "rep":
+                    self.reply(rec, "replaced")
+                elif t == "can":
+                    self.reply(rec, "canceled", leaves=0, reason="user")
+        if self.mode != "keepopen":
+            try:
+                os.close(self.reports_w)
+            except OSError:
+                pass
+
+
+def run_external(mode, feed_text, flatten_s="2", close_exchange_early=False, pace=0.02, extra=()):
+    o_r, o_w = os.pipe()          # hft_live -> exchange
+    r_r, r_w = os.pipe()          # exchange -> hft_live
+    proc = subprocess.Popen([BIN, "--report-s", "1000", "--stale-ms", "5000", "--orders-fd", str(o_w), "--exchange-fd", str(r_r),
+                             "--flatten-timeout-s", flatten_s] + list(extra), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, pass_fds=(o_w, r_r))
+    os.close(o_w); os.close(r_r)
+    ex = ScriptedExchange(o_r, r_w, mode)
+    for chunk in feed_text:
+        proc.stdin.write(chunk); proc.stdin.flush()
+        time.sleep(pace)
+    if close_exchange_early:
+        try:
+            os.close(r_w)
+        except OSError:
+            pass
+        time.sleep(0.3)
+    proc.stdin.close()
+    out, err = proc.communicate(timeout=60)
+    ex.th.join(timeout=10)
+    return proc.returncode, out, ex
+
+
+def ext_feed(n=60):
+    chunks = [snap(1)]
+    for i in range(n):
+        chunks.append(upd(2 + i, "buy", "100.05", "5" if i % 2 == 0 else "0"))
+    return chunks
+
+
+def summary_numbers(out):
+    for l in out.splitlines():
+        if l.startswith("  exchange:"):
+            nums = [int(x) for x in re.findall(r"(\d+) ", l)]
+            return nums
+    return None
+
+
+import re
+rc, out, ex = run_external("ok", ext_feed(), pace=0.03)
+kinds = [r["t"] for r in ex.seen]
+check(rc == 0, "external: scripted exchange, input ends -> exit 0 (rc=%s)" % rc)
+check(kinds.count("new") >= 2 and kinds.count("rep") >= 2 and kinds.count("can") >= 2, "external: the strategy traded against it: %s" % {k: kinds.count(k) for k in set(kinds)})
+nm = summary_numbers(out)
+check(nm and nm[0] == len(ex.sent) and nm[2] == 0, "external: every report was applied (%s of %d), none unparsable" % (nm and nm[0], len(ex.sent)))
+check("flat" in out and "NOT FLAT" not in out, "external: segment ended flat")
+newids = {r["id"] for r in ex.seen if r["t"] == "new"}; canids = {r["id"] for r in ex.seen if r["t"] == "can"}
+check(newids and newids <= canids, "external: every order was cancelled before the end")
+
+rc, out, ex = run_external("garbage", ext_feed(30), pace=0.03)
+nm = summary_numbers(out)
+check(rc == 0 and nm and ex.garbage_events >= 3 and nm[2] == 3 * ex.garbage_events,
+      "external: unparsable report lines (not JSON, missing fields, negative size) are counted and ignored (%s, %d bursts)" % (nm, ex.garbage_events))
+
+rc, out, ex = run_external("wrongseg", ext_feed(10), flatten_s="0.5", pace=0.03)
+nm = summary_numbers(out)
+check(nm and nm[1] >= 2 and nm[0] == 0, "external: reports for another segment are not applied (%s)" % (nm,))
+check(rc == 4 and "NOT FLAT" in out, "external: and so the segment cannot be flat: exit 4 (rc=%s)" % rc)
+
+t0 = time.time()
+rc, out, ex = run_external("silent", ext_feed(10), flatten_s="0.5", pace=0.03)
+check(rc == 4 and "NOT FLAT" in out and time.time() - t0 >= 0.5, "external: an exchange that never answers -> flatten times out, NOT FLAT, exit 4 (rc=%s)" % rc)
+
+logp3 = tempfile.mktemp(suffix=".log")
+rc, out, ex = run_external("keepopen", ext_feed(10), flatten_s="0.5", close_exchange_early=True, pace=0.03, extra=["--log", logp3])
+names = [json.loads(l)["event"] for l in open(logp3)]
+check(rc == 6 and "exchange_lost" in names, "external: exchange pipe closed -> exchange_lost, exit 6 (restartable) (rc=%s)" % rc)
+os.remove(logp3)
+
+for args, what in (([BIN, "--exchange-fd", "3"], "without --orders-fd"), ([BIN, "--from", "/dev/null", "--orders-fd", "3", "--exchange-fd", "4"], "with --from")):
+    rr, ww = os.pipe()
+    p_ = subprocess.run(args, capture_output=True, pass_fds=(rr, ww))
+    check(p_.returncode == 1, "external: --exchange-fd %s: exit 1" % what)
+    os.close(rr); os.close(ww)
+
 if failures:
     sys.exit("%d live tool test failures" % failures)
 print("test_live_tool: all checks passed")
