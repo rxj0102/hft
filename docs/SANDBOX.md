@@ -30,11 +30,11 @@ capture_l2.py --out - | hft_live --orders-fd 3 3>| order_bridge.py        (scrip
 
 Create an API key in the Coinbase Exchange sandbox with trade permission on a profile used only for this. Put the three values into environment variables in your shell. Do not paste them into a chat, a file in the repository, or a command line.
 
-1. Smoke test, one order far below the market, post-only, cancelled after five seconds (notional about 0.10 USD):
+1. Smoke test (`scripts/smoke_sandbox.py`, 13 steps, minimum-size orders worth under 5 USD):
 ```
-(printf '{"t":"hello","v":1,"px_scale":10000,"qty_scale":100000}\n{"t":"new","seg":1,"id":1,"side":"buy","px":10000000,"qty":10,"type":4}\n'; sleep 5) | python3 scripts/order_bridge.py --log -
+python3 scripts/smoke_sandbox.py --report smoke_report.json
 ```
-   Expected log: `bridge_start`, `clock_skew`, `cancel_all`, `start_flat` (flat true), a `placed` count of 1 in the final `exit` line, `exit_flat` (flat true). Anything else: stop and read it.
+   It checks the clock, the product's size and price steps, the ticker, that a signed request is accepted, that nothing else is working on the product (it refuses to go on otherwise; `--cancel-existing` lets it cancel), a post-only order far below the bid (in the open list, readable by id, with `filled_size`), a crossing post-only order (must be refused; the message is recorded), cancel by id, cancel by client id, cancel-all, then the real bridge in `--loop` mode (new, replace, cancel, end: reports `accepted`, `replaced`, `canceled`, exit flat). Each step prints PASS or FAIL with what was seen; the first failure stops the run and cancels whatever the script placed. `smoke_report.json` has step results, response field names, error messages and latencies, and no key, secret, passphrase or account id, so it is safe to share. See "Reading the result" below.
 2. Supervised, on the sandbox feed so that prices match the sandbox's own book:
 ```
 python3 scripts/supervise.py --run-dir /tmp/hft-sbx --bridge --url wss://ws-feed-public.sandbox.exchange.coinbase.com \
@@ -59,3 +59,19 @@ python3 scripts/supervise.py --run-dir /tmp/hft-sbx --bridge --url wss://ws-feed
 28 injected bugs in `order_bridge.py` (signing, URL guard, missing keys, ordering of cancels and places, pacing, 401/403 handling, rejected-order retry, lost-reply handling, cancel-all at start and exit, segment end, notional and open-order caps, secret logging, price rounding, strays, vanished orders, clock skew, 429 pause, exit codes, segment keys, 5xx counting, replace and cancel handling, the URL guard's fall-through) and 15 in the C++ tap and mirror (tap call, segment number, dropped replace/cancel/end lines, side, overflow, write errors, final flush, partial writes, hello, loss reporting). Each had to make `test_bridge.py`, `test_live_tool.py` or `test_live` fail.
 
 First runs: 6 of the 28 bridge bugs and 4 of the 15 C++ bugs survived. Each was a missing test, not an equivalent mutant, and got a test: a cancel must precede a new order that is waiting; 403 is fatal like 401; a segment end clears the segment without any cancel lines; a 429 must cause a pause (not just pacing); a 5xx in the middle of a run must stop the bridge by itself (before, the start-up failure hid it); the URL guard must not fall through; the side of an order; a late reader must receive the whole backlog; a partial write must not drop data; a loss at exit must be reported. All are caught now. (One mutation run also showed that the production-URL test, with a broken guard, would have sent a request to the production host; it now runs behind a dead local proxy.)
+
+## Reading the smoke test result
+
+| Output | Meaning |
+|---|---|
+| `FAIL 2 clock` | Fix the machine's clock. The exchange refuses requests more than 30 s off. |
+| `FAIL 3 product ... DO NOT FIT` | The product's sizes or price step differ from the bridge's 1e-5 lots and cents: change `px_scale`/`qty_scale` or the product before anything else. |
+| `FAIL 5 auth` with 401 or 403 | Key, secret, passphrase, permission (trade), profile, or an IP allow-list. The bridge treats this as fatal (exit 4). |
+| `FAIL 6 flat` | Orders already work on the product. Cancel them yourself, or pass `--cancel-existing`. |
+| `FAIL 7 ... filled_size field MISSING` | The closed loop finds fills from this field; it would need a different method. |
+| `PASS 8 cross ... does NOT recognise` | The refusal worked but its message does not contain "post only"; the bridge would report the reason as `other` instead of `cross`. The OMS treats both as a rejection, so this is cosmetic, but tell me the message and the bridge can match it. |
+| `FAIL 8 ... ACCEPTED` | The exchange accepted a crossing post-only order. Do not run the bridge. |
+| `FAIL 12 bridge` | Read the line: the reports seen, the exit code, whether it ended flat. |
+| latencies in the summary | The p50 and max per call. In the closed loop a quote move costs two calls; if p50 is above about 150 ms, expect the strategy to trade on stale quotes. |
+
+`scripts/test_smoke.py` tests the script itself against the fake exchange (healthy run; bad credentials; clock off; existing orders; a crossing order that is accepted; a cancel that does nothing; no `filled_size`; a 500 on the cross; a refused replace; a stray before the last check; refused URLs, missing or malformed variables; no secret in the output or report). 14 mutants of the script were injected and all are caught. The fake exchange is not the real sandbox: the script is untested against it, and the first real run is the experiment.

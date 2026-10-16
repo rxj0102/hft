@@ -42,6 +42,8 @@ jobs:
       - name: Order bridge tests (local fake exchange)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: python3 scripts/test_bridge.py build/release/hft_live
+      - name: Sandbox smoke test (against the local fake exchange only)
+        run: python3 scripts/test_smoke.py
       - name: Fault drills (supervisor, local fake feed)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: python3 scripts/drill.py --live build/release/hft_live

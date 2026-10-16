@@ -35,6 +35,16 @@ class FakeExchange:
         self.best_bid, self.best_ask = 81000.00, 81000.10
         self.rate, self.burst, self.tokens, self.t_tok = rate, burst, burst, time.monotonic()
         self.enforce_rate = True
+        # faults for the smoke test's tests
+        self.cancel_noop = False       # DELETE /orders/{id} answers 200 and does nothing
+        self.omit_filled_size = False  # order records lack filled_size
+        self.cross_http = None         # status returned for a crossing post-only order
+        self.fail_post_number = None   # the Nth POST /orders is refused
+        self.ghost_at = None           # at the Nth signed request a stray order appears
+        self.nreq = 0
+        self.nposts = 0
+        self.posted = []               # (price, size, post_only) of every POST /orders
+        self.honour_post_only = True   # False: a crossing "post-only" order is accepted (a broken exchange, for the smoke test's tests)
         self.httpd = None
 
     # ---- helpers for tests ----
@@ -133,6 +143,13 @@ class FakeExchange:
     def dispatch(self, method, rawpath, u, body, h):
         if u.path == "/time":
             return 200, {"iso": "", "epoch": time.time() + self.skew}, False
+        if u.path.startswith("/products/"):  # public market data, no signature needed
+            parts = u.path.split("/")
+            if len(parts) == 3:
+                return 200, {"id": parts[2], "base_min_size": "0.00001", "base_increment": "0.00000001", "quote_increment": "0.01",
+                             "status": "online", "post_only": False, "trading_disabled": False}, False
+            if len(parts) == 4 and parts[3] == "ticker":
+                return 200, {"bid": "%.2f" % self.best_bid, "ask": "%.2f" % self.best_ask, "price": "%.2f" % self.best_bid}, False
         if self.mode == "down":
             return 500, {"message": "internal"}, False
         if self.mode == "auth":
@@ -167,7 +184,14 @@ class FakeExchange:
     def apply(self, method, u, body):
         q = parse_qs(u.query)
         with self.lock:
+            self.nreq += 1
+            if self.ghost_at and self.nreq == self.ghost_at:
+                self.orders["ghost"] = {"id": "ghost", "client_oid": "ghost", "side": "buy", "price": "1.00", "size": "0.1",
+                                        "product_id": "BTC-USD", "status": "open", "filled_size": "0", "executed_value": "0"}
             if method == "POST" and u.path == "/orders":
+                self.nposts += 1
+                if self.fail_post_number and self.nposts == self.fail_post_number:
+                    return 400, {"message": "size or price increment invalid"}
                 try:
                     o = json.loads(body)
                     price, size = float(o["price"]), float(o["size"])
@@ -177,7 +201,10 @@ class FakeExchange:
                     return 400, {"message": "invalid order"}
                 if size < 0.00001 or abs(price * 100 - round(price * 100)) > 1e-6:
                     return 400, {"message": "size or price increment invalid"}
-                if o.get("post_only") and ((o["side"] == "buy" and price >= self.best_ask) or (o["side"] == "sell" and price <= self.best_bid)):
+                self.posted.append((price, size, bool(o.get("post_only"))))
+                if o.get("post_only") and self.honour_post_only and ((o["side"] == "buy" and price >= self.best_ask) or (o["side"] == "sell" and price <= self.best_bid)):
+                    if self.cross_http:
+                        return self.cross_http, {"message": "exchange trouble"}
                     return 400, {"message": "Post only mode"}
                 if o["client_oid"] in self.by_coid:
                     return 400, {"message": "client_oid already used"}
@@ -201,6 +228,8 @@ class FakeExchange:
                 return 404, {"message": "NotFound"}
             if method == "DELETE" and u.path.startswith("/orders/"):
                 oid = u.path[len("/orders/"):]
+                if oid in self.orders and self.cancel_noop:
+                    return 200, oid
                 if oid in self.orders:
                     o = self.orders.pop(oid)
                     o["status"], o["done_reason"] = "done", "canceled"
@@ -210,6 +239,8 @@ class FakeExchange:
             if method == "GET" and u.path.startswith("/orders/") and not u.path.startswith("/orders/client:"):
                 oid = u.path[len("/orders/"):]
                 rec = self.orders.get(oid) or self.done.get(oid)
+                if rec and self.omit_filled_size:
+                    rec = {k: v for k, v in rec.items() if k != "filled_size"}
                 return (200, rec) if rec else (404, {"message": "NotFound"})
             if method == "GET" and u.path == "/orders":
                 pid = (q.get("product_id") or [None])[0]

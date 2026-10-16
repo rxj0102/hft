@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 14
+- `scripts/smoke_sandbox.py`: a 13-step smoke test for the sandbox, to be run on your own machine with your own key (variables only, sandbox URL only). It checks the clock, the product's steps and minimum size, the ticker, a signed request, a flat start, a far post-only order (open list, GET by id, `filled_size`), a crossing post-only order that must be refused (the message is recorded), cancel by id and by client id, cancel-all, and the real bridge in `--loop` mode (accepted, replaced, canceled, flat at exit). It writes a report with step results, response field names, messages and latencies, and nothing that identifies the account. A failed run cancels what it placed (and only that: it refuses to start over existing orders).
+- `scripts/test_smoke.py` (24 checks) runs it against the fake exchange, which gained public market-data endpoints and fault knobs (cancel that does nothing, no `filled_size`, a 500 on the cross, a refused replace, a stray order, post-only not honoured). 14 mutants of the script: the first run left 7 survivors, each of which needed a fault in the fake; all are caught now. The cleanup initially cancelled orders it had not placed (a test caught it); it now arms only after the first order.
+- Not done: any run against the real sandbox. The script has never talked to it.
+
 ### Phase 13
 - Closed loop (docs/CLOSED_LOOP.md, ADR 26). `scripts/order_bridge.py --loop` turns the exchange's answers (accepted, rejected, fill, canceled, replaced, cancel/replace rejected) into report lines; `hft_live --exchange-fd N` feeds them to the gateway and OMS, numbered per segment. The paper venue is not used in this mode. The pipeline and its perf gate are unchanged (797.80 instructions per input).
 - Flatten is a state: a segment ending cancels, then waits for the exchange to confirm (feed updates ignored, strategy not shown the reports, stale check off) and ends flat when no order is open. After `--flatten-timeout-s` (5 s) it is a failed flatten: kill switch, halt, exit 4. A closed report pipe is exit 6 (restartable; the next bridge cancels everything).
