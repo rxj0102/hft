@@ -53,6 +53,26 @@ Cancels bypass risk, so quotes can always be pulled.
 | Latency regression | `perf_gate.py` fails above +2% instructions per input |
 | Hugepage or mlock unavailable at startup | startup continues; `RegionReport` shows what was achieved; latency will be worse |
 
+## Real-data path (offline capture and replay, Phase 9)
+
+| Failure | Response | Visible as | Evidence |
+|---|---|---|---|
+| WebSocket drops | capture reconnects with backoff, writes a `reconnect` marker; the server sends a new snapshot, which starts a new segment | markers in the file; segment count in `hft_replay` | `scripts/test_capture.py` |
+| Server goes silent | after `--idle-timeout` the connection is treated as dead and reconnected | `idle_timeout` marker | test_capture |
+| Too many reconnects | the capture gives up and writes `give_up` | marker, exit with the stop record | test_capture |
+| Damaged or unknown message | counted, skipped; never produces book changes | `bad`, `other` in the load line | test_l2 (20,000 damaged messages), fuzz_l2 |
+| Update before any snapshot | dropped and counted | `dropped before a snapshot` | test_l2 |
+| Snapshot with one side only | cannot be centred; unusable | `unusable snapshots` | test_l2 |
+| Price off the tick grid | dropped, counted | `off-tick` | test_l2 |
+| Price outside the grid window | dropped, counted | `outside window` (about 65% of changes on a real BTC capture: far-from-market levels) | test_l2 |
+| Touch nears the window edge | the segment ends; later messages are not replayed | `ended: price left the window` | test_l2 scripted exit |
+| Size finer than one lot | floored, counted | `floored sub-lot sizes` | test_l2 |
+| Size beyond the 32-bit wire field | clamped, counted | `clamped` | test_l2 |
+| Converter emits something the book rejects | would show as a desync or a model mismatch; both are fuzz oracles | `desyncs`, `model check` failures, exit 4 | fuzz_l2, test_l2 |
+| Replay not deterministic | exit 2 | `determinism: DIFFERENT` | every `hft_replay` run |
+
+Not handled: re-centring the grid when the market leaves it (the segment simply ends), gaps inside a connection (the feed has no sequence numbers to detect them), and any behaviour on a live connection.
+
 ## Known gaps
 
 - Position is not flattened automatically after a kill. That is a human decision (see the runbook).

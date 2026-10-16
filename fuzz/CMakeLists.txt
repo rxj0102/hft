@@ -40,3 +40,9 @@ add_executable(fuzz_pipeline fuzz_pipeline.cpp)
 target_link_libraries(fuzz_pipeline PRIVATE hft_core)
 target_compile_options(fuzz_pipeline PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
 target_link_options(fuzz_pipeline PRIVATE -fsanitize=fuzzer,address,undefined)
+
+# Real-data path: capture text -> parser -> converter -> pipeline, against an independent model.
+add_executable(fuzz_l2 fuzz_l2.cpp)
+target_link_libraries(fuzz_l2 PRIVATE hft_core)
+target_compile_options(fuzz_l2 PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
+target_link_options(fuzz_l2 PRIVATE -fsanitize=fuzzer,address,undefined)

@@ -381,3 +381,27 @@ python3 scripts/flamegraph.py --top 14 t2t.prof t2t_flame.svg
 
 ### Limits
 Synthetic market. Shared VM. Hot numbers are best case. NIC, kernel and exchange not measured. Cache and branch figures are simulated. The strategy runs on every packet (an event-relevance filter is deferred because it changes timing semantics). Book capacity must be sized per instrument.
+
+
+## 15. Phase 9: real market data, offline
+
+Full write-up in LIVE_FEED.md; this section records the build.
+
+What was built: `scripts/capture_l2.py` (TLS WebSocket capture with reconnect and a concurrent exchange-snapshot check), `feed/l2.hpp` (decimal and JSON parsing, `L2Converter`), `feed/replay.hpp` (`CaptureLoader`, `AckVenue`, `replay_segment`, `verify_against_snapshot`), the `hft_replay` tool, `test_l2`, `scripts/test_capture.py`, `fuzz_l2`. The hot path was not touched: `perf_gate.py` still reads 797.80 instructions per input.
+
+Findings that changed the design (from probing the live feed before writing code):
+- the feed is level 2, so the engine's order-by-order book is fed by one synthetic order per level (ADR 15);
+- `l2update` has no sequence number, so there is no A/B arbitration or gap handling to exercise here; loss shows up as a dropped connection and a new snapshot, which starts a new segment;
+- the book is far wider than the engine's grid at a $0.01 tick, hence the window (ADR 17);
+- size has 8 decimals; one lot is 10^-5, and the wire is 32-bit.
+
+Verification:
+- parsers: edge cases, 20,000 damaged messages, a nesting limit;
+- the converter against an independent level model on 12 random captures with junk lines, heartbeats and reconnects, plus a scripted window exit through the pipeline;
+- the checker itself: eleven tests that tamper with one field of the model and require the replay to notice;
+- real data: 3 live captures, pipeline book equal to the model at every checkpoint, exchange snapshot check 20/20, 18/20, 20/20;
+- mutation check: 35 injected bugs. The first honest run left 9 alive (window and nesting boundaries, bid-equals-ask, the time limit, and the five oracle mutants). A second pass rewrote 7 mutants that had only died as compile errors and found 2 more (the bid-side window exit and reports never reaching the gateway). Each has a test. 35 of 35. An early run of the mutation harness reported nearly everything alive because it read the exit status of `tail` instead of the test; that was a harness bug and is fixed;
+- fuzzing: `fuzz_l2` 54,599 runs in two minutes with no finding, and it finds an injected converter bug inside a minute;
+- determinism: identical wire hashes on gcc and clang for three real captures; ASan and UBSan clean.
+
+Honest limits: see LIVE_FEED.md. Biggest: offline only, level 2 only, one product, no fills, and timing that excludes everything in front of the engine.

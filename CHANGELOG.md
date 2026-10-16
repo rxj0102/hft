@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Phase 9
+- Real market data, offline (docs/LIVE_FEED.md): `scripts/capture_l2.py` records the public Coinbase level-2 feed (receive-time stamps, reconnect with backoff, markers, optional concurrent exchange-snapshot fetch). `feed/l2.hpp` parses it (decimal and JSON, depth-limited) and converts aggregated levels into the engine's ITCH-style events using one synthetic order per level. `feed/replay.hpp` loads captures into segments, replays them through the unchanged `Pipeline` with an ack-only paper venue (rejects crossing post-only orders, never fills), and checks the pipeline's book against an independent model at checkpoints and at the end. `hft_replay` is the tool.
+- Findings from the live feed that shaped the design: level 2 only, no sequence numbers on updates, a book far wider than the engine grid (about 65% of changes fall outside a 655-wide window and are dropped), 8-decimal sizes (floored to 1e-5 lots). Binance returned HTTP 451 from the sandbox; Coinbase worked.
+- Evidence: pipeline book equals the model on every checkpoint of real captures; the exchange's own snapshot, fetched on a second connection and compared at the same moment, matched 20/20, 18/20 and 20/20 levels (a control against a different time gave 0/20); identical wire hashes on gcc and clang; ASan and UBSan clean; hot path untouched (perf gate 797.80 instructions per input).
+- Real-data processing time (90 s BTC-USD capture, shared VM, three runs): per packet p50 519-535 ns, p99 3.2-3.7 us; about 57-61 ns per feed message. Not comparable with the synthetic 128 ns headline (about 14 messages per real packet), and excludes network, TLS, JSON parsing and the capture process.
+- Tests: `test_l2` (parsers, converter, loader, venue, checker-must-fail tests, 12 random captures against the model, scripted window exit); `scripts/test_capture.py` (fake server: drop, silence, give-up, verify); `fuzz_l2` (54,599 clean runs in two minutes; finds an injected converter bug in under a minute). CI runs both.
+- Mutation check: 35 injected bugs. The first honest run left 9 alive (window and nesting boundaries, bid equals ask, the time limit, five oracle mutants); a second pass that rewrote 7 compile-error-only kills found 2 more (bid-side window exit, reports never reaching the gateway). All now have tests; 35 of 35. A first harness run reported nearly everything alive because it read the exit status of `tail`; fixed.
+- CI trigger fixed: the workflow only ran on pushes to `main` while the branch was `master`.
+- Limits: offline only, no live ingestion or order entry, level 2, one product and venue, no fills, fixed grid window per segment, recorded data deliberately not committed.
+
 ## 0.1.0
 
 ### Phase 8

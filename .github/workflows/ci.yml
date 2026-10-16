@@ -33,6 +33,9 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Test
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -j2
+      - name: Capture script tests
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        run: python3 -m pip install --break-system-packages websockets && python3 scripts/test_capture.py
 
   tsan:
     runs-on: ubuntu-24.04
@@ -56,6 +59,8 @@ jobs:
             mkdir -p corpus/$t
             build/fuzz/fuzz/$t -max_total_time=45 -timeout=10 corpus/$t
           done
+          mkdir -p corpus/fuzz_l2
+          build/fuzz/fuzz/fuzz_l2 -max_total_time=45 -timeout=10 corpus/fuzz_l2 fuzz/seeds/l2
 
   # The performance gate. Wall-clock time on a shared runner is noise, so the
   # gate counts instructions under valgrind (deterministic) against the checked

@@ -4,7 +4,7 @@ This is the as-built architecture at release 0.1.0. `DESIGN.md` is the phase-by-
 
 ## What this is, and what it is not
 
-A tick-to-trade engine in C++20, built as header-only libraries plus tests, benches and fuzzers. Everything runs against a synthetic exchange: a matching engine and ITCH-style feed publisher in `sim/`, an order-entry wire protocol in `gw/`, and a queue-aware backtester in `bt/`.
+A tick-to-trade engine in C++20, built as header-only libraries plus tests, benches and fuzzers. Everything runs against a synthetic exchange (and, offline, against recorded real market data): a matching engine and ITCH-style feed publisher in `sim/`, an order-entry wire protocol in `gw/`, and a queue-aware backtester in `bt/`.
 
 It is not a deployable trading binary. There is no NIC driver, no kernel-bypass code, no live exchange connection, and no FIX parser. Those are listed under "Not built" below. The measured path starts when packet bytes are handed to the pipeline and ends when the reaction frames are staged in a buffer.
 
@@ -63,6 +63,7 @@ Sizes that matter for latency, all fixed at init: book price grid (`BookConfig::
 | `strat/` | `MarketMaker` |
 | `bt/` | backtester, virtual venue with queue-position fills, synthetic market, metrics |
 | `t2t/` | `Pipeline`, `Session` (record/replay), stage probes |
+| `feed/` | real-data tooling (not hot path): JSON/decimal parsing, level-2 to ITCH conversion, capture loader, paper venue, replay runner |
 
 ## Correctness machinery
 
@@ -76,6 +77,10 @@ Sizes that matter for latency, all fixed at init: book price grid (`BookConfig::
 
 CMake presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fuzz`. Hot-path headers are compiled with `-fno-exceptions -fno-rtti` by `hft_hotpath_check`. `.github/workflows/ci.yml` runs gcc-13 and clang-18 across release/asan/ubsan, tsan, a fuzz smoke and the perf gate. That workflow has not been run on GitHub from the development sandbox; its commands were run locally.
 
+## Real data
+
+A recorded Coinbase level-2 capture can be converted into the engine's ITCH-style packets and replayed through the unchanged `Pipeline` (`hft_replay`, see LIVE_FEED.md). This is offline tooling: the capture is a Python script, the conversion allocates freely, and nothing in `feed/` is on the hot path.
+
 ## Not built
 
-FIX 4.4 parser, AVX2 paths, MSan, AF_XDP/DPDK ingress, GoogleTest/vcpkg wiring (tests use a small check macro), multi-instrument or multi-venue operation, any real exchange connectivity, and bare-metal latency confirmation.
+Live ingestion and live order entry against a real venue, FIX 4.4 parser, AVX2 paths, MSan, AF_XDP/DPDK ingress, GoogleTest/vcpkg wiring (tests use a small check macro), multi-instrument or multi-venue operation, any real exchange connectivity, and bare-metal latency confirmation.

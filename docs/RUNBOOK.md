@@ -86,5 +86,19 @@ Needs the `perf` preset (frame pointers kept, `-g`).
 ### Fuzz crash
 The crashing input is written as `crash-<hash>` in the working directory. Rerun with `./build/fuzz/fuzz/fuzz_<target> crash-<hash>`. Fix the bug or, if the oracle was wrong, fix the oracle and say so (this happened once: a gap can be open with nothing parked). Add a regression test before closing it.
 
+### Capturing and replaying real data
+```
+python3 -m pip install websockets
+python3 scripts/capture_l2.py --seconds 90 --verify --out data/btc.l2
+./build/release/hft_replay --verify data/btc.l2.verify data/btc.l2
+```
+Read the output in this order:
+1. `model check ... DIFFERS` or exit 4: the pipeline's book disagrees with the independent model. Treat as a bug. Save the capture and the output; do not trade or tune on that run.
+2. `determinism ... DIFFERENT` or exit 2: same.
+3. `exchange snapshot check`: expect nearly all of the 20 levels identical (live runs gave 20, 18, 20). A result near zero means the feed was read wrongly or the snapshot is from another time.
+4. `outside window` large and `ended: price left the window`: the market moved out of the grid. Recapture, or raise `--levels`, knowing that a bigger grid costs cache.
+5. Several `segments`: the connection dropped and reconnected; each segment is replayed on its own.
+Do not commit anything under `data/`.
+
 ## 5. Known operational gaps
 No automatic flatten. No order-entry heartbeats or retransmission. One instrument per pipeline. Snapshot delivery is the host's job. No live-trading mode has been tested.

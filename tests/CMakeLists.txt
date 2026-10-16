@@ -52,6 +52,11 @@ add_executable(test_bt test_bt.cpp)
 target_link_libraries(test_bt PRIVATE hft_core)
 add_test(NAME test_bt COMMAND test_bt 100000)
 
+add_executable(test_l2 test_l2.cpp)
+target_link_libraries(test_l2 PRIVATE hft_core)
+target_include_directories(test_l2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+add_test(NAME test_l2 COMMAND test_l2)
+
 add_executable(test_t2t test_t2t.cpp)
 target_link_libraries(test_t2t PRIVATE hft_core)
 target_include_directories(test_t2t PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)

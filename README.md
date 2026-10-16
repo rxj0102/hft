@@ -16,6 +16,10 @@ Packet bytes in to reaction frames staged, hot caches, shared 2-vCPU VM at 2.8 G
 
 The range is run to run on the same VM, hours apart (128 ns early in the session, about 160 ns later, both gcc builds equal). A shorter 100,000-request run gave 248 ns because it has only 2414 order ticks and a cold start; use 300,000 requests or more. Per-stage budget, cache analysis and method are in [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md). Cache and branch figures come from a simulator because the sandbox has no hardware counters, and are labelled that way.
 
+## Real data
+
+`hft_replay` runs recorded Coinbase BTC-USD level-2 data through the same pipeline and checks the book against an independent model and against the exchange's own snapshot (20/20, 18/20 and 20/20 identical levels on three live captures). Per feed message the engine costs about 60 ns on this VM; a real packet carries about 14 messages, so per-packet time is about 0.5 us at p50 and 3-4 us at p99. This is offline replay, not a live connection, and the paper venue never fills. See [docs/LIVE_FEED.md](docs/LIVE_FEED.md).
+
 ## What is in the box
 
 - Hot path with no heap, exceptions, RTTI, virtual calls, locks or syscalls (compiled with `-fno-exceptions -fno-rtti`; allocation-free by test; page-fault-free by bench check).
@@ -41,6 +45,7 @@ Presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fuzz`. R
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | as-built architecture and module map |
 | [docs/DESIGN.md](docs/DESIGN.md) | phase-by-phase design log with measurements |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | decision records, including rejected options |
+| [docs/LIVE_FEED.md](docs/LIVE_FEED.md) | capture, convert and replay real market data; what is proven and what is not |
 | [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | measured budget, method, noise, how to reproduce |
 | [docs/FAILURE_MODES.md](docs/FAILURE_MODES.md) | what fails, what the engine does, what proves it |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | startup checks, alarms, kill switch, tooling triage |
@@ -52,5 +57,6 @@ Presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fuzz`. R
 - Timings come from a shared VM with hypervisor stalls: p99.9 and max are mostly noise from the machine. Bare-metal confirmation has not been done.
 - The measured path excludes the NIC, kernel and exchange.
 - Not built: FIX 4.4 parser, AVX2, MSan, AF_XDP/DPDK ingress, GoogleTest/vcpkg wiring, multi-instrument operation.
-- The GitHub Actions workflow has not been run on GitHub; its commands were run locally.
+- Real-data replay is offline and level 2 only (one product, one venue); there is no live trading path. Recorded exchange data is not committed.
+- The GitHub Actions workflow has not been seen running on GitHub from the development sandbox; its commands were run locally.
 - No automatic flatten after a kill; that is a human decision (see the runbook).
