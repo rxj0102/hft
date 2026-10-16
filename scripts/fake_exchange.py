@@ -10,6 +10,9 @@ bridge behaves against the documented API, not that the real sandbox agrees.
   ex.mode : "ok" | "down" (500) | "auth" (401) | "forbidden" (403) | "slow" (sleeps ex.delay before answering, still applies the effect)
             | "drop" (applies the effect, then closes the socket without answering)
   ex.skew : seconds added to the time it reports on /time
+  ex.start_ws(); ex.ws_url : the `user` channel of the websocket feed (authenticated like the real one; sends received/open on
+            a new order, match on a fill, done on completion or cancel). ex.ws_mode "ok" | "reject_auth"; ex.ws_mute holds events back
+            until ex.ws_flush(); ex.ws_drop() closes every client; ex.before_cancel(oid) is a hook run just before a cancel by id.
 """
 import base64
 import hashlib
@@ -44,6 +47,13 @@ class FakeExchange:
         self.nreq = 0
         self.nposts = 0
         self.posted = []               # (price, size, post_only) of every POST /orders
+        self.ws_port, self.ws_loop, self.ws_clients = None, None, set()
+        self.ws_mode, self.ws_mute, self.ws_unsent = "ok", False, []
+        self.ws_cancel_reason = "canceled"
+        self.ws_silent = False         # subscribes fine, then never sends an event
+        self.ws_subscriptions, self.ws_rejected = 0, 0
+        self.before_cancel = None
+        self.trade_id = 0
         self.honour_post_only = True   # False: a crossing "post-only" order is accepted (a broken exchange, for the smoke test's tests)
         self.httpd = None
 
@@ -63,11 +73,19 @@ class FakeExchange:
             done += add
             o["filled_size"] = "%.8f" % done
             o["executed_value"] = "%.8f" % (done * float(o["price"]))
-            if done >= total - 1e-12:
+            full = done >= total - 1e-12
+            if full:
                 o["status"] = "done"
                 o["done_reason"] = "filled"
                 self.done[oid] = self.orders.pop(oid)
-            return True
+            self.trade_id += 1
+            match = {"type": "match", "trade_id": self.trade_id, "maker_order_id": oid, "taker_order_id": "other-" + str(self.trade_id),
+                     "product_id": o["product_id"], "size": "%.8f" % add, "price": o["price"], "side": o["side"]}
+            fin = {"type": "done", "reason": "filled", "order_id": oid, "remaining_size": "0"} if full else None
+        self.ws_send(match)
+        if fin:
+            self.ws_send(fin)
+        return True
 
     def cancel_elsewhere(self, oid):
         """Cancelled behind the bridge's back (by the exchange or another client)."""
@@ -77,7 +95,91 @@ class FakeExchange:
                 o["status"] = "done"
                 o["done_reason"] = "canceled"
                 self.done[oid] = o
-            return o is not None
+        if o:
+            self.ws_send({"type": "done", "reason": self.ws_cancel_reason, "order_id": oid, "remaining_size": o["size"]})
+        return o is not None
+
+    # ---- websocket `user` channel ----
+    @property
+    def ws_url(self):
+        return "ws://127.0.0.1:%d" % self.ws_port
+
+    def start_ws(self):
+        import asyncio
+        import websockets
+        ready = threading.Event()
+        ex = self
+
+        async def handler(conn):
+            try:
+                sub = json.loads(await conn.recv())
+            except Exception:  # noqa: BLE001
+                return
+            ts = str(sub.get("timestamp", ""))
+            want = base64.b64encode(hmac.new(ex.secret, (ts + "GET/users/self/verify").encode(), hashlib.sha256).digest()).decode()
+            good = (sub.get("type") == "subscribe" and "user" in (sub.get("channels") or []) and sub.get("key") == ex.key
+                    and sub.get("passphrase") == ex.passphrase and hmac.compare_digest(str(sub.get("signature", "")), want))
+            if not good or ex.ws_mode == "reject_auth":
+                ex.ws_rejected += 1
+                await conn.send(json.dumps({"type": "error", "message": "Authentication Failed", "reason": "invalid signature"}))
+                await conn.close()
+                return
+            ex.ws_subscriptions += 1
+            await conn.send(json.dumps({"type": "subscriptions", "channels": [{"name": "user", "product_ids": sub.get("product_ids", [])}]}))
+            ex.ws_clients.add(conn)
+            try:
+                async for _ in conn:
+                    pass
+            except Exception:  # noqa: BLE001  a client that vanishes is normal
+                pass
+            finally:
+                ex.ws_clients.discard(conn)
+
+        async def main():
+            ex.ws_loop = asyncio.get_running_loop()
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                ex.ws_port = server.sockets[0].getsockname()[1]
+                ready.set()
+                await asyncio.Future()
+
+        threading.Thread(target=lambda: asyncio.run(main()), daemon=True).start()
+        ready.wait(5)
+        return self
+
+    def _bcast(self, text):
+        import asyncio
+
+        async def go():
+            for c in list(self.ws_clients):
+                try:
+                    await c.send(text)
+                except Exception:  # noqa: BLE001
+                    pass
+        return asyncio.run_coroutine_threadsafe(go(), self.ws_loop)
+
+    def ws_send(self, msg, wait=False):
+        if self.ws_loop is None or self.ws_silent:
+            return
+        if self.ws_mute:
+            self.ws_unsent.append(msg)
+            return
+        f = self._bcast(json.dumps(msg))
+        if wait:
+            f.result(2)
+
+    def ws_flush(self):
+        msgs, self.ws_unsent = self.ws_unsent, []
+        self.ws_mute = False
+        for m in msgs:
+            self.ws_send(m, wait=True)
+
+    def ws_drop(self):
+        import asyncio
+
+        async def go():
+            for c in list(self.ws_clients):
+                await c.close(1011)
+        asyncio.run_coroutine_threadsafe(go(), self.ws_loop).result(2)
 
     def open_orders(self):
         with self.lock:
@@ -178,6 +280,9 @@ class FakeExchange:
                 self.tokens -= 1
         if self.mode == "slow":
             time.sleep(self.delay)
+        if method == "DELETE" and u.path.startswith("/orders/") and not u.path.startswith("/orders/client:") and self.before_cancel:
+            self.before_cancel(u.path[len("/orders/"):])
+            time.sleep(0.1)  # the websocket events of the hook reach the client before the HTTP answer does
         status, payload = self.apply(method, u, body)
         return status, payload, self.mode == "drop"
 
@@ -213,17 +318,21 @@ class FakeExchange:
                        "product_id": o.get("product_id"), "status": "open", "filled_size": "0.00000000", "executed_value": "0.00000000"}
                 self.orders[oid] = rec
                 self.by_coid[o["client_oid"]] = oid
+                self.ws_send({"type": "received", "order_id": oid, "client_oid": o["client_oid"], "side": o["side"], "price": o["price"], "size": o["size"]})
+                self.ws_send({"type": "open", "order_id": oid, "price": o["price"], "remaining_size": o["size"], "side": o["side"]})
                 return 200, rec
             if method == "DELETE" and u.path == "/orders":
                 pid = (q.get("product_id") or [None])[0]
                 ids = [i for i, r in self.orders.items() if pid is None or r["product_id"] == pid]
                 for i in ids:
                     del self.orders[i]
+                    self.ws_send({"type": "done", "reason": self.ws_cancel_reason, "order_id": i, "remaining_size": "0"})
                 return 200, ids
             if method == "DELETE" and u.path.startswith("/orders/client:"):
                 oid = self.by_coid.get(u.path[len("/orders/client:"):])
                 if oid in self.orders:
                     del self.orders[oid]
+                    self.ws_send({"type": "done", "reason": self.ws_cancel_reason, "order_id": oid, "remaining_size": "0"})
                     return 200, oid
                 return 404, {"message": "NotFound"}
             if method == "DELETE" and u.path.startswith("/orders/"):
@@ -234,6 +343,7 @@ class FakeExchange:
                     o = self.orders.pop(oid)
                     o["status"], o["done_reason"] = "done", "canceled"
                     self.done[oid] = o
+                    self.ws_send({"type": "done", "reason": self.ws_cancel_reason, "order_id": oid, "remaining_size": o["size"]})
                     return 200, oid
                 return 404, {"message": "NotFound"}
             if method == "GET" and u.path.startswith("/orders/") and not u.path.startswith("/orders/client:"):

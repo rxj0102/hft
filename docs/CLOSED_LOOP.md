@@ -40,7 +40,7 @@ The OMS allows one request in flight per order, so nothing is coalesced here; th
 
 - The strategy now trades against exchange latency. A quote move takes the time of two REST calls; in the drills with 0.4 s per call, a stop took about 1.9 s to confirm. Against the real sandbox this is unmeasured.
 - A reconnect or a window exit used to take about 120 ms to quote again; it now also includes the wait for cancel confirmations.
-- Fills are found by polling. With `--sync-s 5` a filled order can look alive for up to five seconds. Use a shorter interval in loop mode (`--sync-s 1`), at the price of more calls.
+- Without `--ws-fills`, fills are found by polling. With `--sync-s 5` a filled order can look alive for up to five seconds. Use a shorter interval in loop mode (`--sync-s 1`), at the price of more calls. With `--ws-fills` (below) the socket delivers fills at once and the sync can be slow.
 - There is no replay of an exchange run: it depends on timing. The paper mode stays the deterministic one.
 - A position built by fills is not closed by anything. Risk limits cap it; the metric `hft_live_position_lots` and `segment_end.position_lots` show it.
 
@@ -54,4 +54,23 @@ The OMS allows one request in flight per order, so nothing is coalesced here; th
 
 ## Not done
 
-Real sandbox run; the authenticated websocket for fills instead of polling; partial-fill handling beyond what the sync sees; closing positions; a venue reject taxonomy beyond what the fake produces; replay or fuzzing of the exchange link; any run longer than minutes.
+Real sandbox run; partial-fill handling beyond what the sync sees; closing positions; a venue reject taxonomy beyond what the fake produces; replay or fuzzing of the exchange link; any run longer than minutes.
+
+## Fills from the websocket (`--ws-fills`)
+
+`order_bridge.py --loop --ws-fills [--ws-url wss://ws-feed-public.sandbox.exchange.coinbase.com]` (needs `pip install websockets`; the URL is checked like the REST one, so production is refused) subscribes to the authenticated `user` channel. See ADR 27.
+
+| From the socket | Result |
+|---|---|
+| `match` for a working order | `fill` report at once, quantity = new lots only, price = the match price |
+| `match` for an unknown order, a size that is not a positive number, or a price of zero | counted (`ws_matches_unknown_order`, `ws_matches_bad`), nothing reported |
+| a `match` for lots the sync already reported | counted (`ws_matches_already_reported`), nothing reported |
+| `done` for a working order | a sync now, which reports whether it was filled or cancelled |
+| subscription (first or after a drop) | a sync now, to find what happened while the socket was away |
+| `error` (for example authentication) | logged as `ws_error`; retried with a pause of 1 to 15 s; the sync carries on alone |
+
+A `match` never takes an order past its size. A fill that arrives just before a cancel or replace is read from the socket after the DELETE has been answered, so the cancel report counts only what was left (the delay between the exchange's event and its HTTP answer is assumed to be small: the order of the two is not guaranteed by the exchange, and a fill that arrives after the DELETE's answer is found by the next sync only if the order is still tracked, which it is not after a cancel; that fill is then lost to the OMS).
+
+Metrics: `hft_bridge_ws_subscribed` (gauge), `ws_connects`, `ws_messages`, `ws_bad_messages`, `ws_errors`, `ws_failures`, `ws_fills` and the three counters above. Events in `bridge.jsonl`: `ws_subscribed`, `ws_error`, `ws_failed`, `ws_closed`.
+
+Evidence: six scenarios in `test_bridge.py` (fill without a sync, socket and sync together, a lost event, a fill racing a cancel and a replace, an order cancelled elsewhere, a refused socket, a reconnection) against a fake `user` channel that checks the signature with its own code; the drills `loop_fill_ws` (sync a minute away, position in hft_live within seconds) and `loop_ws_refused`. Not shown: the real feed, its message order relative to HTTP answers, or its behaviour under load.

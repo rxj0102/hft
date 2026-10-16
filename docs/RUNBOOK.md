@@ -98,7 +98,7 @@ Read `supervisor.jsonl` first: `pair_start`/`pair_stopped` say what died and how
 - `python3 scripts/drill.py` (about 25 s, no network) re-runs the fault drills after any change to the tools.
 
 ### Sandbox order entry (docs/SANDBOX.md)
-Keys only in environment variables. Smoke test first (`python3 scripts/smoke_sandbox.py --report smoke_report.json`, see SANDBOX.md), then `supervise.py --bridge` (add `--loop` to close the loop: see CLOSED_LOOP.md; exit 4 with `stop_not_flat` means orders may still rest at the exchange, check by hand or run the bridge on empty input). Read `bridge.jsonl`. Exit 4 with `who=bridge`: credentials, clock or configuration; fix and start by hand. If you are unsure what rests on the exchange, run the bridge with an empty input (`true | python3 scripts/order_bridge.py --log -`): it cancels everything for the product and reports `start_flat`.
+Keys only in environment variables. Smoke test first (`python3 scripts/smoke_sandbox.py --report smoke_report.json`, see SANDBOX.md), then `supervise.py --bridge` (add `--loop` to close the loop, and `--bridge-args "--ws-fills"` once the smoke test shows the socket works: see CLOSED_LOOP.md; exit 4 with `stop_not_flat` means orders may still rest at the exchange, check by hand or run the bridge on empty input). Read `bridge.jsonl`. Exit 4 with `who=bridge`: credentials, clock or configuration; fix and start by hand. If you are unsure what rests on the exchange, run the bridge with an empty input (`true | python3 scripts/order_bridge.py --log -`): it cancels everything for the product and reports `start_flat`.
 
 ### Capturing and replaying real data
 ```

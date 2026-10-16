@@ -28,3 +28,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 24. [The supervisor restarts on loss, never on a verdict](adr/0024-supervisor-policy.md) (Accepted)
 25. [Order entry is a mirror in a separate process](adr/0025-order-entry-is-a-mirror.md) (Accepted)
 26. [The external venue is a mode of the session, and flatten becomes a state](adr/0026-external-venue-is-a-mode-and-flatten-is-a-state.md) (Accepted)
+27. [Fills come from the websocket, and the REST sync stays as the authority](adr/0027-fills-come-from-the-socket-and-the-sync-stays.md) (Accepted)

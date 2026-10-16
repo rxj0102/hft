@@ -589,6 +589,234 @@ def test_hft_live_mirror(live):
     ex.stop()
 
 
+def prom_value(tmp, name):
+    try:
+        for l in open(os.path.join(tmp, "b.prom")):
+            if l.startswith(name + " "):
+                return float(l.split()[1])
+    except OSError:
+        pass
+    return None
+
+
+def ws_bridge(ex, tmp, extra=()):
+    return loop_bridge(ex, tmp, ["--ws-fills", "--ws-url", ex.ws_url] + list(extra))
+
+
+def test_ws_fills():
+    print("websocket fills")
+    # 1. a fill is reported at once by the socket, with the match price, and the sync (600 s away) has nothing to do with it
+    ex, tmp = fresh("ws1")
+    ex.start_ws()
+    b = ws_bridge(ex, tmp, ["--sync-s", "600"])
+    check(until(lambda: b.events("ws_subscribed")), "the bridge authenticates and subscribes (the fake checks the signature itself)")
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    check(until(lambda: b.reps("accepted")), "order accepted")
+    by = {o["price"]: o["id"] for o in ex.open_orders()}
+    t0 = time.monotonic()
+    ex.fill(by["81000.00"], 0.00004)
+    check(until(lambda: b.reps("fill"), 2.0), "a partial fill is reported without waiting for a sync")
+    lat = time.monotonic() - t0
+    f = b.reps("fill")[0] if b.reps("fill") else {}
+    check(f.get("qty") == 4 and f.get("leaves") == 6 and f.get("px") == px(81000.00), "4 lots, 6 left, at the match price: %s" % f)
+    check(lat < 1.0, "in %.0f ms" % (lat * 1000))
+    ex.fill(by["81000.00"])
+    check(until(lambda: len(b.reps("fill")) == 2), "the rest")
+    f = b.reps("fill")[1]
+    check(f["qty"] == 6 and f["leaves"] == 0, "6 lots, nothing left: %s" % f)
+    b.send({"t": "can", "seg": 1, "id": 1})
+    check(until(lambda: b.reps("cancel_rejected")), "a filled order cannot be cancelled")
+    time.sleep(0.6)
+    check(len(b.reps("fill")) == 2, "and nothing is reported twice")
+    # events that do not concern a working order are counted, not reported
+    n = len(b.reports)
+    ex.ws_send({"type": "match", "maker_order_id": "somebody-else", "taker_order_id": "x", "size": "1", "price": "1"})
+    b.send(new(2, px(80990.00), qty=10))
+    check(until(lambda: len(b.reps("accepted")) == 2), "second order")
+    by2 = [o["id"] for o in ex.open_orders()][0]
+    ex.ws_send({"type": "match", "maker_order_id": by2, "taker_order_id": "x", "size": "abc", "price": "81000.00"})
+    ex.ws_send({"type": "match", "maker_order_id": by2, "taker_order_id": "x", "size": "-1", "price": "81000.00"})
+    ex.ws_send({"type": "match", "maker_order_id": by2, "taker_order_id": "x", "size": "0.00001", "price": "0"})
+    time.sleep(0.6)
+    check(len(b.reps("fill")) == 2, "unknown orders, a size that is not a number, a negative size and a zero price report nothing")
+    check(until(lambda: (prom_value(tmp, "hft_bridge_ws_matches_unknown_order_total") or 0) >= 1 and (prom_value(tmp, "hft_bridge_ws_matches_bad_total") or 0) >= 3, 3.0),
+          "and are counted (%s unknown, %s bad)" % (prom_value(tmp, "hft_bridge_ws_matches_unknown_order_total"), prom_value(tmp, "hft_bridge_ws_matches_bad_total")))
+    check(prom_value(tmp, "hft_bridge_ws_fills_total") == 2 and prom_value(tmp, "hft_bridge_ws_subscribed") == 1, "metrics: two websocket fills, subscribed")
+    check(not ex.requests("DELETE", "/orders/"), "no cancel was sent for the order that had filled")
+    ex.ws_send({"type": "match", "maker_order_id": by2, "taker_order_id": "x", "size": "0.00020", "price": "80990.00"})   # more than the order's size
+    check(until(lambda: len(b.reps("fill")) == 3), "a match larger than the order")
+    f = b.reps("fill")[2]
+    check(f["qty"] == 10 and f["leaves"] == 0, "is capped at the order's size: %s" % f)
+    ex._bcast("this is not json").result(2)
+    ex._bcast("[1, 2, 3]").result(2)
+    ex._bcast(json.dumps({"type": "match"})).result(2)
+    time.sleep(0.5)
+    b.send(new(3, px(80980.00), qty=10))
+    check(until(lambda: len(b.reps("accepted")) == 3), "frames that are not JSON, not an object, or have no fields do not stop the bridge")
+    check((prom_value(tmp, "hft_bridge_ws_bad_messages_total") or 0) >= 2, "and the first two are counted (%s)" % prom_value(tmp, "hft_bridge_ws_bad_messages_total"))
+    # the same key used again by a new order starts from nothing; and our order may be named as the taker
+    b.send(new(1, px(80970.00), qty=10))
+    check(until(lambda: len(b.reps("accepted")) == 4), "an id used again")
+    again = [o for o in ex.open_orders() if o["price"] == "80970.00"][0]["id"]
+    ex.fill(again, 0.00004)
+    check(until(lambda: len(b.reps("fill")) == 4), "gets a fill")
+    f = b.reps("fill")[3]
+    check(f["qty"] == 4 and f["leaves"] == 6, "of its own 4 lots, not of the earlier order's tally: %s" % f)
+    ex.ws_send({"type": "match", "maker_order_id": "someone", "taker_order_id": again, "size": "0.00002", "price": "80970.00"})
+    check(until(lambda: len(b.reps("fill")) == 5), "a match that names our order as the taker counts as well")
+    f = b.reps("fill")[4]
+    check(f["qty"] == 2 and f["leaves"] == 4, "2 lots: %s" % f)
+    rc, _ = b.finish("eof")
+    check(rc == 0, "exit 0")
+    ex.stop()
+
+    # 2. the socket and the sync report the same lots once
+    ex, tmp = fresh("ws2")
+    ex.start_ws()
+    b = ws_bridge(ex, tmp, ["--sync-s", "0.3"])
+    until(lambda: b.events("ws_subscribed"))
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    oid = ex.open_orders()[0]["id"]
+    ex.ws_mute = True                                             # the event is held back, the sync sees the fill first
+    ex.fill(oid, 0.00004)
+    check(until(lambda: b.reps("fill")), "the sync finds the fill when the socket is silent")
+    ex.ws_flush()                                                 # the late event arrives
+    time.sleep(0.8)
+    check(len(b.reps("fill")) == 1 and b.reps("fill")[0]["qty"] == 4, "and the late event adds nothing: %s" % b.reps("fill"))
+    check(prom_value(tmp, "hft_bridge_ws_matches_already_reported_total") == 1, "it is counted as already reported")
+    ex.fill(oid, 0.00003)                                         # the socket now leads
+    check(until(lambda: len(b.reps("fill")) == 2), "a later fill comes from the socket")
+    time.sleep(0.8)                                               # several syncs go by
+    fl = b.reps("fill")
+    check(len(fl) == 2 and fl[1]["qty"] == 3 and fl[1]["leaves"] == 3 and sum(x["qty"] for x in fl) == 7, "7 lots in all, each once: %s" % [(x["qty"], x["leaves"]) for x in fl])
+    # a websocket event that never arrives: the sync fills the gap, and the lots add up
+    ex.ws_mute = True
+    ex.fill(oid, 0.00001)                                         # 1 lot, the event is lost
+    ex.ws_unsent.clear()
+    ex.ws_mute = False
+    check(until(lambda: sum(x["qty"] for x in b.reps("fill")) == 8, 4.0), "a lost event is made up by the sync")
+    ex.fill(oid, 0.00001)                                         # 1 more lot, this event arrives
+    time.sleep(0.9)
+    tot = sum(x["qty"] for x in b.reps("fill"))
+    check(tot == 9 and b.reps("fill")[-1]["leaves"] == 1, "9 lots matched, 9 reported, 1 left: %s" % [(x["qty"], x["leaves"]) for x in b.reps("fill")])
+    b.finish("eof")
+    ex.stop()
+
+    # 3. a fill that comes just before a cancel is not lost
+    ex, tmp = fresh("ws3")
+    ex.start_ws()
+    b = ws_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("ws_subscribed"))
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    ex.before_cancel = lambda oid: ex.fill(oid, 0.00004)
+    b.send({"t": "can", "seg": 1, "id": 1})
+    check(until(lambda: b.reps("canceled")), "cancel answered")
+    kinds = [(r["rt"], r["qty"], r["leaves"]) for r in b.reports if r["rt"] in ("fill", "canceled")]
+    check(kinds == [("fill", 4, 6), ("canceled", 6, 0)], "the fill that raced the cancel is reported first, then the cancel for what was left: %s" % kinds)
+    b.finish("eof")
+    ex.stop()
+
+    # 3a. the socket says the order filled completely while the exchange still accepted our cancel: the fill is reported
+    # and the cancel is not (the OMS must not be told that a filled order was cancelled)
+    ex, tmp = fresh("ws3a")
+    ex.start_ws()
+    b = ws_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("ws_subscribed"))
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    oid = ex.open_orders()[0]["id"]
+    ex.before_cancel = lambda o: ex.ws_send({"type": "match", "maker_order_id": o, "taker_order_id": "x", "size": "0.00010", "price": "81000.00"})
+    b.send({"t": "can", "seg": 1, "id": 1})
+    check(until(lambda: b.reps("cancel_rejected")), "cancel answered")
+    kinds = [(r["rt"], r["qty"], r["leaves"]) for r in b.reports if r["rt"] in ("fill", "canceled", "cancel_rejected")]
+    check(kinds == [("fill", 10, 0), ("cancel_rejected", 0, 0)], "fill, then cancel refused: %s" % kinds)
+    b.finish("eof")
+    ex.stop()
+
+    # 3b. the same for a replace
+    ex, tmp = fresh("ws3b")
+    ex.start_ws()
+    b = ws_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("ws_subscribed"))
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    ex.before_cancel = lambda oid: ex.fill(oid, 0.00004)
+    b.send({"t": "rep", "seg": 1, "id": 1, "px": px(80990.00), "qty": 10})
+    check(until(lambda: b.reps("replaced")), "replace answered")
+    kinds = [(r["rt"], r["qty"], r["leaves"]) for r in b.reports if r["rt"] in ("fill", "replaced")]
+    check(kinds == [("fill", 4, 6), ("replaced", 10, 10)], "the fill that raced the replace is reported before it: %s" % kinds)
+    b.finish("eof")
+    ex.stop()
+
+    # 3c. an order that ends on the exchange is looked into at once, not at the next sync
+    ex, tmp = fresh("ws3c")
+    ex.start_ws()
+    b = ws_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("ws_subscribed"))
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    ex.cancel_elsewhere(ex.open_orders()[0]["id"])
+    check(until(lambda: b.reps("canceled"), 3.0), "an order cancelled elsewhere is reported from the done event (sync is 600 s away)")
+    b.finish("eof")
+    ex.stop()
+
+    # 4. refused authentication: no fills from the socket, the sync still works, the bridge goes on
+    ex, tmp = fresh("ws4")
+    ex.start_ws()
+    ex.ws_mode = "reject_auth"
+    t_start = time.monotonic()
+    b = ws_bridge(ex, tmp, ["--sync-s", "0.3"])
+    check(until(lambda: b.events("ws_error")), "an authentication error is logged: %s" % [e.get("message") for e in b.events("ws_error")][:1])
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    ex.fill(ex.open_orders()[0]["id"], 0.00004)
+    check(until(lambda: b.reps("fill")), "the REST sync still finds the fill")
+    check(until(lambda: ex.ws_rejected >= 2, 6.0), "and the bridge keeps trying to subscribe (%d refusals)" % ex.ws_rejected)
+    time.sleep(max(0.0, t_start + 6.5 - time.monotonic()))
+    check(2 <= ex.ws_rejected <= 4, "with growing pauses (1, 2, 4 s): %d attempts in 6.5 s, not one a second" % ex.ws_rejected)
+    check(prom_value(tmp, "hft_bridge_ws_subscribed") == 0 and (prom_value(tmp, "hft_bridge_ws_errors_total") or 0) >= 1, "metrics say not subscribed, with the errors counted")
+    rc, _ = b.finish("eof")
+    check(rc == 0, "exit 0")
+    ex.stop()
+
+    # 5. a dropped connection: resubscribed, and a fill missed in the gap is found at once (the sync is 600 s away)
+    ex, tmp = fresh("ws5")
+    ex.start_ws()
+    b = ws_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("ws_subscribed"))
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    oid = ex.open_orders()[0]["id"]
+    ex.ws_drop()
+    check(until(lambda: not ex.ws_clients, 3.0), "connection closed by the exchange")
+    ex.fill(oid, 0.00004)                                         # nobody is listening
+    check(until(lambda: len(b.events("ws_subscribed")) >= 2, 8.0), "the bridge resubscribes")
+    check(until(lambda: b.reps("fill"), 3.0), "and the fill from the gap is found by the sync that follows")
+    check(b.reps("fill")[0]["qty"] == 4, "4 lots: %s" % b.reps("fill")[:1])
+    check(until(lambda: (prom_value(tmp, "hft_bridge_ws_connects_total") or 0) >= 2, 2.0), "metrics count the reconnection (%s connects)" % prom_value(tmp, "hft_bridge_ws_connects_total"))
+    b.finish("eof")
+    ex.stop()
+
+    # 6. options
+    print("websocket options")
+    ex, tmp = fresh("ws6")
+    ex.start_ws()
+    for extra, want, label in [
+            (["--ws-fills"], "needs --loop", "--ws-fills without --loop"),
+            (["--loop", "--ws-fills", "--ws-url", "wss://ws-feed.exchange.coinbase.com"], "only allows ws://", "a production socket in test mode"),
+            (["--loop", "--ws-fills", "--ws-url", "ws://example.com:80"], "only allows ws://", "a foreign host in test mode")]:
+        b = Bridge(ex, tmp, extra)
+        rc, err = b.finish("eof")
+        check(rc == 2 and want in err, "%s: exit 2 (%s)" % (label, err.strip()[:80]))
+    e = dict(os.environ, HFT_CB_KEY=KEY, HFT_CB_SECRET=SECRET, HFT_CB_PASSPHRASE=PASS, HTTPS_PROXY="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9")
+    for url in ["wss://ws-feed.exchange.coinbase.com", "wss://evil.example.com"]:
+        r = subprocess.run([sys.executable, BRIDGE, "--loop", "--ws-fills", "--ws-url", url], capture_output=True, text=True, env=e, input="", timeout=20)
+        check(r.returncode == 2 and "refusing websocket URL" in r.stderr, "outside test mode %s is refused (exit 2)" % url)
+    ex.stop()
+
+
 if __name__ == "__main__":
     live = sys.argv[1] if len(sys.argv) > 1 else None
     test_signing()
@@ -604,6 +832,7 @@ if __name__ == "__main__":
     test_loop_refusals()
     test_loop_fills_and_vanished()
     test_loop_latency_and_segments()
+    test_ws_fills()
     test_hft_live_mirror(live)
     print("test_bridge: " + ("all checks passed" if not fails else "%d FAILED" % fails))
     sys.exit(1 if fails else 0)

@@ -435,10 +435,10 @@ async def drill_bridge_hang(feed, port):
 
 
 # ---- closed loop: the exchange's reports drive the OMS ---------------------------------------------------------
-def loop_run(feed, port, ex, **kw):
+def loop_run(feed, port, ex, bridge_extra="", **kw):
     env = {"HFT_CB_KEY": KEY, "HFT_CB_SECRET": SECRET, "HFT_CB_PASSPHRASE": PASS}
     env.update(kw.pop("env", {}))
-    args = "--test-exchange --base-url %s --rate 20 --max-notional 100000 --max-errors 3 --sync-s 0.5" % ex.url
+    args = "--test-exchange --base-url %s --rate 20 --max-notional 100000 --max-errors 3 --sync-s 0.5 %s" % (ex.url, bridge_extra)
     return Run(feed, port, extra=["--loop", "--bridge-args", args] + kw.pop("extra", []), env=env, **kw)
 
 
@@ -494,6 +494,46 @@ async def drill_loop_fill(feed, port):
     r.cleanup()
 
 
+async def drill_loop_fill_ws(feed, port):
+    # the REST sync is a minute away: only the websocket can deliver this fill in time
+    ex = new_exchange()
+    ex.start_ws()
+    r = loop_run(feed, port, ex, bridge_extra="--sync-s 60 --ws-fills --ws-url " + ex.ws_url)
+    check(await until(lambda: ex.ws_subscriptions >= 1, 20), "the bridge subscribed to the user channel")
+    await until(lambda: len(ex.open_orders()) >= 1, 20)
+    victim = ex.open_orders()[0]
+    t0 = time.monotonic()
+    check(ex.fill(victim["id"]), "the market trades through one of our orders (%s %s)" % (victim["side"], victim["price"]))
+    want = 5 if victim["side"] == "buy" else -5
+    ok = await until(lambda: live_metric(r, "hft_live_position_lots") == want, 6)
+    dt = time.monotonic() - t0
+    check(ok and dt < 4, "hft_live's position is %+d lots %.2f s after the fill, with the sync a minute away (metric %s)" % (want, dt, live_metric(r, "hft_live_position_lots")))
+    check(len(r.sup("pair_start")) == 1 and not r.sup("pair_stopped"), "no restart")
+    rc = await r.stop()
+    ends = r.live_events("segment_end")
+    check(rc == 0 and len(ex.open_orders()) == 0 and ends[-1]["position_lots"] == want, "clean stop, nothing left, position kept: %s" % {k: ends[-1][k] for k in ("flat", "position_lots", "fills")})
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_loop_ws_refused(feed, port):
+    # the exchange refuses the socket: fills still arrive, by the sync
+    ex = new_exchange()
+    ex.start_ws()
+    ex.ws_mode = "reject_auth"
+    r = loop_run(feed, port, ex, bridge_extra="--ws-fills --ws-url " + ex.ws_url)
+    await until(lambda: len(ex.open_orders()) >= 1, 20)
+    check(await until(lambda: ex.ws_rejected >= 1, 10), "the socket was refused")
+    victim = ex.open_orders()[0]
+    ex.fill(victim["id"])
+    want = 5 if victim["side"] == "buy" else -5
+    check(await until(lambda: live_metric(r, "hft_live_position_lots") == want, 15), "the fill still reaches hft_live through the sync (position %s)" % live_metric(r, "hft_live_position_lots"))
+    rc = await r.stop()
+    check(rc == 0 and len(ex.open_orders()) == 0, "clean stop")
+    ex.stop()
+    r.cleanup()
+
+
 async def drill_loop_exchange_slow(feed, port):
     ex = new_exchange()
     ex.latency = 0.4
@@ -531,7 +571,7 @@ DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill
           ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity),
           ("bridge_flow", drill_bridge_flow), ("kill_bridge", drill_kill_bridge), ("kill_live_bridge", drill_kill_live_bridge),
           ("exchange_down", drill_exchange_down), ("bad_credentials", drill_bad_credentials), ("bridge_hang", drill_bridge_hang),
-          ("loop_flow", drill_loop_flow), ("loop_fill", drill_loop_fill), ("loop_slow", drill_loop_exchange_slow),
+          ("loop_flow", drill_loop_flow), ("loop_fill", drill_loop_fill), ("loop_fill_ws", drill_loop_fill_ws), ("loop_ws_refused", drill_loop_ws_refused), ("loop_slow", drill_loop_exchange_slow),
           ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop)]
 
 

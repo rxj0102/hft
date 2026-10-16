@@ -52,6 +52,7 @@ import uuid
 SANDBOX_URL = "https://api-public.sandbox.exchange.coinbase.com"
 NS = uuid.UUID("5c0ffee5-0000-4000-8000-0000000b01d9")
 ENV_KEYS = ("HFT_CB_KEY", "HFT_CB_SECRET", "HFT_CB_PASSPHRASE")
+WS_SANDBOX = "wss://ws-feed-public.sandbox.exchange.coinbase.com"
 
 
 class Fatal(Exception):
@@ -70,6 +71,18 @@ def check_url(url, test_exchange):
     if url.rstrip("/") == SANDBOX_URL:
         return SANDBOX_URL
     raise Fatal(2, "refusing base URL %r: only %s is allowed" % (url, SANDBOX_URL))
+
+
+def check_ws_url(url, test_exchange):
+    """The websocket twin of check_url: the sandbox feed, or ws://127.0.0.1:PORT for the local fake. Nothing else."""
+    p = urllib.parse.urlparse(url)
+    if test_exchange:
+        if p.scheme == "ws" and p.hostname in ("127.0.0.1", "localhost") and p.port:
+            return "ws://%s:%d" % (p.hostname, p.port)
+        raise Fatal(2, "--test-exchange only allows ws://127.0.0.1:PORT or ws://localhost:PORT")
+    if url.rstrip("/") == WS_SANDBOX:
+        return WS_SANDBOX
+    raise Fatal(2, "refusing websocket URL %r: only %s is allowed" % (url, WS_SANDBOX))
 
 
 def sign(secret_b64, timestamp, method, path, body):
@@ -136,6 +149,74 @@ class Client:
         return status, js, hdrs
 
 
+class WsFeed:
+    """The exchange's websocket feed, `user` channel (our own orders), in a thread of its own.
+
+    Every message goes to `messages`; the bridge's main thread takes them from there, so nothing here touches bridge state.
+    A dropped or refused connection is retried with a growing pause (1 s to 15 s). `fresh` is raised after each successful
+    subscription: events may have been missed while we were away, and the bridge answers with a REST sync.
+    Authentication is the same HMAC as for REST, over timestamp + GET + /users/self/verify.
+    """
+
+    def __init__(self, url, product, key, secret, passphrase, log, test):
+        self.url, self.product, self.key, self.secret, self.passphrase, self.log, self.test = url, product, key, secret, passphrase, log, test
+        self.messages = collections.deque()
+        self.subscribed = threading.Event()
+        self.fresh = threading.Event()
+        self.stats = collections.Counter()
+
+    def start(self):
+        threading.Thread(target=self._thread, daemon=True).start()
+
+    def _thread(self):
+        import asyncio
+        asyncio.run(self._main())
+
+    def subscribe_message(self):
+        ts = "%.3f" % time.time()
+        return {"type": "subscribe", "product_ids": [self.product], "channels": ["user"], "key": self.key,
+                "passphrase": self.passphrase, "timestamp": ts, "signature": sign(self.secret, ts, "GET", "/users/self/verify", "")}
+
+    async def _main(self):
+        import asyncio
+        import websockets
+        pause = 1.0
+        while True:
+            try:
+                kw = {"proxy": None} if self.test else {}
+                async with websockets.connect(self.url, open_timeout=10, max_size=1 << 22, **kw) as ws:
+                    self.stats["connects"] += 1
+                    await ws.send(json.dumps(self.subscribe_message()))
+                    async for raw in ws:
+                        try:
+                            m = json.loads(raw)
+                        except ValueError:
+                            self.stats["bad_messages"] += 1
+                            continue
+                        if not isinstance(m, dict):
+                            self.stats["bad_messages"] += 1
+                            continue
+                        t = m.get("type")
+                        if t == "subscriptions":
+                            self.subscribed.set()
+                            self.fresh.set()
+                            pause = 1.0
+                            self.log.emit("ws_subscribed", connects=self.stats["connects"])
+                        elif t == "error":
+                            self.stats["errors"] += 1
+                            self.log.emit("ws_error", message=str(m.get("message"))[:120], reason=str(m.get("reason"))[:120])
+                        else:
+                            self.stats["messages"] += 1
+                            self.messages.append(m)
+                self.log.emit("ws_closed")
+            except Exception as e:  # noqa: BLE001  any failure of the connection is retried
+                self.stats["failures"] += 1
+                self.log.emit("ws_failed", detail=type(e).__name__)
+            self.subscribed.clear()
+            await asyncio.sleep(pause)
+            pause = min(pause * 2, 15.0)
+
+
 class Bridge:
     def __init__(self, a, client, log):
         self.a, self.c, self.log = a, client, log
@@ -155,6 +236,11 @@ class Bridge:
         self.next_metrics = 0.0
         self.eof = threading.Event()
         self.stop = threading.Event()
+        self.sync_now = False
+        self.ws = None
+
+    def drain_ws(self):
+        pass  # the closed-loop bridge overrides this
 
     # ---- input ---------------------------------------------------------------------------------------------
     def reader(self, f):
@@ -344,11 +430,15 @@ class Bridge:
             lines.append("# HELP %s %s\n# TYPE %s %s\n%s %s" % (name, help_, name, typ, name, val))
         g("hft_bridge_working_orders", "Orders believed resting on the exchange.", len(self.live), "gauge")
         g("hft_bridge_wanted_orders", "Orders hft_live wants working.", want, "gauge")
+        g("hft_bridge_ws_subscribed", "1 while the websocket user channel is subscribed.",
+          int(self.ws.subscribed.is_set()) if self.ws else 0, "gauge")
         g("hft_bridge_seconds_since_ok", "Seconds since the last successful exchange call.", round(time.monotonic() - self.last_ok, 1), "gauge")
         for name in ("events_in", "requests", "placed", "cancels", "cancels_already_gone", "rejected", "rate_limited", "net_errors",
                      "http_5xx", "place_unknown", "refused_local", "refused_max_open", "vanished", "strays", "bad_lines",
                      "cancel_all_cancelled", "fills", "orphans", "reports_accepted", "reports_rejected", "reports_canceled",
-                     "reports_replaced", "reports_fill", "reports_cancel_rejected", "reports_replace_rejected"):
+                     "reports_replaced", "reports_fill", "reports_cancel_rejected", "reports_replace_rejected",
+                     "ws_connects", "ws_messages", "ws_bad_messages", "ws_errors", "ws_failures", "ws_fills", "ws_matches_unknown_order",
+                     "ws_matches_bad", "ws_matches_already_reported"):
             g("hft_bridge_%s_total" % name, name.replace("_", " ") + ".", self.cnt[name])
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -363,7 +453,8 @@ class Bridge:
             did = self.step()
             now = time.monotonic()
             self.tick()
-            if now >= next_sync:
+            if now >= next_sync or self.sync_now:
+                self.sync_now = False
                 self.sync()
                 next_sync = time.monotonic() + self.a.sync_s
             if not did:
@@ -378,6 +469,7 @@ class LoopBridge(Bridge):
         self.out = out
         self.queue = collections.deque()   # requests in arrival order
         self.filled = {}                   # key -> lots already reported as filled
+        self.ws_seen = {}                  # key -> lots the websocket has said were matched (never above what REST showed)
         self.reports_dead = False
 
     # ---- reports ------------------------------------------------------------------------------------------
@@ -481,6 +573,7 @@ class LoopBridge(Bridge):
             if r[0] == "ok":
                 self.live[k] = {"oid": r[1], "coid": r[2], "px": m["px"], "qty": m["qty"], "side": m["side"]}
                 self.filled[k] = 0
+                self.ws_seen[k] = 0
                 self.report(k, "accepted", px=m["px"], qty=m["qty"], leaves=m["qty"], side=m["side"])
             else:
                 self.report(k, "rejected", px=m["px"], qty=m["qty"], reason=r[1] if r[0] == "refused" else "other", side=m["side"])
@@ -491,6 +584,10 @@ class LoopBridge(Bridge):
                 return
             res = self.delete(v["oid"])
             if res == "ok":
+                self.drain_ws()  # a fill that came just before the cancel is already on the socket
+                if k not in self.live:  # filled completely while we cancelled: the fill has been reported
+                    self.report(k, "cancel_rejected", reason="unknown")
+                    return
                 left = v["qty"] - self.filled.get(k, 0)
                 self.live.pop(k)
                 self.report(k, "canceled", px=v["px"], qty=left, leaves=0, reason="user", side=v["side"])
@@ -505,22 +602,81 @@ class LoopBridge(Bridge):
             if res != "ok":
                 self.report(k, "replace_rejected", reason="unknown")
                 return
+            self.drain_ws()
+            if k not in self.live:
+                self.report(k, "replace_rejected", reason="unknown")
+                return
             self.live.pop(k)
             r = self.post(k, v["side"], m["px"], m["qty"])
             if r[0] == "ok":
                 self.live[k] = {"oid": r[1], "coid": r[2], "px": m["px"], "qty": m["qty"], "side": v["side"]}
                 self.filled[k] = 0
+                self.ws_seen[k] = 0
                 self.report(k, "replaced", px=m["px"], qty=m["qty"], leaves=m["qty"], side=v["side"])
             else:  # the old order is gone and the new one was refused or lost: the order no longer exists
                 self.report(k, "canceled", px=v["px"], qty=m["qty"], leaves=0, reason=r[1] if r[0] == "refused" else "other", side=v["side"])
 
     def step(self):
+        self.drain_ws()
         with self.lock:
             m = self.queue.popleft() if self.queue else None
         if m is None:
             return False
         self.handle(m)
         return True
+
+    # ---- fills from the websocket ------------------------------------------------------------------------------------
+    def drain_ws(self):
+        """Takes what the websocket thread has collected. A match for one of our orders becomes a fill report at once; the
+        REST sync stays as the backstop and, because both only ever raise `filled`, reports each lot once."""
+        ws = self.ws
+        if ws is None:
+            return
+        if ws.fresh.is_set():  # (re)subscribed: whatever happened while we were away is found by a sync now
+            ws.fresh.clear()
+            self.sync_now = True
+        while True:
+            try:
+                m = ws.messages.popleft()
+            except IndexError:
+                break
+            t = m.get("type")
+            if t == "match":
+                self.ws_match(m)
+            elif t == "done":
+                oid = m.get("order_id")
+                if any(v["oid"] == oid for v in self.live.values()):
+                    self.sync_now = True  # an order of ours ended on the exchange: the sync works out how
+        for key, val in list(ws.stats.items()):
+            self.cnt["ws_" + key] = val
+
+    def ws_match(self, m):
+        by_oid = {v["oid"]: k for k, v in self.live.items()}
+        k = by_oid.get(m.get("maker_order_id")) or by_oid.get(m.get("taker_order_id"))
+        if k is None:
+            self.cnt["ws_matches_unknown_order"] += 1
+            return
+        v = self.live[k]
+        try:
+            n = self.lots_of(m["size"])
+            px = int(round(float(m["price"]) * self.px_scale))
+        except (KeyError, ValueError, TypeError):
+            self.cnt["ws_matches_bad"] += 1
+            return
+        if n <= 0 or px <= 0:
+            self.cnt["ws_matches_bad"] += 1
+            return
+        self.ws_seen[k] = self.ws_seen.get(k, 0) + n
+        total = min(self.ws_seen[k], v["qty"])
+        delta = total - self.filled.get(k, 0)
+        if delta <= 0:
+            self.cnt["ws_matches_already_reported"] += 1
+            return
+        self.filled[k] = total
+        self.cnt["ws_fills"] += 1
+        self.report(k, "fill", px=px, qty=delta, leaves=v["qty"] - total, side=v["side"])
+        if total >= v["qty"]:
+            del self.live[k]
 
     # ---- finding fills and orders that left ------------------------------------------------------------------------------
     def lots_of(self, size_str):
@@ -576,6 +732,8 @@ def main(argv=None):
     ap.add_argument("--metrics", default=None)
     ap.add_argument("--metrics-s", type=float, default=1.0)
     ap.add_argument("--loop", action="store_true", help="closed loop: answer every request with a report on stdout")
+    ap.add_argument("--ws-fills", action="store_true", help="with --loop: also take fills from the websocket user channel (needs the websockets package)")
+    ap.add_argument("--ws-url", default=WS_SANDBOX)
     ap.add_argument("--no-cancel-on-start", action="store_true", help="tests only")
     a = ap.parse_args(argv)
 
@@ -590,6 +748,15 @@ def main(argv=None):
             base64.b64decode(secret, validate=True)
         except ValueError:
             raise Fatal(2, "HFT_CB_SECRET is not base64")
+        ws_url = None
+        if a.ws_fills:
+            if not a.loop:
+                raise Fatal(2, "--ws-fills needs --loop")
+            ws_url = check_ws_url(a.ws_url, a.test_exchange)
+            try:
+                import websockets  # noqa: F401
+            except ImportError:
+                raise Fatal(2, "--ws-fills needs the websockets package: pip install websockets")
     except Fatal as e:
         log.emit("fatal", code=e.code, message=str(e))
         print("order_bridge: " + str(e), file=sys.stderr)
@@ -621,6 +788,9 @@ def main(argv=None):
             log.emit("start_flat", flat=ok)
             if not ok:
                 raise Fatal(1, "could not clear existing orders at start")
+        if ws_url:
+            b.ws = WsFeed(ws_url, a.product, key, secret, passphrase, log, a.test_exchange)
+            b.ws.start()
         b.serve(sys.stdin)
         log.emit("stopping", cause="signal" if b.stop.is_set() else "input_ended", working=len(b.live))
     except Fatal as e:

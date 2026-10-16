@@ -11,12 +11,15 @@ What it does, in order, and stops at the first step that breaks the next one:
   4 ticker        GET /products/BTC-USD/ticker: a bid and an ask
   5 auth          signed GET /orders?status=open (the signature, headers and passphrase are accepted)
   6 flat          nothing is working on the product (refuses to continue otherwise, unless --cancel-existing)
+  6w websocket    (needs the `websockets` package; --skip-ws to leave it out) the authenticated `user` channel accepts the subscription
   7 place         one post-only buy at half the bid, minimum size; reply has an id; it shows in the open list and in GET /orders/{id}
   8 cross         one post-only buy above the ask: must be refused, and the message is recorded (the bridge reads it to name the reason)
   9 cancel        DELETE /orders/{id}; GET /orders/{id} then says done/canceled
  10 client id     place again, cancel with DELETE /orders/client:{client_oid}
  11 cancel all    DELETE /orders?product_id=, then the open list is empty
- 12 bridge        the real bridge (--loop) as a child process: new, replace, cancel, end; reports must be accepted, replaced, canceled
+ 7w ws events    the websocket delivers `received`/`open` for the order of step 7, and 9w `done` (canceled) for step 9
+ 12 bridge        the real bridge (--loop, with --ws-fills when the websocket worked) as a child process: new, replace, cancel, end;
+                  reports must be accepted, replaced, canceled
  13 flat          nothing is working at the end
 Latency of every call is measured. The report file holds step results, response field names, error messages and latencies. It holds
 no key, secret, passphrase, signature or account id, so you can share it.
@@ -41,6 +44,17 @@ sys.path.insert(0, HERE)
 import order_bridge as ob  # noqa: E402
 
 results, lat, shapes = [], [], {}
+
+
+class ListLog:
+    """Collects the events a WsFeed would write to the bridge's log."""
+
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event, **kw):
+        self.events.append((event, kw))
+
 touched = {"api": None, "product": None}  # set once the first order is placed, so that any failure cleans up
 
 
@@ -106,6 +120,8 @@ def main(argv=None):
     ap.add_argument("--product", default="BTC-USD")
     ap.add_argument("--max-notional", type=float, default=5.0)
     ap.add_argument("--cancel-existing", action="store_true", help="allow step 6 to cancel orders already working on the product")
+    ap.add_argument("--ws-url", default=ob.WS_SANDBOX)
+    ap.add_argument("--skip-ws", action="store_true", help="skip the websocket steps")
     ap.add_argument("--skip-bridge", action="store_true", help="skip step 12")
     ap.add_argument("--timeout", type=float, default=10.0)
     ap.add_argument("--report", default=None)
@@ -120,6 +136,13 @@ def main(argv=None):
     except ob.Fatal as e:
         print("smoke: " + str(e), file=sys.stderr)
         return 2
+    ws_url = None
+    if not args.skip_ws:
+        try:
+            ws_url = ob.check_ws_url(args.ws_url, args.test_exchange)
+        except ob.Fatal as e:
+            print("smoke: " + str(e), file=sys.stderr)
+            return 2
     missing = [k for k in ob.ENV_KEYS if not os.environ.get(k)]
     if missing:
         print("smoke: missing environment variables: " + ", ".join(missing), file=sys.stderr)
@@ -199,6 +222,36 @@ def main(argv=None):
     if not step(6, "flat", st == 200 and js == [], "nothing working on %s" % P):
         return finish(1, args)
 
+    # 6w --------------------------------------------------------------------------------------------------------------
+    feed = wl = None
+    ws_ok = False
+    if not args.skip_ws:
+        try:
+            import websockets  # noqa: F401
+        except ImportError:
+            step(6, "websocket", True, "SKIPPED: the websockets package is not installed (pip install websockets); the bridge will run without --ws-fills")
+            results[-1]["skipped"] = True
+        else:
+            wl = ListLog()
+            feed = ob.WsFeed(ws_url, P, key, secret, passphrase, wl, args.test_exchange)
+            feed.start()
+            ws_ok = feed.subscribed.wait(10)
+            errs = [kw.get("message") for e, kw in wl.events if e == "ws_error"]
+            fails = [kw.get("detail") for e, kw in wl.events if e == "ws_failed"]
+            step(6, "websocket", ws_ok, "subscribed to the user channel" if ws_ok else
+                 "no subscription within 10 s; errors %s, connection failures %s" % (errs, fails))
+
+    def ws_types(oid):
+        return [m.get("type") for m in list(feed.messages) if m.get("order_id") == oid] if feed else []
+
+    def ws_wait(oid, want, seconds=6.0):
+        t = time.monotonic()
+        while time.monotonic() - t < seconds:
+            if want(ws_types(oid)):
+                return True
+            time.sleep(0.1)
+        return False
+
     def place(price, label, coid=None, post_only=True):
         coid = coid or str(uuid.uuid4())
         body = {"type": "limit", "side": "buy", "product_id": P, "price": "%.2f" % price, "size": size_s, "post_only": post_only,
@@ -222,6 +275,13 @@ def main(argv=None):
             listed, st2, "present" if fields else "MISSING (the closed loop needs it)")):
         return finish(1, args)
 
+    if ws_ok:
+        seen = ws_wait(oid, lambda t: "open" in t or "received" in t)
+        ex_msg = next((m for m in list(feed.messages) if m.get("order_id") == oid), None)
+        shapes["ws_order_event"] = shape(ex_msg) if ex_msg else None
+        step(7, "ws events", seen, "the socket delivered %s for the new order" % ws_types(oid) if seen else
+             "nothing for the new order within 6 s (types seen for it: %s; all messages: %d)" % (ws_types(oid), len(feed.messages)))
+
     # 8 ---------------------------------------------------------------------------------------------------------------
     st, js, coid_x = place(near_cross, "cross")
     msg = api.msg(js)
@@ -243,6 +303,13 @@ def main(argv=None):
     if not step(9, "cancel", st == 200 and st2 == 200 and done, "DELETE HTTP %s; afterwards HTTP %s, status %s, done_reason %s" % (
             st, st2, one.get("status") if isinstance(one, dict) else None, one.get("done_reason") if isinstance(one, dict) else None)):
         return finish(1, args)
+
+    if ws_ok:
+        done = ws_wait(oid, lambda t: "done" in t)
+        d = next((m for m in list(feed.messages) if m.get("order_id") == oid and m.get("type") == "done"), None)
+        shapes["ws_done_event"] = shape(d) if d else None
+        step(9, "ws events", done and d.get("reason") == "canceled", "after the cancel the socket delivered %s" % ws_types(oid) if done else
+             "no done event within 6 s (%s)" % ws_types(oid))
 
     # 10 --------------------------------------------------------------------------------------------------------------
     st, js, coid = place(far, "place")
@@ -268,7 +335,7 @@ def main(argv=None):
     if args.skip_bridge:
         step(12, "bridge", True, "skipped on request")
     else:
-        ok, detail = bridge_loop(args, far, size_s)
+        ok, detail = bridge_loop(args, far, size_s, ws_ok and ws_url)
         if not step(12, "bridge", ok, detail):
             api.call("cancel_all", "DELETE", "/orders?product_id=" + P)
             return finish(1, args)
@@ -279,12 +346,14 @@ def main(argv=None):
     return finish(0 if ok and all(r["ok"] for r in results) else 1, args)
 
 
-def bridge_loop(args, far, size_s):
+def bridge_loop(args, far, size_s, ws_url=None):
     """Runs the real bridge in --loop mode: new, replace to another price, cancel, end of segment."""
     cmd = [sys.executable, os.path.join(HERE, "order_bridge.py"), "--loop", "--rate", "6", "--sync-s", "30",
            "--max-notional", str(args.max_notional), "--product", args.product, "--timeout", str(args.timeout), "--log", "-"]
     if args.test_exchange:
         cmd += ["--test-exchange", "--base-url", args.base_url]
+    if ws_url:
+        cmd += ["--ws-fills", "--ws-url", ws_url]
     lots = int(round(float(size_s) * 100000))
     px_raw = int(round(far * 10000))
     lines = [{"t": "hello", "v": 1, "px_scale": 10000, "qty_scale": 100000},
@@ -318,7 +387,8 @@ def bridge_loop(args, far, size_s):
     errtxt = p.stderr.read()
     clean = ('"event": "exit_flat"' in errtxt and '"flat": true' in errtxt)
     ok = types == want and rc == 0
-    return ok, "reports %s (wanted %s), bridge exit %s, flat at exit %s, %.1f s" % (types, want, rc, clean, time.monotonic() - t0)
+    return ok, "reports %s (wanted %s), bridge exit %s, flat at exit %s, websocket fills %s, %.1f s" % (
+        types, want, rc, clean, "on" if ws_url else "off", time.monotonic() - t0)
 
 
 if __name__ == "__main__":
