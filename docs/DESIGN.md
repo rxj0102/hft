@@ -405,3 +405,19 @@ Verification:
 - determinism: identical wire hashes on gcc and clang for three real captures; ASan and UBSan clean.
 
 Honest limits: see LIVE_FEED.md. Biggest: offline only, level 2 only, one product, no fills, and timing that excludes everything in front of the engine.
+
+## 16. Phase 10: live paper mode
+
+Full write-up in LIVE_PAPER.md; this section records the build.
+
+What was built: `feed/live.hpp` (`LiveSession`), the `hft_live` tool, `--out -` and `--resnap-file` in `scripts/capture_l2.py`, `test_live`, `scripts/test_live_tool.py`, `fuzz_live`, ADRs 21-23. `tests/support/l2_gen.hpp` is the capture generator moved out of `test_l2`. The hot path was not touched.
+
+Decisions:
+- The live path is the replay path with the time passed in (ADR 21), so the two can be compared byte for byte, and are.
+- One flatten for every end of trust (ADR 22); the kill switch is reserved for a failed model check, a failed flatten and a kill.
+- Silence is a feed loss (ADR 23), found on the process's own clock.
+- The model comparison is made between feed messages. It was first made between packets, which called a healthy book broken as soon as the comparison landed inside a multi-packet message; the live run found it.
+- Window exit asks the capture process to resubscribe through a file rather than building a second control channel. A file is crude and testable.
+- Removed during the build because no test could reach it: a call into the feed handler's timers (the stream has no sequence gaps to wait out) and a loop that drove recorded timers from the tool (the next line's own stale check does the same).
+
+Honest limits: see LIVE_PAPER.md. Biggest: a simulated venue that never fills, runs of at most 90 seconds, two processes joined by a pipe with no supervisor.

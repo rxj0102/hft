@@ -22,3 +22,6 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 18. [Check the pipeline's book against an independent model, then against the exchange](adr/0018-independent-model-checks.md) (Accepted)
 19. [Recorded exchange data is not committed](adr/0019-no-market-data-in-git.md) (Accepted)
 20. [The paper venue acknowledges and rejects crossing post-only orders but never fills](adr/0020-ack-only-paper-venue.md) (Accepted)
+21. [The live session reuses the replay path, and is checked against it](adr/0021-live-session-shares-the-replay-path.md) (Accepted)
+22. [Every end of trust is the same flatten, and the strategy does not get a vote](adr/0022-end-of-segment-is-a-flatten.md) (Accepted)
+23. [Silence is a feed loss, detected on the process's own clock](adr/0023-silence-is-a-feed-loss.md) (Accepted)

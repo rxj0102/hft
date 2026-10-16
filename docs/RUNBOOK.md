@@ -100,5 +100,17 @@ Read the output in this order:
 5. Several `segments`: the connection dropped and reconnected; each segment is replayed on its own.
 Do not commit anything under `data/`.
 
+### Running the live paper session
+```
+python3 scripts/capture_l2.py --out - --seconds 600 --resnap-file /tmp/hft.resnap | ./build/release/hft_live --resnap-file /tmp/hft.resnap
+```
+One status line every 10 seconds on stderr: `QUOTING` (a segment is live), `PULLED` (quotes are out, waiting for a snapshot) or `HALTED` (the session will not start again).
+- `PULLED` for a moment after a window exit, a stale feed or a reconnect is normal: the next snapshot restores quoting after about 120 ms of start-up work. `PULLED` for long means the capture process is not getting a snapshot: look at its stderr.
+- `HALTED` means an integrity failure, a failed flatten or a kill. Read the summary, keep the capture, restart both processes. Exit code 4 means the book disagreed with the model or flatten failed; treat as a bug.
+- Stop with Ctrl-C or SIGTERM: the kill switch latches, every working order is cancelled, the summary prints, exit 0.
+- Many `stale-feed pulls` with a healthy network: the stale limit (default 3 s) is shorter than the feed's gaps. The capture subscribes to heartbeats (one a second); if they are absent the limit will fire in a quiet market.
+- `hft_live --from file` re-runs a recording through the same code with its own stamps as the clock; add `--pace 1` for the recorded speed.
+- If the pipe ends early, check the capture script's stderr first (`captured N messages ...` is its last line).
+
 ## 5. Known operational gaps
-No automatic flatten. No order-entry heartbeats or retransmission. One instrument per pipeline. Snapshot delivery is the host's job. No live-trading mode has been tested.
+No automatic flatten. No order-entry heartbeats or retransmission. One instrument per pipeline. Snapshot delivery is the host's job. The live paper session has been run for up to 90 seconds at a time against the public feed; there is no supervisor that restarts either process, and nothing has traded on a real exchange.

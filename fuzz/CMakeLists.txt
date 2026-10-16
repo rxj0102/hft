@@ -46,3 +46,9 @@ add_executable(fuzz_l2 fuzz_l2.cpp)
 target_link_libraries(fuzz_l2 PRIVATE hft_core)
 target_compile_options(fuzz_l2 PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
 target_link_options(fuzz_l2 PRIVATE -fsanitize=fuzzer,address,undefined)
+
+# Live session: arbitrary input stream plus time jumps, kill and shutdown, against the same model.
+add_executable(fuzz_live fuzz_live.cpp)
+target_link_libraries(fuzz_live PRIVATE hft_core)
+target_compile_options(fuzz_live PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
+target_link_options(fuzz_live PRIVATE -fsanitize=fuzzer,address,undefined)

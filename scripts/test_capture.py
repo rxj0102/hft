@@ -102,8 +102,88 @@ async def verify_test():
     ok = await capture_l2.fetch_verify_snapshot("ws://127.0.0.1:9", "BTC-USD", "level2_batch", tempfile.mktemp(), timeout=1.0)
     check(not ok, "verify fails cleanly when the server is unreachable")
 
+async def resnap_test():
+    """A file appearing makes the capture reconnect at once and get a fresh snapshot."""
+    conns = {"n": 0}
+
+    async def serve(ws):
+        conns["n"] += 1
+        await ws.recv()
+        await ws.send(SNAP)
+        i = 0
+        try:
+            while True:
+                await ws.send(upd(i)); i += 1
+                await asyncio.sleep(0.05)
+        except Exception:
+            pass
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        out = tempfile.mktemp(suffix=".l2")
+        flag = tempfile.mktemp(suffix=".flag")
+
+        async def poke():
+            await asyncio.sleep(0.6)
+            open(flag, "w").write("x")
+            await asyncio.sleep(0.8)
+            open(flag, "w").write("x")
+        pk = asyncio.create_task(poke())
+        st = await capture_l2.capture("ws://127.0.0.1:%d" % port, "BTC-USD", "level2_batch", 2.5, out, 5.0, 0,
+                                      resnap_file=flag, poll_step=0.05)
+        await pk
+        rows = read(out)
+        marks = [r.split("\t")[1] for r in rows if r.startswith("#")]
+        snaps = sum(1 for r in rows if not r.startswith("#") and '"snapshot"' in r)
+        check(st["resnaps"] == 2 and marks.count("resnap") == 2, "two resubscribes recorded: %s" % marks)
+        check(snaps == 3 and conns["n"] == 3, "a fresh snapshot on a fresh connection each time (%d, %d)" % (snaps, conns["n"]))
+        check(not os.path.exists(flag), "the request file is consumed")
+        check(marks[-1] == "stop" and "give_up" not in marks, "resubscribing does not count towards giving up (max_reconnects=0)")
+        # the marker comes before the new snapshot: a reader ends its segment, then starts the next
+        order = [("m" if r.startswith("#") else ("s" if '"snapshot"' in r else "u")) for r in rows]
+        i = [k for k, r in enumerate(rows) if r.startswith("#") and "resnap" in r][0]
+        check("s" in order[i + 1:i + 6] and "u" not in order[i + 1:i + 1 + order[i + 1:].index("s")], "snapshot follows the marker directly")
+
+
+async def stdout_test():
+    """`--out -` streams line by line and stops quietly when the reader goes away."""
+    import subprocess
+    async def serve(ws):
+        await ws.recv()
+        await ws.send(SNAP)
+        i = 0
+        try:
+            while True:
+                await ws.send(upd(i)); i += 1
+                await asyncio.sleep(0.02)
+        except Exception:
+            pass
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        env = dict(os.environ, NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture_l2.py"),
+               "--url", "ws://127.0.0.1:%d" % port, "--out", "-", "--seconds", "30"]
+        p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+        lines = []
+        while len(lines) < 12:
+            lines.append((await asyncio.wait_for(p.stdout.readline(), 10)).decode())
+        check(lines[0].startswith("#") and "\tstart\t" in lines[0], "stream starts with the start marker")
+        check(any('"snapshot"' in l for l in lines), "snapshot is streamed")
+        check(all(l.endswith("\n") and (l.startswith("#") or "\t{" in l) for l in lines), "whole lines only")
+        p.stdout._transport.close()          # the reader goes away
+        try:
+            await asyncio.wait_for(p.wait(), 10)
+            check(True, "capture exits when the reader goes away")
+        except asyncio.TimeoutError:
+            p.kill()
+            check(False, "capture did not exit after the reader went away")
+        err = (await p.stderr.read()).decode()
+        check("Traceback" not in err and "Error" not in err and "ignored" not in err, "quiet exit when the reader goes away: %s" % err[-300:])
+
+
 asyncio.run(main())
 asyncio.run(verify_test())
+asyncio.run(resnap_test())
+asyncio.run(stdout_test())
 if failures:
     sys.exit("%d capture test failures" % failures)
 print("test_capture: all checks passed")

@@ -57,6 +57,11 @@ target_link_libraries(test_l2 PRIVATE hft_core)
 target_include_directories(test_l2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
 add_test(NAME test_l2 COMMAND test_l2)
 
+add_executable(test_live test_live.cpp)
+target_link_libraries(test_live PRIVATE hft_core)
+target_include_directories(test_live PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+add_test(NAME test_live COMMAND test_live)
+
 add_executable(test_t2t test_t2t.cpp)
 target_link_libraries(test_t2t PRIVATE hft_core)
 target_include_directories(test_t2t PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)

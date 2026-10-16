@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <string_view>
 #include <vector>
@@ -324,6 +325,19 @@ class L2Converter {
   const std::map<std::int64_t, std::int64_t>& levels(core::Side s) const noexcept { return lv_[idx(s)]; }
   std::int64_t price_of(std::int64_t level_idx) const noexcept { return level_idx * cfg_.tick_raw; }
   std::size_t live_levels() const noexcept { return lv_[0].size() + lv_[1].size(); }
+  // For tests of the checkers only: makes the model forget its best bid, so the
+  // book built from the emitted messages no longer agrees with it.
+  bool debug_forget_best_bid() noexcept {
+    if (lv_[0].empty()) return false;
+    lv_[0].erase(std::prev(lv_[0].end()));
+    return true;
+  }
+  // Same purpose: changes the size of a level deep in the bid side by one lot (the level count stays right).
+  bool debug_bump_a_bid_size() noexcept {
+    if (lv_[0].size() < 4) return false;
+    ++std::next(lv_[0].begin(), 2)->second;
+    return true;
+  }
 
   // Starts the segment. The grid is centred on the snapshot's mid. False if the
   // snapshot lacks one side (no mid to centre on).

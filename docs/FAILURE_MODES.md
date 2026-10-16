@@ -73,6 +73,29 @@ Cancels bypass risk, so quotes can always be pulled.
 
 Not handled: re-centring the grid when the market leaves it (the segment simply ends), gaps inside a connection (the feed has no sequence numbers to detect them), and any behaviour on a live connection.
 
+## Live paper mode (Phase 10)
+
+All of these end in the same flatten (ADR 22): cancel everything, answer the cancels, repeat until nothing is working. Evidence is `test_live` unless stated.
+
+| Failure | Response | Visible as | Kill switch |
+|---|---|---|---|
+| connection drops, idle timeout, error (marker from the capture script) | flatten; quoting resumes at the next snapshot | `ended: reconnect/marker` | no |
+| a new snapshot on a running segment | old segment flattened, new one started | `ended: new snapshot` | no |
+| price near the edge of the grid | flatten; the resubscribe file is created; the capture script reconnects | `ended: left price window`, `resubscribe requests` | no |
+| nothing at all for `--stale-ms` (heartbeats count) | flatten; resubscribe file created | `stale-feed pulls`; process test on a real clock | no |
+| update arrives after the segment ended | dropped, counted | `before a snapshot` | no |
+| book differs from the independent model (every 100 packets, and at every segment end) | flatten, halt, no further input is used | `ended: integrity failure`, exit 4 | yes |
+| cannot get flat within 64 rounds | kill switch, halt | `flatten: N failures`, exit 4 | yes |
+| SIGINT or SIGTERM | kill switch, flatten, summary, exit 0 | `stopped by signal`, `ended: kill`, `(kill switch on)` | yes |
+| input ends (pipe closed, file finished) | flatten without the kill switch, summary, exit 0 | `input ended`, `ended: shutdown` | no |
+| the capture process dies | the pipe closes: same as input ends | | no |
+| `hft_live` dies | the capture script sees the closed pipe and exits without an error (`scripts/test_capture.py`) | | n/a |
+| the clock steps backwards | clamped to the last time seen, counted | `clock regressions` | no |
+| one feed message spans many packets | the model comparison waits until the whole message is in | regression test with a 6,000-level snapshot | no |
+| segment start needs ~120 ms | no quotes during it (measured, not mitigated) | `segment start` timing | no |
+
+Not handled: restarting either process (no supervisor), a real exchange's behaviour (the venue is simulated and acknowledges everything), a feed that is slow but alive, any failure that takes hours to appear.
+
 ## Known gaps
 
 - Position is not flattened automatically after a kill. That is a human decision (see the runbook).
@@ -80,4 +103,4 @@ Not handled: re-centring the grid when the market leaves it (the segment simply 
 - No heartbeat or retransmission on order entry.
 - No handling of exchange halts, auctions, or crossed/locked books beyond what the synthetic exchange produces.
 - Single instrument per pipeline instance.
-- Nothing here has been exercised against a real exchange or real data.
+- The engine has been run on real public market data (offline replay and a live paper session of up to 90 seconds) but never against a real exchange's order entry.

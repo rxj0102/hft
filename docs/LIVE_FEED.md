@@ -85,7 +85,7 @@ Do not commit captures. The exchange's terms may not allow redistributing its ma
 
 ## Limits
 
-- Offline only: capture, then replay. There is no live ingestion thread in C++ and no live order entry. A live paper mode (stream the capture into the pipeline in real time) is the natural next step.
+- The replay is offline: capture, then replay. The live paper mode (LIVE_PAPER.md) streams the capture into the same pipeline in real time. Neither has order entry to an exchange.
 - One product (BTC-USD), one venue, level 2 only.
 - The paper venue never fills, and its 50 us round trip is a stated assumption, not a measurement.
 - Dropped far-from-market levels and floored sub-lot sizes mean the replayed book is the near-market book at lot resolution. The strategy reads three levels, so this does not change what it sees at the touch, but it is not the exchange's full book.

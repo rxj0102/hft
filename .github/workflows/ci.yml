@@ -36,6 +36,9 @@ jobs:
       - name: Capture script tests
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: python3 -m pip install --break-system-packages websockets && python3 scripts/test_capture.py
+      - name: Live tool tests (process, pipe, signals, real-time silence)
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        run: python3 scripts/test_live_tool.py build/release/hft_live
 
   tsan:
     runs-on: ubuntu-24.04
@@ -61,6 +64,8 @@ jobs:
           done
           mkdir -p corpus/fuzz_l2
           build/fuzz/fuzz/fuzz_l2 -max_total_time=45 -timeout=10 corpus/fuzz_l2 fuzz/seeds/l2
+          mkdir -p corpus/fuzz_live
+          build/fuzz/fuzz/fuzz_live -max_total_time=45 -timeout=10 corpus/fuzz_live fuzz/seeds/live
 
   # The performance gate. Wall-clock time on a shared runner is noise, so the
   # gate counts instructions under valgrind (deterministic) against the checked

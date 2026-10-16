@@ -16,10 +16,17 @@ allow redistributing its market data. The repo ignores data/ for that reason.
 Usage:
     capture_l2.py --seconds 120 --out data/btc.l2
     capture_l2.py --url wss://ws-feed-public.sandbox.exchange.coinbase.com --product BTC-USD
+
+Live use: `--out -` writes the same lines to stdout, flushed one by one, for
+`hft_live` to read from a pipe (status goes to stderr). `--resnap-file PATH`
+makes the capture drop its connection and subscribe again, to get a fresh
+snapshot, whenever PATH appears (hft_live creates it when the price has left
+its grid window). If the reader goes away the capture stops quietly.
 """
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 
@@ -27,38 +34,67 @@ DEFAULT_URL = "wss://ws-feed.exchange.coinbase.com"
 
 
 async def capture(url, product, channel, seconds, out_path, idle_timeout, max_reconnects, connect_fn=None,
-                  verify_path=None):
-    """Returns a dict of counters. `connect_fn` lets tests substitute a local server."""
+                  verify_path=None, resnap_file=None, poll_step=0.25):
+    """Returns a dict of counters. `connect_fn` lets tests substitute a local server.
+    `out_path` "-" streams to stdout. `resnap_file`: when this file exists, remove it and
+    resubscribe (a new snapshot) on a fresh connection."""
     import websockets
 
     connect = connect_fn or (lambda u: websockets.connect(u, open_timeout=15, max_size=None))
     t0 = time.monotonic_ns()
     now = lambda: time.monotonic_ns() - t0
     deadline = t0 + int(seconds * 1e9)
-    stats = {"messages": 0, "reconnects": 0, "errors": 0}
+    stats = {"messages": 0, "reconnects": 0, "errors": 0, "resnaps": 0}
+    streaming = out_path == "-"
     backoff = 0.5
     vtask = None
     if verify_path:
         # a second connection, opened while this one is live, near the end of the capture
         vtask = asyncio.create_task(fetch_verify_snapshot(url, product, channel, verify_path, connect_fn,
                                                           delay=max(seconds - 6.0, seconds * 0.5), t0_ns=t0))
-    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+    f = sys.stdout if streaming else open(out_path, "w", encoding="utf-8", newline="\n")
+    try:
         f.write("#%d\tstart\t%s\t%s\n" % (now(), url, product))
+        resnapped = False
         while time.monotonic_ns() < deadline:
+            resnapped = False
             try:
                 async with connect(url) as ws:
                     await ws.send(json.dumps({"type": "subscribe", "product_ids": [product],
                                               "channels": [channel, "heartbeat"]}))
                     backoff = 0.5
+                    last_rx = time.monotonic()
                     while time.monotonic_ns() < deadline:
+                        if resnap_file and os.path.exists(resnap_file):
+                            try:
+                                os.remove(resnap_file)
+                            except OSError:
+                                pass
+                            stats["resnaps"] += 1
+                            f.write("#%d\tresnap\n" % now())
+                            resnapped = True
+                            break
                         left = (deadline - time.monotonic_ns()) / 1e9
-                        msg = await asyncio.wait_for(ws.recv(), timeout=min(idle_timeout, max(left, 0.01)))
+                        try:
+                            msg = await asyncio.wait_for(ws.recv(), timeout=min(poll_step, max(left, 0.01)))
+                        except asyncio.TimeoutError:
+                            if time.monotonic_ns() >= deadline:
+                                break
+                            if time.monotonic() - last_rx >= idle_timeout:
+                                raise
+                            continue
+                        last_rx = time.monotonic()
                         t = now()
                         if isinstance(msg, bytes):
                             msg = msg.decode("utf-8", "replace")
                         msg = msg.replace("\n", " ").replace("\r", " ")
                         f.write("%d\t%s\n" % (t, msg))
+                        if streaming:
+                            f.flush()
                         stats["messages"] += 1
+            except BrokenPipeError:
+                stats["reader_gone"] = True
+                break
             except asyncio.TimeoutError:
                 if time.monotonic_ns() >= deadline:
                     break
@@ -72,12 +108,20 @@ async def capture(url, product, channel, seconds, out_path, idle_timeout, max_re
             stats["reconnects"] += 1
             f.write("#%d\treconnect\n" % now())
             f.flush()
-            if stats["reconnects"] > max_reconnects:
+            if resnapped:
+                continue  # asked for: reconnect at once, no backoff, and it does not count towards giving up
+            if stats["reconnects"] - stats["resnaps"] > max_reconnects:
                 f.write("#%d\tgive_up\n" % now())
                 break
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 8.0)
         f.write("#%d\tstop\n" % now())
+        f.flush()
+    except BrokenPipeError:
+        stats["reader_gone"] = True
+    finally:
+        if not streaming:
+            f.close()
     if vtask:
         stats["verify"] = await vtask
     return stats
@@ -121,6 +165,8 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--idle-timeout", type=float, default=10.0)
     ap.add_argument("--max-reconnects", type=int, default=20)
+    ap.add_argument("--resnap-file", default=None,
+                    help="when this file appears, drop the connection and subscribe again for a fresh snapshot")
     ap.add_argument("--verify", action="store_true",
                     help="near the end of the capture, fetch the exchange's own snapshot on a second connection into "
                          "<out>.verify, to check the replayed book against")
@@ -129,9 +175,13 @@ def main(argv=None):
         import websockets  # noqa: F401
     except ImportError:
         sys.exit("needs the websockets package: pip install websockets")
+    if a.verify and a.out == "-":
+        sys.exit("--verify needs a file, not stdout")
     st = asyncio.run(capture(a.url, a.product, a.channel, a.seconds, a.out, a.idle_timeout, a.max_reconnects,
-                             verify_path=(a.out + ".verify") if a.verify else None))
-    print("captured %(messages)d messages, %(reconnects)d reconnects, %(errors)d errors" % st)
+                             verify_path=(a.out + ".verify") if a.verify else None, resnap_file=a.resnap_file))
+    out = sys.stderr if a.out == "-" else sys.stdout
+    print("captured %(messages)d messages, %(reconnects)d reconnects, %(errors)d errors, %(resnaps)d resubscribes" % st,
+          file=out)
     if a.verify:
         print("verify snapshot: %s" % ("written to " + a.out + ".verify" if st.get("verify") else "FAILED"))
 

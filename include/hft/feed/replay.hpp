@@ -389,6 +389,9 @@ struct ReplayResult {
   bool ok = false;               // pipeline initialised
   std::uint64_t packets = 0;
   std::uint64_t wire_hash = 0, frames = 0, wire_bytes = 0;
+  // the order flow up to the last packet, before the trailing reports are delivered (what a live
+  // session compares with: it flattens instead of delivering the tail to the strategy)
+  std::uint64_t hash_before_tail = 0, frames_before_tail = 0;
   std::uint64_t checks = 0, check_failures = 0;   // checkpoint comparisons
   bool final_book_matches = false;
   std::uint64_t decisions = 0, feed_losses = 0, pull_sweeps = 0, messages_applied = 0, desyncs = 0, book_errors = 0;
@@ -522,6 +525,8 @@ inline ReplayResult replay_segment(const Segment& seg, const ReplayOptions& opt,
       ++next_cp;
     }
   }
+  R.hash_before_tail = hash;
+  R.frames_before_tail = frames;
   if (!seg.pkts.empty()) deliver_due(seg.pkts.back().t + 10 * opt.venue_rtt_ns);
 
   // final comparison against the model, level by level

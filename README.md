@@ -18,7 +18,9 @@ The range is run to run on the same VM, hours apart (128 ns early in the session
 
 ## Real data
 
-`hft_replay` runs recorded Coinbase BTC-USD level-2 data through the same pipeline and checks the book against an independent model and against the exchange's own snapshot (20/20, 18/20 and 20/20 identical levels on three live captures). Per feed message the engine costs about 60 ns on this VM; a real packet carries about 14 messages, so per-packet time is about 0.5 us at p50 and 3-4 us at p99. This is offline replay, not a live connection, and the paper venue never fills. See [docs/LIVE_FEED.md](docs/LIVE_FEED.md).
+`hft_replay` runs recorded Coinbase BTC-USD level-2 data through the same pipeline and checks the book against an independent model and against the exchange's own snapshot (20/20, 18/20 and 20/20 identical levels on three live captures). Per feed message the engine costs about 60 ns on this VM; a real packet carries about 14 messages, so per-packet time is about 0.5 us at p50 and 3-4 us at p99. This is offline replay and the paper venue never fills. See [docs/LIVE_FEED.md](docs/LIVE_FEED.md).
+
+`hft_live` runs the same pipeline on the live public feed in real time against that paper venue (`capture_l2.py --out - | hft_live`): it pulls every quote when the connection drops, the price leaves the grid or the feed goes silent for 3 s, checks the book against the independent model as it runs, and on Ctrl-C or SIGTERM latches the kill switch and cancels everything. Fed the same lines, it puts the same bytes on the wire as the offline replay. At real market spacing, one update message costs about 60-65 us end to end in this tool (JSON parsing included), against about 17-18 us when the same messages are replayed back to back. No order leaves the machine. See [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md).
 
 ## What is in the box
 
@@ -46,6 +48,7 @@ Presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fuzz`. R
 | [docs/DESIGN.md](docs/DESIGN.md) | phase-by-phase design log with measurements |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | decision records, including rejected options |
 | [docs/LIVE_FEED.md](docs/LIVE_FEED.md) | capture, convert and replay real market data; what is proven and what is not |
+| [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md) | the live paper session: guards, drills, real-feed runs, limits |
 | [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | measured budget, method, noise, how to reproduce |
 | [docs/FAILURE_MODES.md](docs/FAILURE_MODES.md) | what fails, what the engine does, what proves it |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | startup checks, alarms, kill switch, tooling triage |
