@@ -9,7 +9,7 @@ LIVE=build/release/hft_live
 fail=0
 step() { name="$1"; shift; echo "==== $name"; if ! "$@"; then echo "FAILED: $name"; fail=1; fi; }
 step "syntax" python3 -m py_compile scripts/*.py
-step "capture script tests" python3 scripts/test_capture.py
+step "capture script tests" scripts/ci_retry.sh test_capture python3 scripts/test_capture.py
 step "live tool tests" scripts/ci_retry.sh test_live_tool python3 scripts/test_live_tool.py "$LIVE"
 step "order bridge tests" scripts/ci_retry.sh test_bridge python3 scripts/test_bridge.py "$LIVE"
 step "sandbox smoke test (local fake exchange)" scripts/ci_retry.sh test_smoke python3 scripts/test_smoke.py

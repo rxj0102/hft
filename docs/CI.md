@@ -1,6 +1,6 @@
 # Continuous integration
 
-`.github/workflows/ci.yml` runs on every push to `main` or `master`, every pull request, and by hand (`workflow_dispatch`). **It has never been seen running on GitHub.** Every step was run locally, the workflow passes `actionlint`, and the commands are the ones below; whether the hosted runners agree (compiler versions, CPU, timing) is unknown until the first run.
+`.github/workflows/ci.yml` runs on every push to `main` or `master`, every pull request, and by hand (`workflow_dispatch`). It has run on GitHub (Phases 16 to 18); the logs found two faults that local runs had not (see CHANGELOG, Phase 18). Check the Actions tab for the current state: this file does not say whether the latest run is green.
 
 ## Jobs
 

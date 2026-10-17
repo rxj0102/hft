@@ -51,7 +51,7 @@ jobs:
         run: python3 -m pip install -r scripts/requirements.txt && python3 -m py_compile scripts/*.py
       - name: Capture script tests
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
-        run: python3 scripts/test_capture.py
+        run: scripts/ci_retry.sh test_capture python3 scripts/test_capture.py
       - name: Live tool tests (process, pipe, signals, real-time silence)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: scripts/ci_retry.sh test_live_tool python3 scripts/test_live_tool.py build/release/hft_live

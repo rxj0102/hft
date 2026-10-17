@@ -184,6 +184,14 @@ def main(argv=None):
           file=out)
     if a.verify:
         print("verify snapshot: %s" % ("written to " + a.out + ".verify" if st.get("verify") else "FAILED"))
+    if a.out == "-":
+        # If the reader went away, what is still buffered would be flushed at interpreter exit into the broken pipe and
+        # print "Exception ignored ... BrokenPipeError". Flush now, and on failure point stdout at /dev/null (the recipe
+        # from the Python documentation) so that the exit is quiet. (A CI runner showed the noise; it never showed locally.)
+        try:
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 if __name__ == "__main__":

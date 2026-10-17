@@ -1,6 +1,6 @@
 # hft
 
-[![ci](https://github.com/rxj0102/hft/actions/workflows/ci.yml/badge.svg)](https://github.com/rxj0102/hft/actions/workflows/ci.yml) The workflow has not run on GitHub yet: see [docs/CI.md](docs/CI.md).
+[![ci](https://github.com/rxj0102/hft/actions/workflows/ci.yml/badge.svg)](https://github.com/rxj0102/hft/actions/workflows/ci.yml) See [docs/CI.md](docs/CI.md).
 
 A tick-to-trade engine in C++20, built in phase gates with measurement at every step: ITCH-style market data in, order book, a market-making strategy, pre-trade risk, an OMS and an order-entry gateway, with a matching-engine exchange simulator and a queue-aware backtester around it.
 
