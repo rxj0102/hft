@@ -379,7 +379,7 @@ int main(int argc, char** argv) {
   feed::LiveConfig lc;
   lc.timed = true;
   std::string from, resnap_file, log_path, metrics_path, position_file;
-  double metrics_s = 5.0;
+  double metrics_s = 5.0, mid_sample_ms = 0.0;
   double pace = 0.0, report_s = 10.0, max_seconds = 0.0;
   bool spin = false;
   int orders_fd = -1, exchange_fd = -1;
@@ -409,13 +409,14 @@ int main(int argc, char** argv) {
     else if (a == "--orders-fd" && num(v) && v >= 3 && v < 1024) orders_fd = static_cast<int>(v);
     else if (a == "--exchange-fd" && num(v) && v >= 3 && v < 1024) exchange_fd = static_cast<int>(v);
     else if (a == "--flatten-timeout-s" && num(v) && v > 0) lc.flatten_timeout_ns = static_cast<std::uint64_t>(v * 1e9);
+    else if (a == "--mid-sample-ms" && num(v) && v >= 0) mid_sample_ms = v;
     else if (a == "--position-file" && i + 1 < argc) position_file = argv[++i];
     else if (a == "--close-position") lc.close_position = true;
     else if (a == "--close-collar-bps" && num(v) && v >= 1 && v <= 1000) lc.close_collar_bps = static_cast<std::int64_t>(v);
     else {
       std::fprintf(stderr,
                    "usage: hft_live [--from capture.l2 [--pace X]] [--stale-ms N] [--rtt-us N] [--lots N] [--levels N]\n"
-                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S] [--close-position [--close-collar-bps N]] [--position-file PATH]]\n"
+                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S] [--close-position [--close-collar-bps N]] [--position-file PATH]] [--mid-sample-ms N]\n"
                    "reads capture-format lines from stdin unless --from is given\n");
       return 1;
     }
@@ -555,6 +556,25 @@ int main(int argc, char** argv) {
     if (acct_failed) elog.emit("account_mismatch", secs(), std::string("\"why\":\"") + acct_why + "\"");
     else elog.emit("account_checked", secs(), std::string("\"base_lots\":") + std::to_string(base_raw));
   };
+  // Twice the mid price in raw units (no division, so no rounding), or -1 when the book has no two sides (or no segment runs).
+  auto mid_x2 = [&]() -> long long {
+    const book::OrderBook* bk = session.book();
+    if (!bk) return -1;
+    const core::Price b = bk->best_bid(), a = bk->best_ask();
+    if (b == core::Price::invalid() || a == core::Price::invalid()) return -1;
+    return static_cast<long long>(b.raw()) + static_cast<long long>(a.raw());
+  };
+  // One event per fill the exchange reported (ADR 32): what traded, at what price, where the market was, what the position is now.
+  // `applied` is 0 when the session ignored the report (a segment that no longer exists). Not on the hot path: this runs in
+  // the report reader, after the report has been handed to the session.
+  auto log_fill = [&](std::uint64_t seg, const sim::Report& r, std::string_view line, long long m2, bool applied) {
+    std::string_view sd;
+    const char* side = field_str(line, "side", sd) && sd == "sell" ? "sell" : "buy";
+    elog.emit("fill", secs(),
+              num("seg", seg) + ",\"side\":\"" + side + "\"," + num("px", static_cast<unsigned long long>(r.price.raw())) + "," +
+                  num("qty", static_cast<unsigned long long>(r.qty)) + ",\"mid_x2\":" + std::to_string(m2) +
+                  ",\"pos\":" + std::to_string(session.net_position()) + ",\"applied\":" + (applied ? "1" : "0"));
+  };
   // Reads whatever reports are waiting and hands them to the session. A closed pipe means the bridge is gone.
   auto pump_reports = [&] {
     if (rin.fd < 0) return;
@@ -575,8 +595,14 @@ int main(int argc, char** argv) {
             field_i64(ln, "ok", ok);
             field_i64(ln, "base_raw", br);
             on_account(ok == 1, br);
-          } else if (parse_report(std::string_view(rin.carry).substr(pos, nl - pos), seg, r)) session.on_exchange_report(seg, r, now_ns());
-          else ++rin.bad;
+          } else if (parse_report(std::string_view(rin.carry).substr(pos, nl - pos), seg, r)) {
+            const std::uint64_t before = session.stats().exchange_reports;
+            const long long m2 = r.type == sim::ReportType::Fill && elog.ok() ? mid_x2() : -1;   // before: the fill can end the segment (a close)
+            session.on_exchange_report(seg, r, now_ns());
+            if (r.type == sim::ReportType::Fill && elog.ok()) log_fill(seg, r, ln, m2, session.stats().exchange_reports > before);
+          } else {
+            ++rin.bad;
+          }
           pos = nl + 1;
         }
         rin.carry.erase(0, pos);
@@ -593,7 +619,17 @@ int main(int argc, char** argv) {
       break;
     }
   };
+  double next_mid = 0.0;
+  long long last_mid = -2;
   auto periodic = [&] {
+    if (mid_sample_ms > 0 && elog.ok() && secs() >= next_mid) {
+      next_mid = secs() + mid_sample_ms / 1e3;
+      const long long m = mid_x2();
+      if (m != last_mid && m > 0) {   // only changes, and only with a two-sided book
+        last_mid = m;
+        elog.emit("mid", secs(), "\"mid_x2\":" + std::to_string(m));
+      }
+    }
     if (secs() >= next_report) {
       status(session, secs());
       next_report += report_s;

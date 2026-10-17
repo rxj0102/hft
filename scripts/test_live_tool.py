@@ -285,7 +285,8 @@ import threading
 
 class ScriptedExchange:
     """reads order lines, answers each with a report line, optionally with a defect"""
-    def __init__(self, orders_r, reports_w, mode="ok", base=1_000_000, acct="ok"):
+    def __init__(self, orders_r, reports_w, mode="ok", base=1_000_000, acct="ok", stale_fill=False):
+        self.stale_fill = stale_fill           # one fill report for a segment that does not exist, before the first order is answered
         self.orders_r, self.reports_w, self.mode = orders_r, reports_w, mode
         self.base, self.acct = base, acct      # the account's base balance in lots; what the bridge says about it ("ok", "fail", "none")
         self.seen, self.sent = [], []
@@ -326,6 +327,9 @@ class ScriptedExchange:
                     self.garbage_events += 1
                     os.write(self.reports_w, b"this is not json\n{\"t\":\"rep\",\"seg\":1}\n"
                              b"{\"t\":\"rep\",\"seg\":1,\"rt\":\"accepted\",\"id\":1,\"px\":5,\"qty\":-5,\"leaves\":5}\n")
+                if t == "new" and self.stale_fill:
+                    self.stale_fill = False
+                    self.reply(rec, "fill", seg=rec["seg"] + 50, qty=3, leaves=0)
                 if t == "new" and self.mode in ("close_ok", "close_none", "close_slow"):
                     self.reply(rec, "accepted")
                     if rec.get("type") == 2:                                   # a closing order: trades in full, or not at all
@@ -353,14 +357,14 @@ class ScriptedExchange:
                 pass
 
 
-def run_external(mode, feed_text, flatten_s="2", close_exchange_early=False, pace=0.02, extra=(), base=1_000_000, acct="ok"):
+def run_external(mode, feed_text, flatten_s="2", close_exchange_early=False, pace=0.02, extra=(), base=1_000_000, acct="ok", stale_fill=False):
     o_r, o_w = os.pipe()          # hft_live -> exchange
     r_r, r_w = os.pipe()          # exchange -> hft_live
     proc = subprocess.Popen([BIN, "--report-s", "1000", "--stale-ms", "5000", "--orders-fd", str(o_w), "--exchange-fd", str(r_r),
                              "--flatten-timeout-s", flatten_s] + list(extra), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, pass_fds=(o_w, r_r))
     os.close(o_w); os.close(r_r)
-    ex = ScriptedExchange(o_r, r_w, mode, base, acct)
+    ex = ScriptedExchange(o_r, r_w, mode, base, acct, stale_fill)
     try:
         for chunk in feed_text:
             proc.stdin.write(chunk); proc.stdin.flush()
@@ -555,6 +559,50 @@ check(p_.returncode == 1 and b"refusing to start" in p_.stderr, "posfile: garbag
 p_ = subprocess.run([BIN, "--orders-fd", str(ww), "--position-file", pf], capture_output=True, pass_fds=(rr, ww))
 check(p_.returncode == 1, "posfile: without --exchange-fd: exit 1")
 os.close(rr); os.close(ww); os.remove(pf)
+
+# 14. fill events and mid samples for the PnL report (ADR 32)
+import importlib.util
+spec = importlib.util.spec_from_file_location("pnl_report", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pnl_report.py"))
+pnl = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pnl)
+
+lp = tempfile.mktemp(suffix=".log")
+rc, out, ex = run_external("close_ok", ext_feed(40), flatten_s="2", pace=0.03, extra=["--log", lp, "--close-position", "--mid-sample-ms", "20"])
+rows = [json.loads(l) for l in open(lp)]
+fl = [r for r in rows if r["event"] == "fill"]
+md = [r for r in rows if r["event"] == "mid"]
+sent_fills = [r for r in ex.sent if r["rt"] == "fill"]
+check(rc == 0 and len(fl) == len(sent_fills) and len(fl) >= 2, "fills: one event per fill report: %d events, %d reports (rc=%s)" % (len(fl), len(sent_fills), rc))
+check(all(f["applied"] == 1 for f in fl), "fills: all applied by the session")
+check([(f["side"], f["px"], f["qty"]) for f in fl] == [(r["side"], r["px"], r["qty"]) for r in sent_fills], "fills: side, price and quantity are the report's own: %s" % [(f["side"], f["px"], f["qty"]) for f in fl][:2])
+want = 0
+okpos = True
+for f in fl:
+    want += f["qty"] if f["side"] == "buy" else -f["qty"]
+    okpos = okpos and f["pos"] == want
+check(okpos and fl[-1]["pos"] == 0, "fills: the position after each fill is the running sum, and ends flat")
+check(all(1_900_000 <= f["mid_x2"] <= 2_100_000 for f in fl), "fills: carry the book's mid (twice, in raw units): %s" % [f["mid_x2"] for f in fl][:3])
+check(len(md) >= 2 and all(1_900_000 <= m["mid_x2"] <= 2_100_000 for m in md), "mid: samples while the book is two-sided (%d)" % len(md))
+check(all(md[i]["mid_x2"] != md[i + 1]["mid_x2"] for i in range(len(md) - 1)), "mid: only changes are logged")
+fills_, mids_, last_, bad_ = pnl.load([lp])
+rep = pnl.analyse(fills_, mids_, last_, 10000, 100000, 0.0, [1.0])
+check(rep["fills"] == len(fl) and rep["position_gaps"] == 0 and abs(rep["end_position_base"]) < 1e-12, "report: reads the log, no position gaps, ends flat")
+check(abs(rep["cash_check_diff"]) < 1e-9, "report: the two PnL figures agree")
+os.remove(lp)
+lp = tempfile.mktemp(suffix=".log")
+rc, out, ex = run_external("close_ok", ext_feed(30), flatten_s="2", pace=0.03, extra=["--log", lp, "--close-position"], stale_fill=True)
+rows = [json.loads(l) for l in open(lp)]
+st = [r for r in rows if r["event"] == "fill" and r["seg"] != 1]
+check(len(st) == 1 and st[0]["applied"] == 0 and st[0]["qty"] == 3, "fills: a report for a segment that does not exist is logged as not applied: %s" % st)
+check(len([r for r in rows if r["event"] == "fill" and r["applied"] == 1]) >= 2 and rc == 0, "fills: and it did not disturb the real ones (rc=%s)" % rc)
+fills_, mids_, last_, bad_ = pnl.load([lp])
+check(all(f["qty"] != 3 for f in fills_), "report: and the report ignores it")
+os.remove(lp)
+lp = tempfile.mktemp(suffix=".log")
+rc, out, ex = run_external("close_ok", ext_feed(20), flatten_s="2", pace=0.03, extra=["--log", lp, "--close-position"])
+rows = [json.loads(l) for l in open(lp)]
+check([r for r in rows if r["event"] == "fill"] and not [r for r in rows if r["event"] == "mid"], "mid: no samples unless --mid-sample-ms is given; fills are logged regardless")
+os.remove(lp)
 
 if failures:
     sys.exit("%d live tool test failures" % failures)

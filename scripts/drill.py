@@ -587,6 +587,16 @@ async def close_drill(feed, port, tune, want_rc, closed):
         check(len(ex.ioc_orders) == 1 and ex.ioc_orders[0][0] == ("sell" if want > 0 else "buy"), "one closing order, against the position: %s" % ex.ioc_orders)
         check(e["position_lots"] == 0 and e["closed_lots"] == abs(want) and not e["close_failed"], "the segment ends flat in position: %s" % {k: e[k] for k in ("position_lots", "closed_lots", "close_attempts", "close_failed")})
         check(not r.sup("stop_not_flat") and not r.live_events("position_not_closed"), "no alarm")
+        # the PnL report reads what the run logged (ADR 32): the fill and the closing fill, a consistent position, mid samples
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pnl_report", os.path.join(HERE, "pnl_report.py"))
+        pnl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pnl)
+        fl, md, last, bad = pnl.load([os.path.join(r.dir, "events.jsonl")])
+        rep = pnl.analyse(fl, md, last, 10000, 100000, 0.0, [1.0])
+        check(rep["fills"] == 2 and rep["position_gaps"] == 0 and abs(rep["end_position_base"]) < 1e-12 and md,
+              "pnl_report: two fills (the quote and the close), consistent, ends flat, %d mid samples" % len(md))
+        check(abs(rep["cash_check_diff"]) < 1e-9 and rep["edge_fills"] >= 1, "pnl_report: both PnL figures agree, edge computed (total %+.6f)" % rep["total_quote"])
     else:
         check(e["position_lots"] == want and e["closed_lots"] == 0 and e["close_failed"] == 1, "the position stays and the segment says the close failed: %s" % {k: e[k] for k in ("position_lots", "closed_lots", "close_attempts", "close_failed", "close_why_not")})
         check(bool(r.sup("stop_not_flat")) and bool(r.live_events("position_not_closed")), "and it is loud: stop_not_flat and position_not_closed")
@@ -667,8 +677,9 @@ async def drill_loop_account_mismatch(feed, port):
             return []
     check(await until(lambda: len(filed()) == 3 and int(filed()[0]) == want, 5), "the file holds position and baseline: %s" % filed())
     ex.base_balance += 0.001                      # 100 lots bought by hand
-    posts = len(ex.posted)
     os.kill(r.pid("live", 1), signal.SIGKILL)
+    await until(lambda: len(r.sup("pair_start")) >= 2, 15)
+    posts = len(ex.posted)        # counted once the old pair is gone (it was still quoting until the kill) and the new one has just started
     rc = await asyncio.get_event_loop().run_in_executor(None, lambda: r.p.wait(30))
     check(rc == 4 and r.sup("fatal_halt"), "the supervisor stops and passes exit 4 on: nobody restarts it (rc=%s)" % rc)
     check(r.live_events("account_mismatch"), "hft_live logged account_mismatch: %s" % [e.get("why") for e in r.live_events("account_mismatch")][:1])

@@ -102,6 +102,9 @@ def main(argv=None):
     ap.add_argument("--position-file", default=None,
                     help="with --loop: hft_live keeps its position and cash in this file, so a restarted hft_live knows what the "
                          "previous one left at the exchange (ADR 30); trusted as written, not checked against the account")
+    ap.add_argument("--mid-sample-ms", type=float, default=200.0,
+                    help="with --loop: log the book's mid (when it changes) at most this often, for scripts/pnl_report.py; 0 turns it off. "
+                         "Roughly 40 MB of events.jsonl per day at the default on a busy book")
     ap.add_argument("--bridge-cmd", default=None, help="replace the bridge command (shell-split)")
     a = ap.parse_args(argv)
     if (a.close_position or a.close_collar_bps is not None or a.position_file) and not (a.loop and not a.live_cmd):
@@ -137,6 +140,8 @@ def main(argv=None):
             live_cmd += ["--close-collar-bps", str(a.close_collar_bps)]
         if a.position_file:
             live_cmd += ["--position-file", a.position_file]
+        if a.loop and a.mid_sample_ms > 0:
+            live_cmd += ["--mid-sample-ms", str(a.mid_sample_ms)]
 
     bridge_cmd = None
     if a.loop:

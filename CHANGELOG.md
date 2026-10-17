@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 21
+- PnL and fill-quality report (ADR 32). `hft_live` logs a `fill` event per fill report (side, price, quantity, the book mid just before it was applied, the position after, whether the session applied it) and, with `--mid-sample-ms N` (supervisor default 200 with `--loop`), `mid` events. New `scripts/pnl_report.py`: PnL by average cost cross-checked against cash flows, edge against the mid, markouts at 1/5/30 s, inventory, position-consistency warning; `--fee-bps`, `--json`. `scripts/test_pnl.py` (hand-computed cases) runs in CI. The drill `loop_close` now runs the report on a real supervised run.
+- Verification: 30 mutants of `pnl_report.py` and the new `hft_live` code; first run left 7 (a short-cover case, notional weighting, a log that reaches the horizon without a new mid, two mutants that did not compile and were rewritten, one equivalent mutant); all dealt with by tests or a simplification. `ci_local.sh` passed, but the drills needed their retry once: my Phase 20 drill `loop_account_mismatch` counted the orders before the old process was dead, so a late quote looked like a trade by the new one. Counted after the restart now; 3 clean repeats. Tool tests also pass against the ASan `hft_live`. No library code changed (ctest, sanitizer unit tests and perf gate not rerun).
+- Caveats: the mid is the local book's; fees are one flat rate; markouts need mid samples past the horizon; nothing is known about the real sandbox's fills.
+
 ### Phase 20
 - Account check (ADR 31). The loop bridge reads `GET /accounts` at start and reports the base currency's balance to `hft_live` as one `acct` line after the hello. With `--position-file`, `hft_live` stores a baseline (balance minus position) as a third number in the file and, at the next start, refuses to read its input, let alone trade, unless the balance equals baseline + position within one lot: `ACCOUNT CHECK FAILED`, event `account_mismatch`, exit 4, file untouched, no restart by the supervisor. An unreadable balance or no report in 10 s is refused too. `smoke_sandbox.py` has a new step 5 `account`.
 - Tests: `test_live_tool.py` (8 account cases, scripted exchange now keeps a balance), `test_bridge.py::test_account`, `test_smoke.py` (two failing modes), drill `loop_account_mismatch` (28 drills).

@@ -73,6 +73,16 @@ A run on the real Coinbase feed through the supervisor: kill -9 of `hft_live` at
 
 Adds a second pipe, bridge to `hft_live` (`--exchange-fd`). New `hft_live` exit code 6: the report channel closed (restartable). New supervisor event `stop_not_flat` (stop requested, `hft_live` exited 4: supervisor exit 4). New metrics: `hft_live_exchange_reports_total`, `hft_live_exchange_reports_stale_total`, `hft_live_snapshots_dropped_ending_total`, `hft_live_fills_total`, `hft_live_position_lots`. `segment_end` gains `position_lots` and `fills`; in this mode `flatten_sim_ns` is the real wait for confirmations. Details: CLOSED_LOOP.md.
 
+### PnL and fill quality
+
+`supervise.py --loop` logs every fill and, every 200 ms at most, the book's mid when it changes (`--mid-sample-ms`, 0 turns it off; about 40 MB a day on a busy book) into `events.jsonl`. After or during a run:
+
+```
+python3 scripts/pnl_report.py /tmp/hft-sbx/events.jsonl [--fee-bps 0] [--horizons 1,5,30] [--json out.json]
+```
+
+It prints PnL by average cost (with a cross-check from cash flows), edge against the mid, markouts (negative = adverse selection), inventory, and a warning if the engine's position disagrees with the sum of the fills. Read it with the caveats in ADR 32: the mid is the local book's, fees are one flat rate, and a sandbox book is thin and unlike a real one.
+
 ### Closing the position at stop (`--close-position`)
 
 `supervise.py --loop --close-position [--close-collar-bps N]` passes the option on to `hft_live`. On SIGTERM the order is: cancel everything, wait for the exchange, send up to five immediate-or-cancel orders against the position, then exit. If a position remains the exit is 4 (`stop_not_flat`, and `position_not_closed` in `events.jsonl`); read `segment_end` for `close_why_not`. Allow `--term-grace-s` for the extra round trips (about 0.5 s per attempt at `--rate 8`, more with a slow exchange). Add `--position-file PATH` so that a restarted `hft_live` knows the position the previous one left (positions are also carried between segments of one run); the file holds `<lots> <cash> <baseline>` and is checked against the account's base balance at every start (ADR 31). `ACCOUNT CHECK FAILED` (exit 4, `account_mismatch` in `events.jsonl`) means the file and the account disagree: look at the account, then delete the file to start again from a new baseline. The account should be used for nothing else (a deposit or a hand trade trips it). See CLOSED_LOOP.md, ADR 29 and ADR 30.

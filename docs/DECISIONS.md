@@ -33,3 +33,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 29. [Close the position with one reduce-only IOC order, only when stopping for good](adr/0029-close-the-position-with-a-reduce-only-ioc-when-stopping.md) (Accepted)
 30. [Carry the position across segments, optionally across runs](adr/0030-carry-the-position-across-segments.md) (Accepted)
 31. [Check the position file against the exchange account before trading](adr/0031-check-the-position-file-against-the-account.md) (Accepted)
+32. [PnL and fill quality come from the event log, computed offline](adr/0032-pnl-and-fill-quality-from-the-event-log.md) (Accepted)

@@ -49,6 +49,9 @@ jobs:
       - name: Python environment
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: python3 -m pip install -r scripts/requirements.txt && python3 -m py_compile scripts/*.py
+      - name: PnL report tests
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        run: python3 scripts/test_pnl.py
       - name: Capture script tests
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: scripts/ci_retry.sh test_capture python3 scripts/test_capture.py
