@@ -55,6 +55,9 @@ ENV_KEYS = ("HFT_CB_KEY", "HFT_CB_SECRET", "HFT_CB_PASSPHRASE")
 WS_SANDBOX = "wss://ws-feed-public.sandbox.exchange.coinbase.com"
 
 
+OT_IOC, OT_POST_ONLY = 2, 4  # the engine's order types on the wire
+
+
 class Fatal(Exception):
     def __init__(self, code, msg):
         super().__init__(msg)
@@ -278,7 +281,7 @@ class Bridge:
                 self.cnt["unknown_events"] += 1
 
     # ---- exchange calls ---------------------------------------------------------------------------------------
-    def req(self, method, path, body=None):
+    def req(self, method, path, body=None, signed=True):
         """One paced request. Returns (status, json) or (None, None) on a network/5xx problem."""
         gap = 1.0 / self.a.rate
         now = time.monotonic()
@@ -293,7 +296,7 @@ class Bridge:
         self.last_req = time.monotonic()
         self.cnt["requests"] += 1
         try:
-            status, js, hdrs = self.c.call(method, path, body)
+            status, js, hdrs = self.c.call(method, path, body, signed)
         except OSError as e:
             self.cnt["net_errors"] += 1
             self.fail("net_error", detail=type(e).__name__)
@@ -437,7 +440,8 @@ class Bridge:
                      "http_5xx", "place_unknown", "refused_local", "refused_max_open", "vanished", "strays", "bad_lines",
                      "cancel_all_cancelled", "fills", "orphans", "reports_accepted", "reports_rejected", "reports_canceled",
                      "reports_replaced", "reports_fill", "reports_cancel_rejected", "reports_replace_rejected",
-                     "fills_at_cancel", "cancel_unverified",
+                     "fills_at_cancel", "cancel_unverified", "ioc_placed", "ioc_fills", "ioc_unsettled", "ioc_unknown",
+                     "ioc_refused_band", "ioc_no_ticker", "refused_type",
                      "ws_connects", "ws_messages", "ws_bad_messages", "ws_errors", "ws_failures", "ws_fills", "ws_matches_unknown_order",
                      "ws_matches_bad", "ws_matches_already_reported"):
             g("hft_bridge_%s_total" % name, name.replace("_", " ") + ".", self.cnt[name])
@@ -503,8 +507,9 @@ class LoopBridge(Bridge):
                 self.cnt["unknown_events"] += 1
 
     # ---- carrying out one request ----------------------------------------------------------------------------------
-    def post(self, k, side, px_raw, lots):
-        """POST one order. Returns ('ok', oid, coid) | ('refused', reason) | ('unknown',)"""
+    def post(self, k, side, px_raw, lots, ioc=False):
+        """POST one order (post-only, or immediate-or-cancel when `ioc`).
+        Returns ('ok', oid, coid) | ('refused', reason) | ('unknown',)"""
         px, sz = fmt_price(px_raw, self.px_scale), fmt_size(lots, self.qty_scale)
         notional = (px_raw / self.px_scale) * (lots / self.qty_scale)
         if px is None:
@@ -518,6 +523,9 @@ class LoopBridge(Bridge):
         coid = str(uuid.uuid5(NS, "%s:%d:%d:%d" % (self.run, k[0], k[1], self.placements[k])))
         body = {"type": "limit", "side": side, "product_id": self.a.product, "price": px, "size": sz, "post_only": True,
                 "client_oid": coid}
+        if ioc:
+            del body["post_only"]
+            body["time_in_force"] = "IOC"
         for _ in range(20):
             st, js = self.req("POST", "/orders", body)
             if st != 429:  # on 429 req() has already paused
@@ -599,6 +607,14 @@ class LoopBridge(Bridge):
                 self.cnt["refused_max_open"] += 1
                 self.report(k, "rejected", reason="badqty", side=m["side"])
                 return
+            otype = m.get("type", OT_POST_ONLY)
+            if otype == OT_IOC:
+                self.close_order(k, m)
+                return
+            if otype != OT_POST_ONLY:  # the bridge carries out the strategy's quotes and the closing orders, nothing else
+                self.cnt["refused_type"] += 1
+                self.report(k, "rejected", px=m["px"], qty=m["qty"], reason="other", side=m["side"])
+                return
             r = self.post(k, m["side"], m["px"], m["qty"])
             if r[0] == "ok":
                 self.live[k] = {"oid": r[1], "coid": r[2], "px": m["px"], "qty": m["qty"], "side": m["side"]}
@@ -647,6 +663,84 @@ class LoopBridge(Bridge):
                 self.report(k, "replaced", px=m["px"], qty=m["qty"], leaves=m["qty"], side=v["side"])
             else:  # the old order is gone and the new one was refused or lost: the order no longer exists
                 self.report(k, "canceled", px=v["px"], qty=m["qty"], leaves=0, reason=r[1] if r[0] == "refused" else "other", side=v["side"])
+
+    def ticker_mid(self):
+        """Mid of the exchange's own best bid and ask (public endpoint), or None if it cannot be had."""
+        for _ in range(5):
+            st, js = self.req("GET", "/products/%s/ticker" % self.a.product, signed=False)
+            if st != 429:
+                break
+        else:
+            st, js = None, None
+        if st != 200 or not isinstance(js, dict):
+            return None
+        try:
+            bid, ask = float(js["bid"]), float(js["ask"])
+        except (KeyError, ValueError, TypeError):
+            return None
+        return (bid + ask) / 2 if 0 < bid <= ask else None
+
+    def close_order(self, k, m):
+        """An immediate-or-cancel order that the engine sends to close its position. It is the one order that takes liquidity,
+        so before it goes out its price is checked against the exchange's own quote (the engine priced it from its local book,
+        which may be wrong); then the exchange's record of the order says how much of it traded."""
+        side, px_raw, lots = m["side"], m["px"], m["qty"]
+        mid = self.ticker_mid()
+        if mid is None:
+            self.cnt["ioc_no_ticker"] += 1
+            self.log.emit("ioc_refused", seg=k[0], id=k[1], why="no ticker")
+            self.report(k, "rejected", px=px_raw, qty=lots, reason="other", side=side)
+            return
+        px = px_raw / self.px_scale
+        if abs(px - mid) / mid * 1e4 > self.a.ioc_band_bps:
+            self.cnt["ioc_refused_band"] += 1
+            self.log.emit("ioc_refused", seg=k[0], id=k[1], why="outside band", px=round(px, 4), mid=round(mid, 4))
+            self.report(k, "rejected", px=px_raw, qty=lots, reason="badprice", side=side)
+            return
+        r = self.post(k, side, px_raw, lots, ioc=True)
+        if r[0] != "ok":
+            self.report(k, "rejected", px=px_raw, qty=lots, reason=r[1] if r[0] == "refused" else "other", side=side)
+            return
+        oid = r[1]
+        self.cnt["ioc_placed"] += 1
+        self.report(k, "accepted", px=px_raw, qty=lots, leaves=lots, side=side)
+        for _ in range(5):
+            st, d = self.req("GET", "/orders/" + oid)
+            if st != 429:
+                break
+        else:
+            st, d = None, None
+        v = {"oid": oid, "coid": r[2], "px": px_raw, "qty": lots, "side": side, "ioc": True, "reads": 1}
+        self.filled[k] = 0
+        self.ws_seen[k] = 0
+        if not self.ioc_outcome(k, v, st, d):
+            # The record is missing, unreadable or says the order is still working. An immediate-or-cancel order cannot rest,
+            # so it has ended, but how is not known: keep it and let the sync read the final record (and the socket may say).
+            self.cnt["ioc_unsettled"] += 1
+            self.live[k] = v
+            self.sync_now = True
+
+    def ioc_outcome(self, k, v, st, d):
+        """Reports how an immediate-or-cancel order ended, from the exchange's record. False if the record does not say."""
+        if not (st == 200 and isinstance(d, dict) and "filled_size" in d and d.get("status") in ("done", "rejected", "cancelled", "canceled")):
+            return False
+        lots = v["qty"]
+        avg = v["px"]
+        try:
+            n = min(max(self.lots_of(d["filled_size"]), 0), lots)
+            if n > 0 and float(d.get("executed_value", 0)) > 0:
+                avg = int(round(float(d["executed_value"]) / float(d["filled_size"]) * self.px_scale)) or v["px"]
+        except (ValueError, TypeError, ZeroDivisionError):
+            return False
+        prev = self.filled.get(k, 0)  # lots the socket has already reported
+        n = max(n, prev)
+        if n > prev:
+            self.cnt["ioc_fills"] += 1
+            self.filled[k] = n
+            self.report(k, "fill", px=avg, qty=n - prev, leaves=lots - n, side=v["side"])
+        if n < lots:
+            self.report(k, "canceled", px=v["px"], qty=lots - n, leaves=0, reason="ioc", side=v["side"])
+        return True
 
     def step(self):
         self.drain_ws()
@@ -731,6 +825,20 @@ class LoopBridge(Bridge):
             # not open any more: ask how it ended
             st2, d = self.req("GET", "/orders/" + v["oid"])
             prev = self.filled.get(k, 0)
+            if v.get("ioc"):
+                # Never guess for these: a "cancelled" that was really a fill would make the engine sell again. If the exchange
+                # will not say, report nothing; the engine's own deadline then fails the close and says so.
+                v["reads"] = v.get("reads", 0) + 1
+                if self.ioc_outcome(k, v, st2, d):
+                    pass
+                elif v["reads"] < 4:
+                    self.sync_now = True
+                    continue
+                else:
+                    self.cnt["ioc_unknown"] += 1
+                    self.log.emit("ioc_outcome_unknown", seg=k[0], id=k[1], status=st2)
+                del self.live[k]
+                continue
             if st2 == 200 and isinstance(d, dict) and d.get("done_reason") == "filled":
                 self.cnt["fills"] += 1
                 self.report(k, "fill", px=v["px"], qty=v["qty"] - prev, leaves=0, side=v["side"])
@@ -757,6 +865,8 @@ def main(argv=None):
     ap.add_argument("--rate", type=float, default=8.0, help="requests per second (the sandbox limit is 15)")
     ap.add_argument("--max-open", type=int, default=6)
     ap.add_argument("--max-notional", type=float, default=25.0, help="USD per order")
+    ap.add_argument("--ioc-band-bps", type=float, default=100.0,
+                    help="a closing (immediate-or-cancel) order is refused if its price is further than this from the exchange's own mid")
     ap.add_argument("--max-errors", type=int, default=20, help="consecutive exchange errors before giving up")
     ap.add_argument("--sync-s", type=float, default=5.0)
     ap.add_argument("--timeout", type=float, default=5.0)

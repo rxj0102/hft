@@ -20,6 +20,7 @@ capture_l2.py --out - | hft_live --orders-fd 3 3>| order_bridge.py        (scrip
 | Keys only from `HFT_CB_KEY`, `HFT_CB_SECRET`, `HFT_CB_PASSPHRASE`. No option exists for them; they are not logged (tested by searching every output for them). Missing: exit 2 before any network use | `order_bridge.py` main |
 | Base URL must be exactly `https://api-public.sandbox.exchange.coinbase.com`. Production and look-alike hosts are refused (exit 2). `--test-exchange` allows plain http to 127.0.0.1 only | `check_url` |
 | Per-order notional cap (`--max-notional`, default 25 USD) and working-order cap (`--max-open`, default 6): refused locally, never sent | `Bridge.step` |
+| In `--loop` mode the bridge sends two kinds of order only: post-only quotes (type 4) and, with `hft_live --close-position`, immediate-or-cancel closing orders (type 2). The closing order is the only one that takes liquidity: it is refused unless its price is within `--ioc-band-bps` (default 100) of the exchange's own ticker mid and the notional cap holds. Anything else is rejected unsent (ADR 29) | `LoopBridge.handle`, `close_order` |
 | Rate `--rate` (default 8/s) below the documented 15/s per profile | `Bridge.req` |
 | Cancel-all for the product at start, at end of input and on SIGTERM. **This cancels every open order for the product on the profile, including ones you placed by hand.** Use a dedicated sandbox profile | `Bridge.cancel_all` |
 | 401/403 or a clock more than 20 s from the exchange's: exit 4, never restarted | `Fatal(4)` |

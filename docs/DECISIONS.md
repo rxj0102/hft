@@ -30,3 +30,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 26. [The external venue is a mode of the session, and flatten becomes a state](adr/0026-external-venue-is-a-mode-and-flatten-is-a-state.md) (Accepted)
 27. [Fills come from the websocket, and the REST sync stays as the authority](adr/0027-fills-come-from-the-socket-and-the-sync-stays.md) (Accepted)
 28. [When a cancel is accepted, ask the exchange what had traded](adr/0028-ask-the-exchange-what-traded-when-a-cancel-is-accepted.md) (Accepted)
+29. [Close the position with one reduce-only IOC order, only when stopping for good](adr/0029-close-the-position-with-a-reduce-only-ioc-when-stopping.md) (Accepted)

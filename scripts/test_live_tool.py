@@ -289,6 +289,7 @@ class ScriptedExchange:
         self.orders_r, self.reports_w, self.mode = orders_r, reports_w, mode
         self.seen, self.sent = [], []
         self.garbage_events = 0
+        self.filled_one = False
         self.th = threading.Thread(target=self.run)
         self.th.start()
 
@@ -315,7 +316,21 @@ class ScriptedExchange:
                     self.garbage_events += 1
                     os.write(self.reports_w, b"this is not json\n{\"t\":\"rep\",\"seg\":1}\n"
                              b"{\"t\":\"rep\",\"seg\":1,\"rt\":\"accepted\",\"id\":1,\"px\":5,\"qty\":-5,\"leaves\":5}\n")
-                if t == "new":
+                if t == "new" and self.mode in ("close_ok", "close_none", "close_slow"):
+                    self.reply(rec, "accepted")
+                    if rec.get("type") == 2:                                   # a closing order: trades in full, or not at all
+                        if self.mode == "close_slow":                          # one lot at a time, a second after it was sent
+                            time.sleep(1.0)
+                            self.reply(rec, "fill", qty=1, leaves=rec["qty"] - 1)
+                            self.reply(rec, "canceled", qty=rec["qty"] - 1, leaves=0, reason="ioc")
+                        elif self.mode == "close_ok":
+                            self.reply(rec, "fill", leaves=0)
+                        else:
+                            self.reply(rec, "canceled", leaves=0, reason="ioc")
+                    elif not self.filled_one:                                  # the first quote that rests trades: a position
+                        self.filled_one = True
+                        self.reply(rec, "fill", leaves=0)
+                elif t == "new":
                     self.reply(rec, "accepted", seg=rec["seg"] + (50 if self.mode == "wrongseg" else 0))
                 elif t == "rep":
                     self.reply(rec, "replaced")
@@ -396,6 +411,50 @@ rc, out, ex = run_external("keepopen", ext_feed(10), flatten_s="0.5", close_exch
 names = [json.loads(l)["event"] for l in open(logp3)]
 check(rc == 6 and "exchange_lost" in names, "external: exchange pipe closed -> exchange_lost, exit 6 (restartable) (rc=%s)" % rc)
 os.remove(logp3)
+
+# 12. closing the position at the end: --close-position
+for mode, flag, want_rc, closed in (("close_ok", True, 0, True), ("close_ok", False, 0, False), ("close_none", True, 4, False)):
+    lp = tempfile.mktemp(suffix=".log")
+    rc, out, ex = run_external(mode, ext_feed(30), flatten_s="3", pace=0.03, extra=["--log", lp] + (["--close-position"] if flag else []))
+    rows = [json.loads(l) for l in open(lp)]
+    os.remove(lp)
+    iocs = [r for r in ex.seen if r["t"] == "new" and r.get("type") == 2]
+    fills = [r for r in ex.sent if r["rt"] == "fill"]
+    tag = "close: %s%s" % (mode, " with --close-position" if flag else " without it")
+    check(len(fills) >= 1, tag + ": the strategy got a position (%d fills)" % len(fills))
+    check(rc == want_rc, tag + ": exit %d (rc=%s)\n%s" % (want_rc, rc, out[-600:]))
+    seg_end = [r for r in rows if r["event"] == "segment_end"]
+    if not flag:
+        check(not iocs, tag + ": no closing order is ever sent")
+        check(seg_end and seg_end[-1].get("close_attempts", 0) == 0, tag + ": no attempt recorded")
+        continue
+    check(iocs and all(r["side"] == "sell" for r in iocs), tag + ": a sell through the bid: %s" % [(r["side"], r["px"], r["qty"]) for r in iocs[:2]])
+    check(iocs and all(r["px"] % 100 == 0 and 0 < r["px"] < 1000_000 for r in iocs), tag + ": on the tick grid, below the touch")
+    if closed:
+        check(len(iocs) == 1 and iocs[0]["qty"] == fills[0]["qty"], tag + ": one order for the whole position")
+        check(seg_end and seg_end[-1]["close_attempts"] == 1 and seg_end[-1]["closed_lots"] == fills[0]["qty"] and not seg_end[-1]["close_failed"], tag + ": the segment says so: %s" % seg_end[-1:])
+        check("POSITION NOT CLOSED" not in out and not [r for r in rows if r["event"] == "position_not_closed"], tag + ": no alarm")
+    else:
+        check(len(iocs) == 5, tag + ": five attempts, then it gives up (%d)" % len(iocs))
+        check(seg_end and seg_end[-1]["close_failed"] and seg_end[-1]["close_why_not"] == "attempts used up" and seg_end[-1]["closed_lots"] == 0, tag + ": the segment says why: %s" % seg_end[-1:])
+        check("POSITION NOT CLOSED" in out and [r for r in rows if r["event"] == "position_not_closed"], tag + ": loud, in the output and the log")
+
+# five closing orders of one second each outlast the flatten timeout (1.5 s); the session must wait for all of them
+lp = tempfile.mktemp(suffix=".log")
+rc, out, ex = run_external("close_slow", ext_feed(30), flatten_s="1.5", pace=0.03, extra=["--log", lp, "--close-position"])
+rows = [json.loads(l) for l in open(lp)]
+os.remove(lp)
+iocs = [r for r in ex.seen if r["t"] == "new" and r.get("type") == 2]
+seg_end = [r for r in rows if r["event"] == "segment_end"]
+check(rc == 0 and len(iocs) == 5, "close: five one-lot fills, each a second apart, are waited for (rc=%s, %d orders)\n%s" % (rc, len(iocs), out[-500:]))
+check(seg_end and seg_end[-1]["closed_lots"] == 5 and seg_end[-1]["close_attempts"] == 5 and not seg_end[-1]["close_failed"], "close: and the segment says 5 lots in 5 attempts: %s" % seg_end[-1:])
+
+for extra, what in ((["--close-position"], "without --exchange-fd"), (["--close-position", "--exchange-fd", "3", "--close-collar-bps", "0"], "collar 0"),
+                    (["--close-position", "--exchange-fd", "3", "--close-collar-bps", "1001"], "collar 1001")):
+    rr, ww = os.pipe()
+    p_ = subprocess.run([BIN, "--orders-fd", "4"] + extra, capture_output=True, pass_fds=(rr, ww))
+    check(p_.returncode == 1, "close: %s: exit 1 (got %d)" % (what, p_.returncode))
+    os.close(rr); os.close(ww)
 
 for args, what in (([BIN, "--exchange-fd", "3"], "without --orders-fd"), ([BIN, "--from", "/dev/null", "--orders-fd", "3", "--exchange-fd", "4"], "with --from")):
     rr, ww = os.pipe()

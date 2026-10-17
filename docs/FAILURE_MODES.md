@@ -125,13 +125,17 @@ Evidence is `scripts/drill.py` against a local fake feed unless stated. The pape
 | (closed loop) exchange slow | quotes lag by two calls per move; flatten takes longer | `flatten_sim_ns` in `segment_end` |
 | (closed loop) fill happens | found at the next sync (up to `--sync-s`); position moves; the filled order may look alive until then | `hft_live_position_lots`, `fills` |
 | (closed loop) unparsable or stale report | counted and dropped | summary line "unparsable", `hft_live_exchange_reports_stale_total` |
+| (closing) stop with a position, `--close-position` on | cancels, then up to 5 IOC orders against the position; flat in position, exit 0 | `segment_end` `closed_lots` |
+| (closing) the close cannot be done (no liquidity, feed older than the stale limit, no two-sided book, refused by risk or by the bridge's band) | position stays; `POSITION NOT CLOSED`, exit 4, supervisor `stop_not_flat` | `position_not_closed`, `close_why_not` |
+| (closing) the exchange never says how a closing order ended | bridge reports nothing (`ioc_outcome_unknown`); the engine's timeout fails the close; exit 4 | `ioc_outcome_unknown` |
+| (closing) a position left by a segment that ended for a routine reason, or by an earlier process | not closed, not known after a restart | `segment_end.position_lots` |
 | supervisor itself dies | nothing restarts it | not handled |
 | host reboot | nothing restarts it | not handled |
 | orders left working at a real exchange after a kill -9 | not modelled (paper venue) | not handled |
 
 ## Known gaps
 
-- Position is not flattened automatically after a kill. That is a human decision (see the runbook).
+- Position is not flattened automatically after a kill, unless `--close-position` is on (closed-loop mode only, ADR 29); it does not cover a position left by a routine segment end or an earlier process. Otherwise that is a human decision (see the runbook).
 - One outstanding request per order; a late report for an evicted order id is counted as unknown.
 - No heartbeat or retransmission on order entry.
 - No handling of exchange halts, auctions, or crossed/locked books beyond what the synthetic exchange produces.

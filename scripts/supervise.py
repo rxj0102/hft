@@ -95,8 +95,14 @@ def main(argv=None):
     ap.add_argument("--bridge", action="store_true", help="also run scripts/order_bridge.py (sandbox order entry; keys from HFT_CB_* env)")
     ap.add_argument("--loop", action="store_true", help="closed loop (implies --bridge): the exchange's reports go back into hft_live")
     ap.add_argument("--bridge-args", default="", help="extra order_bridge.py options, shell-split (e.g. --rate 6 --max-notional 10)")
+    ap.add_argument("--close-position", action="store_true",
+                    help="with --loop: when hft_live stops for good (shutdown or kill) it first sells or buys back its position with an "
+                         "immediate-or-cancel order; if it cannot, it exits 4 and says POSITION NOT CLOSED")
+    ap.add_argument("--close-collar-bps", type=int, default=None, help="how far past the touch the closing order is priced (hft_live default 30)")
     ap.add_argument("--bridge-cmd", default=None, help="replace the bridge command (shell-split)")
     a = ap.parse_args(argv)
+    if (a.close_position or a.close_collar_bps is not None) and not (a.loop and not a.live_cmd):
+        ap.error("--close-position and --close-collar-bps need --loop and the default hft_live command (add the options to --live-cmd yourself otherwise)")
 
     os.makedirs(a.run_dir, exist_ok=True)
     resnap = os.path.join(a.run_dir, "resnap")
@@ -122,6 +128,10 @@ def main(argv=None):
     else:
         live_cmd = [a.live, "--resnap-file", resnap, "--log", events, "--metrics", metrics, "--metrics-s", str(a.metrics_s),
                     "--report-s", "60", "--stale-ms", str(a.stale_ms)]
+        if a.close_position:
+            live_cmd.append("--close-position")
+        if a.close_collar_bps is not None:
+            live_cmd += ["--close-collar-bps", str(a.close_collar_bps)]
 
     bridge_cmd = None
     if a.loop:
@@ -269,11 +279,11 @@ def main(argv=None):
         if why == "stop_requested":
             exit_code = 0
             if live.returncode == 4:  # asked to stop, and it could not say it was flat: do not report a clean stop
-                log.emit("stop_not_flat", run=run_no, detail="hft_live exited 4 during the stop; orders may still rest on the exchange")
+                log.emit("stop_not_flat", run=run_no, detail="hft_live exited 4 during the stop; orders may still rest on the exchange, or a position may remain open")
                 exit_code = 4
             break
         if live.returncode == 4:
-            log.emit("fatal_halt", run=run_no, detail="hft_live reported an integrity failure; not restarting, a person must look")
+            log.emit("fatal_halt", run=run_no, detail="hft_live exited 4 (an integrity failure, a flatten that failed, or a position it could not close); not restarting, a person must look")
             exit_code = 4
             break
         if bridge is not None and bridge.returncode in (2, 4):

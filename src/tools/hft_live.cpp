@@ -304,7 +304,9 @@ void observe(EventLog& log, Observer& o, const feed::LiveSession& s, double mono
     std::string b = std::string("\"reason\":\"") + feed::end_reason_name(sm.reason) + "\"," + num("segment", o.sums) + "," +
                     num("packets", sm.packets) + "," + num("flat", sm.flat) + "," + num("kill_latched", sm.kill_latched) + "," +
                     num("book_matched_model", sm.book_matched_model) + "," + num("flatten_rounds", sm.flatten_rounds) + "," +
-                    num("flatten_sim_ns", sm.flatten_sim_ns) + "," + num("open_before_flatten", sm.open_before_flatten) + ",\"position_lots\":" + std::to_string(sm.net_position_lots) + "," + num("fills", sm.fills);
+                    num("flatten_sim_ns", sm.flatten_sim_ns) + "," + num("open_before_flatten", sm.open_before_flatten) + ",\"position_lots\":" + std::to_string(sm.net_position_lots) + "," + num("fills", sm.fills) +
+                    "," + num("close_attempts", sm.close_attempts) + ",\"closed_lots\":" + std::to_string(sm.closed_lots) + "," + num("close_failed", sm.close_failed) +
+                    ",\"close_why_not\":\"" + sm.close_why_not + "\"";
     log.emit("segment_end", mono_s, b);
   }
   if (st.time_regressions != o.regress) {
@@ -336,6 +338,8 @@ void write_metrics(const std::string& path, const feed::LiveSession& s, double u
   c("hft_live_halted", "1 once the session has halted for good.", s.halted() ? 1 : 0, "gauge");
   c("hft_live_open_orders", "Orders working now (OMS view).", s.open_orders(), "gauge");
   std::fprintf(f, "# HELP hft_live_position_lots Net filled quantity of the running segment, in lots.\n# TYPE hft_live_position_lots gauge\nhft_live_position_lots %lld\n", static_cast<long long>(s.position_lots()));
+  c("hft_live_close_orders_total", "Closing (reduce-only IOC) orders sent.", st.close_orders);
+  c("hft_live_close_failures_total", "Times closing the position was wanted and stopped with the position not zero.", st.close_failures);
   c("hft_live_lines_total", "Input lines.", st.lines);
   c("hft_live_feed_messages_total", "Feed messages parsed.", st.messages);
   c("hft_live_feed_bad_total", "Damaged feed messages.", st.bad);
@@ -405,10 +409,12 @@ int main(int argc, char** argv) {
     else if (a == "--orders-fd" && num(v) && v >= 3 && v < 1024) orders_fd = static_cast<int>(v);
     else if (a == "--exchange-fd" && num(v) && v >= 3 && v < 1024) exchange_fd = static_cast<int>(v);
     else if (a == "--flatten-timeout-s" && num(v) && v > 0) lc.flatten_timeout_ns = static_cast<std::uint64_t>(v * 1e9);
+    else if (a == "--close-position") lc.close_position = true;
+    else if (a == "--close-collar-bps" && num(v) && v >= 1 && v <= 1000) lc.close_collar_bps = static_cast<std::int64_t>(v);
     else {
       std::fprintf(stderr,
                    "usage: hft_live [--from capture.l2 [--pace X]] [--stale-ms N] [--rtt-us N] [--lots N] [--levels N]\n"
-                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S]]\n"
+                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S] [--close-position [--close-collar-bps N]]]\n"
                    "reads capture-format lines from stdin unless --from is given\n");
       return 1;
     }
@@ -435,6 +441,10 @@ int main(int argc, char** argv) {
   }
   OrderOut* oo = orders_fd >= 0 ? &oout : nullptr;
   ReportIn rin;
+  if (lc.close_position && exchange_fd < 0) {
+    std::fprintf(stderr, "--close-position needs --exchange-fd (closing needs the exchange's reports)\n");
+    return 1;
+  }
   if (exchange_fd >= 0) {
     if (orders_fd < 0 || !from.empty()) {
       std::fprintf(stderr, "--exchange-fd needs --orders-fd and a live pipe (not --from)\n");
@@ -586,7 +596,7 @@ int main(int argc, char** argv) {
     if (g_stop || exchange_lost) session.kill(last_now);
     else session.shutdown(last_now);
     // External venue: the segment is over only when the exchange has confirmed the cancels (or the timeout passed).
-    const double give_up = secs() + static_cast<double>(lc.flatten_timeout_ns) / 1e9 + 2.0;
+    const double give_up = secs() + static_cast<double>(lc.flatten_timeout_ns) / 1e9 * (1 + (lc.close_position ? lc.close_max_attempts : 0)) + 2.0;
     while (session.busy() && secs() < give_up) {
       pollfd q{rin.fd, POLLIN, 0};
       ::poll(&q, 1, 2);
@@ -667,6 +677,16 @@ int main(int argc, char** argv) {
   }
   if (session.summaries().size() > 20) std::printf("  ... %zu more segments\n", session.summaries().size() - 20);
 
+  if (lc.close_position && !session.summaries().empty()) {
+    const feed::SegmentSummary& last = session.summaries().back();
+    if (last.net_position_lots != 0) {
+      std::printf("  POSITION NOT CLOSED: %lld lots left (%s)\n", static_cast<long long>(last.net_position_lots),
+                  last.close_failed ? last.close_why_not : "closing did not run");
+      elog.emit("position_not_closed", secs(), std::string("\"position_lots\":") + std::to_string(last.net_position_lots) + ",\"why\":\"" +
+                    (last.close_failed ? last.close_why_not : "closing did not run") + "\"");
+      return 4;  // risk is still open at the exchange: not restartable, an operator has to look
+    }
+  }
   if (exchange_lost) return 6;  // restartable: a new bridge cancels whatever is left on the exchange
   if (st.check_failures || st.final_mismatches || st.flatten_failures || st.desyncs || st.book_errors) return 4;
   if (st.segments == 0) return 5;

@@ -42,7 +42,7 @@ The OMS allows one request in flight per order, so nothing is coalesced here; th
 - A reconnect or a window exit used to take about 120 ms to quote again; it now also includes the wait for cancel confirmations.
 - Without `--ws-fills`, fills are found by polling. With `--sync-s 5` a filled order can look alive for up to five seconds. Use a shorter interval in loop mode (`--sync-s 1`), at the price of more calls. With `--ws-fills` (below) the socket delivers fills at once and the sync can be slow.
 - There is no replay of an exchange run: it depends on timing. The paper mode stays the deterministic one.
-- A position built by fills is not closed by anything. Risk limits cap it; the metric `hft_live_position_lots` and `segment_end.position_lots` show it.
+- A position built by fills is closed only when you ask for it and only when the session stops for good (`--close-position`, below). Risk limits cap it in between; the metric `hft_live_position_lots` and `segment_end.position_lots` show it.
 
 ## Evidence
 
@@ -54,7 +54,7 @@ The OMS allows one request in flight per order, so nothing is coalesced here; th
 
 ## Not done
 
-Real sandbox run; partial-fill handling beyond what the sync sees; closing positions; a venue reject taxonomy beyond what the fake produces; replay or fuzzing of the exchange link; any run longer than minutes.
+Real sandbox run; a position that survives a segment end or a restart (it is tracked per segment); a venue reject taxonomy beyond what the fake produces; replay or fuzzing of the exchange link; any run longer than minutes.
 
 ## Fills from the websocket (`--ws-fills`)
 
@@ -80,3 +80,29 @@ Evidence: six scenarios in `test_bridge.py` (fill without a sync, socket and syn
 After the exchange accepts a DELETE (cancel or the first half of a replace) the bridge reads the order (`GET /orders/{id}`) and compares `filled_size` with the lots it has reported. Lots it had not heard of are reported as a `fill` (at the order's limit price) before the `canceled` or `replaced` report, so the OMS never sees a cancel for lots that were bought, and the cancel report carries only what was left. An order the record shows as filled completely gets `cancel_rejected` (or `replace_rejected`). The record is capped at the order's size. If the record is not found (404: a cancelled order without fills may no longer be on file) nothing is invented; if it cannot be read (5xx, timeout, malformed) the cancel is reported from the bridge's own tally, logged as `cancel_unverified` and counted (`hft_bridge_cancel_unverified_total`), and the next sync is the only other chance to see the fill. Counter `hft_bridge_fills_at_cancel_total` counts fills found this way. The smoke test checks that `GET /orders/{id}` after a cancel returns `done_reason` and `filled_size`.
 
 Evidence: `test_bridge.py` (cancel and replace with a fill just before the DELETE, with and without the socket, a record that says more than the order's size, a record that is missing or unreadable, a fill part from the socket and part from the record); a mutation run of the new code. Not shown: the real exchange's behaviour for a cancelled order's record.
+
+## Closing the position when stopping (`--close-position`, ADR 29)
+
+`hft_live --exchange-fd N --close-position [--close-collar-bps 30]` (or `supervise.py --loop --close-position [--close-collar-bps N]`). Off by default.
+
+When it runs: the session is stopping for good (SIGTERM, end of input, or the kill switch), the exchange has confirmed that no order is working, and the position is not zero. A reconnect, a window exit, a stale feed or an integrity failure do not close: their cause is that the book cannot be trusted, and the closing price comes from the book.
+
+What it sends: one immediate-or-cancel limit order against the position (a sell for a long, a buy for a short), for the whole position, priced `--close-collar-bps` (default 30) beyond the opposite touch of the local book and rounded away from the market on the tick grid. A partial fill is followed by another order for the rest, up to 5 orders in all; each gets the full `--flatten-timeout-s` from the moment it is sent, and no cancel is sent for it meanwhile (it cannot rest).
+
+What stops it, each written to the segment summary (`close_why_not`) and the log (`segment_end`: `close_attempts`, `closed_lots`, `close_failed`, `close_why_not`):
+
+| `close_why_not` | Meaning |
+|---|---|
+| `attempts used up` | five orders and the position is still not zero |
+| `feed not fresh` | the last feed message is older than `--stale-ms`: the book is not a price to trade against. After a SIGTERM the capture stops as well, so closing has to finish within `--stale-ms` of the last message (default 3 s) |
+| `no two-sided book` | no bid or no ask |
+| `refused by risk or OMS` | `close_risk_code` has the check (for example the collar is wider than the risk engine's price band) |
+
+The risk check for a closing order (`RiskEngine::check_close`) ignores the kill switch and the loss limit, because those are the states it exists for. It keeps the size, notional, price-band (against the strategy's last reference), no-reference and rate checks, and it accepts an order only if it strictly reduces the position and no other order is working, so it can neither flip nor grow a position.
+
+The bridge carries the order out as `{"type": "limit", "time_in_force": "IOC"}` with no post-only flag, after two checks the engine cannot make: the notional cap (`--max-notional`) and the price against the exchange's own ticker mid (`--ioc-band-bps`, default 100; no usable ticker means no order). It then reads the order record (`GET /orders/{id}`) and reports `accepted`, a `fill` for the lots that traded at the executed average price, and `canceled` for the rest. If the record is missing, unreadable or does not say the order has ended, the order is kept for the sync (and the socket) to settle; if the exchange never says, the bridge sends nothing and logs `ioc_outcome_unknown`, because reporting a cancel for lots that really traded would make the engine sell again and go short. The engine's own timeout then fails the close. Any other type than post-only (4) or IOC (2) is rejected without being sent. Counters: `hft_bridge_ioc_placed_total`, `ioc_fills`, `ioc_unsettled`, `ioc_unknown`, `ioc_refused_band`, `ioc_no_ticker`, `refused_type`; in `hft_live`: `hft_live_close_orders_total`, `hft_live_close_failures_total`.
+
+Exit: if the last segment still has a position, `hft_live` prints `POSITION NOT CLOSED: N lots left (reason)`, logs `position_not_closed` and exits 4 (the supervisor reports `stop_not_flat` if it was asked to stop). A position is tracked per segment: a segment that ended for a routine reason with a position leaves it behind (visible in `segment_end.position_lots`), a restarted process starts from zero, and only the last segment decides the exit code.
+
+Evidence: six C++ test functions in `test_live` (both directions, kill and shutdown, no close on routine ends or when off, a late stop during a routine end, partial fills, attempts used up, a stale feed, a collar the risk band refuses, a timeout, prices on the grid, a one-sided book, the wait for an acknowledged order) and `check_close` in `test_oms` and `test_gw`; `test_bridge.py` (fill, partial fill, no fill, band, notional, other types, no ticker, refused POST, unreadable or hidden record, socket plus record, a capped record); `test_live_tool.py` section 12 (exit codes, event fields, five slow one-lot orders); drills `loop_close`, `loop_close_no_liquidity`, `loop_close_off_market`; a mutation run (CHANGELOG, Phase 17). Not shown: the real sandbox's behaviour for IOC orders (its status values and whether the record is there immediately), fees, and slippage beyond the collar.
+

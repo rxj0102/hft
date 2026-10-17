@@ -383,6 +383,39 @@ void test_gateway_basic() {
   CHECK(g.gw.stats().reports == 3 && g.gw.oms().stats().anomalies == 0 && g.gw.oms().check_invariants());
 }
 
+void test_gateway_close_order() {
+  GwRig g;
+  // nothing to close
+  CHECK(g.gw.close_order(Side::Sell, PX(1'199'000), 5, 1).risk == RiskResult::NotReducing);
+  CHECK(g.cap.bytes.empty() && g.gw.stats().sent_new == 0 && g.gw.stats().risk_rejects == 1);
+  // a long position of 10 lots
+  CHECK(g.gw.new_order(Side::Buy, OrderType::Limit, PX(1'200'000), 10, 1).ok());
+  g.deliver(mkrep(ReportType::Accepted, 1, 10, 10));
+  g.deliver(mkrep(ReportType::Fill, 1, 10, 0));
+  CHECK(g.gw.oms().position().pos == 10 && g.gw.oms().open_orders() == 0);
+  const std::uint64_t sent = g.gw.stats().sent_new;
+  // the wrong way, too much: refused, nothing sent
+  CHECK(g.gw.close_order(Side::Buy, PX(1'201'000), 5, 2).risk == RiskResult::NotReducing);
+  CHECK(g.gw.close_order(Side::Sell, PX(1'199'000), 11, 2).risk == RiskResult::NotReducing);
+  CHECK(g.gw.stats().sent_new == sent);
+  // the kill switch does not stop it; a new order is stopped
+  g.gw.kill(risk::KillReason::Manual, 3);
+  CHECK(g.gw.new_order(Side::Sell, OrderType::Limit, PX(1'199'000), 5, 3).risk == RiskResult::KillSwitch);
+  const std::size_t before = g.cap.bytes.size();
+  const SubmitResult c = g.gw.close_order(Side::Sell, PX(1'199'000), 10, 3);
+  CHECK(c.ok() && c.id == 2);
+  CHECK(g.gw.stats().sent_new == sent + 1);
+  const oms::OrderRec* o = g.gw.oms().find(c.id);
+  CHECK(o != nullptr && o->type == OrderType::IOC && o->side == Side::Sell && o->qty == 10 && o->state == State::PendingNew);
+  Decoded d = decode_all(g.cap.bytes);
+  const ClientMsg& m = d.msgs.back();
+  CHECK(g.cap.bytes.size() > before && m.kind == kMsgNew && m.id == c.id && m.otype == OrderType::IOC && m.side == Side::Sell);
+  CHECK(m.qty == 10 && m.price.raw() == 1'199'000);
+  CHECK(g.gw.oms().check_invariants());
+  // while that order is out, another closing order is refused (a working order could flip the position)
+  CHECK(g.gw.close_order(Side::Sell, PX(1'199'000), 1, 4).risk == RiskResult::NotReducing);
+}
+
 // A fresh rig with orders 1 and 2 sent and acknowledged.
 void working_pair(GwRig& g) {
   CHECK(g.gw.new_order(Side::Buy, OrderType::Limit, PX(1'200'000), 10, 1).ok());
@@ -783,6 +816,7 @@ int main(int argc, char** argv) {
   test_codec_malformed();
   test_stream_decoder(n);
   test_gateway_basic();
+  test_gateway_close_order();
   test_gateway_session_faults();
   std::puts("codec and gateway unit tests done");
   test_end_to_end(n);

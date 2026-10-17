@@ -57,6 +57,9 @@ class FakeExchange:
         self.before_cancel = None
         self.trade_id = 0
         self.honour_post_only = True   # False: a crossing "post-only" order is accepted (a broken exchange, for the smoke test's tests)
+        self.ioc_fill_fraction = 1.0   # share of an immediate-or-cancel order that finds liquidity at the touch
+        self.ioc_record_status = "done"  # what the order record says once the order has been processed ("pending": it does not say yet)
+        self.ioc_orders = []           # (side, price, size, filled) of every immediate-or-cancel order
         self.httpd = None
 
     # ---- helpers for tests ----
@@ -288,6 +291,32 @@ class FakeExchange:
         status, payload = self.apply(method, u, body)
         return status, payload, self.mode == "drop"
 
+    def apply_ioc(self, o, price, size):
+        """Immediate-or-cancel (called with the lock held): trades at the touch if the price reaches it, up to
+        ioc_fill_fraction of the size, and the rest is cancelled. The POST answers `pending`; the record then reads `done`."""
+        if o.get("post_only") or o["client_oid"] in self.by_coid:
+            return 400, {"message": "invalid order"}
+        buy = o["side"] == "buy"
+        marketable = price >= self.best_ask if buy else price <= self.best_bid
+        touch = self.best_ask if buy else self.best_bid
+        got = int(size * self.ioc_fill_fraction * 1e5 + 1e-6) / 1e5 if marketable else 0.0
+        oid = str(uuid.uuid4())
+        full = got >= size - 1e-9
+        rec = {"id": oid, "client_oid": o["client_oid"], "side": o["side"], "price": o["price"], "size": o["size"],
+               "product_id": o.get("product_id"), "time_in_force": "IOC", "status": self.ioc_record_status, "done_reason": "filled" if full else "canceled",
+               "filled_size": "%.8f" % got, "executed_value": "%.8f" % (got * touch)}
+        self.done[oid] = rec
+        self.by_coid[o["client_oid"]] = oid
+        self.ioc_orders.append((o["side"], price, size, got))
+        self.posted.append((price, size, False))
+        self.ws_send({"type": "received", "order_id": oid, "client_oid": o["client_oid"], "side": o["side"], "price": o["price"], "size": o["size"]})
+        if got > 0:
+            self.trade_id += 1
+            self.ws_send({"type": "match", "trade_id": self.trade_id, "maker_order_id": "other-" + str(self.trade_id), "taker_order_id": oid,
+                          "product_id": o.get("product_id"), "size": "%.8f" % got, "price": "%.2f" % touch, "side": o["side"]})
+        self.ws_send({"type": "done", "reason": "filled" if full else "canceled", "order_id": oid, "remaining_size": "%.8f" % (size - got)})
+        return 200, dict(rec, status="pending", done_reason=None, filled_size="0", executed_value="0")
+
     def apply(self, method, u, body):
         q = parse_qs(u.query)
         with self.lock:
@@ -308,6 +337,8 @@ class FakeExchange:
                     return 400, {"message": "invalid order"}
                 if size < 0.00001 or abs(price * 100 - round(price * 100)) > 1e-6:
                     return 400, {"message": "size or price increment invalid"}
+                if o.get("time_in_force") == "IOC":
+                    return self.apply_ioc(o, price, size)
                 self.posted.append((price, size, bool(o.get("post_only"))))
                 if o.get("post_only") and self.honour_post_only and ((o["side"] == "buy" and price >= self.best_ask) or (o["side"] == "sell" and price <= self.best_bid)):
                     if self.cross_http:

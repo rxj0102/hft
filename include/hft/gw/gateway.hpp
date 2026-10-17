@@ -80,6 +80,25 @@ class Gateway {
     return r;
   }
 
+  // Closes (part of) the position: an IOC that the risk engine accepts only if it shrinks the position and nothing else is
+  // working (RiskEngine::check_close). Works with the kill switch latched.
+  SubmitResult close_order(Side side, Price price, Qty qty, std::uint64_t now) noexcept {
+    SubmitResult r;
+    r.risk = risk_.check_close(side, price, qty, oms_.position(), now);
+    if (r.risk != RiskResult::Ok) {
+      ++stats_.risk_rejects;
+      return r;
+    }
+    r.id = next_id_;
+    r.oms = oms_.on_send_new(r.id, side, OrderType::IOC, price, qty, now);
+    if (r.oms != oms::Submit::Ok) return r;
+    ++next_id_;
+    ++stats_.sent_new;
+    std::uint8_t buf[kMaxFrame];
+    send_(buf, encode_new(buf, ++out_seq_, r.id, side, OrderType::IOC, qty, price));
+    return r;
+  }
+
   oms::Request cancel(OrderId id, std::uint64_t now) noexcept {
     const oms::Request q = oms_.on_request_cancel(id, now);
     if (q == oms::Request::Ok) send_cancel(id);

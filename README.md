@@ -26,7 +26,7 @@ The range is run to run on the same VM, hours apart (128 ns early in the session
 
 `scripts/order_bridge.py` mirrors the strategy's orders to the Coinbase Exchange sandbox over signed REST (post-only, paced under the rate limit, coalesced, cancel-all at start and exit, sandbox URL only, keys from environment variables only). It is a mirror, not a closed loop: the exchange's reports do not reach the strategy. It has been tested against a local fake exchange only; no sandbox key was available. See [docs/SANDBOX.md](docs/SANDBOX.md).
 
-With `--loop` the loop is closed: the exchange's acks, rejects, cancels and fills go back into the OMS and an end of trust finishes only when the exchange has confirmed the cancels (or a timeout fails the flatten). Against the local fake exchange only. See [docs/CLOSED_LOOP.md](docs/CLOSED_LOOP.md). Everything runs against the paper venue; what a real exchange does with orders left working after a kill -9 is not shown.
+With `--loop` the loop is closed: the exchange's acks, rejects, cancels and fills go back into the OMS and an end of trust finishes only when the exchange has confirmed the cancels (or a timeout fails the flatten). Against the local fake exchange only. See [docs/CLOSED_LOOP.md](docs/CLOSED_LOOP.md). Everything runs against the paper venue; what a real exchange does with orders left working after a kill -9 is not shown. With `--close-position` a stop for good also closes the position with immediate-or-cancel orders (priced from the local book, checked against the exchange's own quote by the bridge) and exits 4, loudly, if it cannot; a position left by a routine segment end or a restart is not closed. None of this has run against the real sandbox.
 
 ## What is in the box
 

@@ -7,6 +7,7 @@
 // live session adds (stale feed, reconnect, kill, window exit, integrity check)
 // is then tested as a drill with a stated expected outcome.
 #include <cstdint>
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -239,13 +240,17 @@ struct TapLog {
     std::uint64_t seg;
     std::uint8_t kind;
     std::uint64_t id;
+    core::Side side;
+    sim::OrderType otype;
+    std::int64_t qty;
+    std::int64_t price_raw;
   };
   std::vector<Rec> recs;
 };
 
 void tap_collect(void* ctx, std::uint64_t seg, const std::uint8_t* d, std::size_t n) noexcept {
   gw::ClientMsg m;
-  if (n >= 2 && gw::decode_client(d + 2, n - 2, m)) static_cast<TapLog*>(ctx)->recs.push_back({seg, m.kind, m.id});
+  if (n >= 2 && gw::decode_client(d + 2, n - 2, m)) static_cast<TapLog*>(ctx)->recs.push_back({seg, m.kind, m.id, m.side, m.otype, m.qty, m.price.raw()});
 }
 
 // The order tap sees exactly the frames the gateway sends, labelled with the segment they belong to, in order.
@@ -702,6 +707,339 @@ void test_timer_records_only_work_lines() {
 
 }  // namespace
 
+
+// ---- closing the position -------------------------------------------------------------------------------------------
+
+LiveConfig close_cfg() {
+  LiveConfig c = ext_cfg();
+  c.close_position = true;
+  return c;
+}
+
+// Answers the frames in log.recs[from..] like an exchange: new -> accepted, cancel -> canceled, and a closing IOC is filled
+// for `ioc_fill` lots (of its size) and the rest cancelled. Returns the new read position.
+std::size_t answer_all(LiveSession& s, const TapLog& log, std::size_t from, std::uint64_t now, std::int64_t ioc_fill = -1) {
+  const std::size_t to = log.recs.size();
+  for (std::size_t i = from; i < to; ++i) {
+    const auto r = log.recs[i];   // a copy: answering can make the tap append, and the vector then moves
+    if (r.kind == gw::kMsgNew && r.otype == sim::OrderType::IOC) {
+      const std::int64_t f = ioc_fill < 0 || ioc_fill > r.qty ? r.qty : ioc_fill;
+      sim::Report a = report_for(sim::ReportType::Accepted, r.id, r.qty, r.qty);
+      a.side = r.side;
+      s.on_exchange_report(r.seg, a, now);
+      if (f > 0) {
+        sim::Report fl = report_for(sim::ReportType::Fill, r.id, f, r.qty - f);
+        fl.side = r.side;
+        fl.price = core::Price::from_raw(r.price_raw);
+        s.on_exchange_report(r.seg, fl, now);
+      }
+      if (f < r.qty) {
+        sim::Report c = report_for(sim::ReportType::Canceled, r.id, r.qty - f, 0);
+        c.side = r.side;
+        s.on_exchange_report(r.seg, c, now);
+      }
+    } else if (r.kind == gw::kMsgNew) {
+      s.on_exchange_report(r.seg, report_for(sim::ReportType::Accepted, r.id), now);
+    } else if (r.kind == gw::kMsgCancel) {
+      s.on_exchange_report(r.seg, report_for(sim::ReportType::Canceled, r.id, 5, 0), now);
+    }
+  }
+  return to;
+}
+
+// A session with orders out, acknowledged, and one of its quotes (the first on `side`) filled: the position is +5 or -5 lots.
+std::size_t with_position(LiveSession& s, const TapLog& log, core::Side side) {
+  warm_up(s, 1'000'000);
+  std::size_t at = answer_all(s, log, 0, 1'010'000);
+  std::uint64_t victim = 0;
+  for (const auto& r : log.recs)
+    if (r.kind == gw::kMsgNew && r.side == side) {
+      victim = r.id;
+      break;
+    }
+  sim::Report f = report_for(sim::ReportType::Fill, victim, 5, 0);
+  f.side = side;
+  s.on_exchange_report(1, f, 1'020'000);
+  at = answer_all(s, log, at, 1'021'000);   // whatever the strategy did in reaction
+  return at;
+}
+
+std::size_t first_ioc(const TapLog& log, std::size_t from = 0) {
+  for (std::size_t i = from; i < log.recs.size(); ++i)
+    if (log.recs[i].kind == gw::kMsgNew && log.recs[i].otype == sim::OrderType::IOC) return i;
+  return log.recs.size();
+}
+
+void test_close_position_on_shutdown() {
+  for (int dir = 0; dir < 2; ++dir) {
+    const core::Side side = dir == 0 ? core::Side::Buy : core::Side::Sell;  // the side that filled
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, side);
+    CHECK(s.position_lots() == (dir == 0 ? 5 : -5));
+    s.shutdown(1'050'000);
+    CHECK(s.busy() && first_ioc(log) == log.recs.size());            // the cancels go first; no closing order while orders work
+    at = answer_all(s, log, at, 1'051'000);                          // cancels confirmed
+    const std::size_t k = first_ioc(log);
+    CHECK(k < log.recs.size() && s.busy());                          // now the closing order is out and the segment waits for it
+    if (k < log.recs.size()) {
+      const auto o = log.recs[k];
+      CHECK(o.otype == sim::OrderType::IOC && o.qty == 5);
+      CHECK(o.side == (dir == 0 ? core::Side::Sell : core::Side::Buy));  // against the position
+      // best bid 100.00 and best ask 100.10; 30 bps beyond the touch, on the cent grid, rounded away from the market
+      CHECK(o.price_raw == (dir == 0 ? 997'000 : 1'004'100));
+    }
+    answer_all(s, log, at, 1'052'000);                               // IOC accepted and filled
+    CHECK(!s.busy() && s.summaries().size() == 1);
+    const auto& sm = s.summaries()[0];
+    CHECK(sm.net_position_lots == 0 && sm.closed_lots == 5 && sm.close_attempts == 1 && !sm.close_failed && sm.flat);
+    CHECK(s.stats().close_orders == 1 && s.stats().close_failures == 0);
+    CHECK(s.halted() && !s.summaries()[0].kill_latched);              // a shutdown is not a kill, even with a close
+  }
+}
+
+void test_close_is_off_unless_asked() {
+  TapLog log;
+  LiveConfig c = ext_cfg();                                          // close_position false
+  c.order_tap = tap_collect;
+  c.order_tap_ctx = &log;
+  LiveSession s(c);
+  std::size_t at = with_position(s, log, core::Side::Buy);
+  s.shutdown(1'050'000);
+  answer_all(s, log, at, 1'051'000);
+  CHECK(!s.busy() && first_ioc(log) == log.recs.size());
+  CHECK(s.summaries()[0].net_position_lots == 5 && s.summaries()[0].close_attempts == 0 && !s.summaries()[0].close_failed);
+}
+
+void test_close_after_kill_and_routine_ends_do_not_close() {
+  {  // a kill: the switch is latched and the position is still closed
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.kill(1'050'000);
+    at = answer_all(s, log, at, 1'051'000);
+    CHECK(first_ioc(log) < log.recs.size() && s.busy());
+    answer_all(s, log, at, 1'052'000);
+    const auto& sm = s.summaries()[0];
+    CHECK(!s.busy() && sm.reason == EndReason::Kill && sm.kill_latched && sm.net_position_lots == 0 && sm.closed_lots == 5);
+  }
+  {  // a routine end of trust (reconnect): the position stays, nothing is closed, quoting resumes later
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.on_line("#1050000\treconnect", 1'050'000);
+    answer_all(s, log, at, 1'051'000);
+    CHECK(!s.busy() && first_ioc(log) == log.recs.size());
+    CHECK(s.summaries()[0].net_position_lots == 5 && s.summaries()[0].close_attempts == 0 && !s.halted());
+  }
+  {  // a routine end already waiting when the stop comes: the stop is remembered, the first reason stands, the position is closed
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.on_line("#1050000\treconnect", 1'050'000);
+    CHECK(s.busy());
+    s.kill(1'050'500);
+    at = answer_all(s, log, at, 1'051'000);
+    CHECK(first_ioc(log) < log.recs.size());
+    answer_all(s, log, at, 1'052'000);
+    const auto& sm = s.summaries()[0];
+    CHECK(!s.busy() && sm.reason == EndReason::Marker && sm.net_position_lots == 0 && sm.closed_lots == 5);
+  }
+}
+
+void test_close_partial_fills_and_giving_up() {
+  {  // 3 of 5 lots trade, the rest of the IOC is cancelled: a second order closes the remaining 2
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.shutdown(1'050'000);
+    at = answer_all(s, log, at, 1'051'000);                 // cancels confirmed; the first closing order goes out
+    const std::size_t k1 = first_ioc(log);
+    at = answer_all(s, log, at, 1'052'000, 3);              // 3 filled, 2 cancelled
+    const std::size_t k2 = first_ioc(log, k1 + 1);
+    CHECK(k1 < log.recs.size() && k2 < log.recs.size() && s.busy());
+    if (k2 < log.recs.size()) CHECK(log.recs[k2].qty == 2 && log.recs[k2].side == core::Side::Sell);
+    CHECK(s.position_lots() == 2);
+    answer_all(s, log, at, 1'053'000);
+    const auto& sm = s.summaries()[0];
+    CHECK(!s.busy() && sm.net_position_lots == 0 && sm.closed_lots == 5 && sm.close_attempts == 2 && !sm.close_failed);
+  }
+  {  // nothing trades: after close_max_attempts the position stays and the summary says why
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.close_max_attempts = 2;
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.shutdown(1'050'000);
+    at = answer_all(s, log, at, 1'051'000);
+    at = answer_all(s, log, at, 1'052'000, 0);
+    at = answer_all(s, log, at, 1'053'000, 0);
+    const auto& sm = s.summaries()[0];
+    CHECK(!s.busy() && s.summaries().size() == 1);
+    CHECK(sm.net_position_lots == 5 && sm.closed_lots == 0 && sm.close_attempts == 2 && sm.close_failed && sm.flat);
+    CHECK(std::strcmp(sm.close_why_not, "attempts used up") == 0);
+    CHECK(s.stats().close_failures == 1 && s.stats().close_orders == 2);
+  }
+}
+
+void test_close_refusals() {
+  {  // a stale feed: no reference price worth trading against
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.stale_ns = 2'000'000'000ULL;
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.shutdown(6'000'000'000ULL);
+    answer_all(s, log, at, 6'000'100'000ULL);
+    const auto& sm = s.summaries()[0];
+    CHECK(!s.busy() && first_ioc(log) == log.recs.size());
+    CHECK(sm.close_failed && std::strcmp(sm.close_why_not, "feed not fresh") == 0 && sm.net_position_lots == 5);
+  }
+  {  // a collar wider than the risk engine's price band: the risk engine refuses, and says which check
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.close_collar_bps = 800;
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.shutdown(1'050'000);
+    answer_all(s, log, at, 1'051'000);
+    const auto& sm = s.summaries()[0];
+    CHECK(!s.busy() && first_ioc(log) == log.recs.size());
+    CHECK(sm.close_failed && std::strcmp(sm.close_why_not, "refused by risk or OMS") == 0);
+    CHECK(sm.close_risk_code == static_cast<std::uint8_t>(risk::RiskResult::PriceBand));
+  }
+  {  // no position: nothing to do, and that is not a failure
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    warm_up(s, 1'000'000);
+    std::size_t at = answer_all(s, log, 0, 1'010'000);
+    s.shutdown(1'050'000);
+    answer_all(s, log, at, 1'051'000);
+    CHECK(!s.busy() && first_ioc(log) == log.recs.size() && !s.summaries()[0].close_failed && s.summaries()[0].close_attempts == 0);
+  }
+  {  // the closing order is never answered: the wait ends at the deadline as a failed flatten, and the IOC is not "cancelled" meanwhile
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.shutdown(1'050'000);
+    at = answer_all(s, log, at, 1'051'000);
+    const std::size_t k = first_ioc(log);
+    CHECK(k < log.recs.size() && s.busy());
+    const std::size_t frames = log.recs.size();
+    s.poll(1'051'000 + 4'000'000'000ULL);
+    CHECK(s.busy() && log.recs.size() == frames);          // still waiting, and no cancel was sent for the closing order
+    s.poll(1'051'000 + 5'000'000'001ULL);
+    CHECK(!s.busy() && !s.summaries()[0].flat && s.summaries()[0].kill_latched && s.stats().flatten_failures == 1);
+  }
+}
+
+void test_close_prices_and_waiting() {
+  {  // a touch that is not round: the price is rounded away from the market, on the grid
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.on_line(upd(1'030'000, "buy", "100.07", "3"), 1'030'000);   // best bid 100.07: 30 bps below is 99.7698
+    at = answer_all(s, log, at, 1'031'000);
+    s.shutdown(1'050'000);
+    answer_all(s, log, at, 1'051'000);
+    const std::size_t k = first_ioc(log);
+    CHECK(k < log.recs.size() && log.recs[k].side == core::Side::Sell && log.recs[k].price_raw == 997'600);
+  }
+  {  // the same for a buy: best ask 100.05, 30 bps above is 100.3501
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Sell);
+    s.on_line(upd(1'030'000, "sell", "100.05", "3"), 1'030'000);
+    at = answer_all(s, log, at, 1'031'000);
+    s.shutdown(1'050'000);
+    answer_all(s, log, at, 1'051'000);
+    const std::size_t k = first_ioc(log);
+    CHECK(k < log.recs.size() && log.recs[k].side == core::Side::Buy && log.recs[k].price_raw == 1'003'600);
+  }
+  {  // a book with no asks cannot price a sale
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    std::uint64_t t = 1'030'000;
+    for (int i = 0; i < 8; ++i) {
+      char px[16];
+      std::snprintf(px, sizeof px, "100.%02d", 10 + i);
+      s.on_line(upd(t, "sell", px, "0"), t);
+      t += 1000;
+    }
+    at = answer_all(s, log, at, t);
+    s.shutdown(t + 10'000);
+    answer_all(s, log, at, t + 11'000);
+    const auto& sm = s.summaries().back();
+    CHECK(first_ioc(log) == log.recs.size() && !s.busy());
+    CHECK(sm.close_failed && std::strcmp(sm.close_why_not, "no two-sided book") == 0 && sm.net_position_lots == 5);
+  }
+  {  // each attempt gets the whole timeout, counted from when it was sent; and while it waits nothing cancels it
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    c.stale_ns = 60'000'000'000ULL;
+    LiveSession s(c);
+    std::size_t at = with_position(s, log, core::Side::Buy);
+    s.shutdown(1'050'000);
+    const std::uint64_t t1 = 1'050'000 + 4'500'000'000ULL;       // the cancels are confirmed late, 0.5 s before the deadline
+    at = answer_all(s, log, at, t1);
+    const std::size_t k = first_ioc(log);
+    CHECK(k < log.recs.size() && s.busy());
+    const std::size_t frames = log.recs.size();
+    const auto o = log.recs[k];
+    sim::Report a = report_for(sim::ReportType::Accepted, o.id, o.qty, o.qty);
+    a.side = o.side;
+    s.on_exchange_report(o.seg, a, t1 + 1000);                    // acknowledged and working: now it could be cancelled
+    s.poll(t1 + 1'500'000'000ULL);
+    s.poll(t1 + 3'000'000'000ULL);
+    CHECK(s.busy() && log.recs.size() == frames);                  // still waiting, past the first deadline, and no cancel sent
+    for (std::size_t i = k; i < log.recs.size(); ++i) CHECK(log.recs[i].kind != gw::kMsgCancel);
+    sim::Report fl = report_for(sim::ReportType::Fill, o.id, o.qty, 0);
+    fl.side = o.side;
+    fl.price = core::Price::from_raw(o.price_raw);
+    s.on_exchange_report(o.seg, fl, t1 + 3'500'000'000ULL);
+    CHECK(!s.busy() && s.summaries()[0].net_position_lots == 0 && !s.summaries()[0].close_failed);
+  }
+}
+
 int main() {
   test_equivalence();
   test_multi_packet_messages();
@@ -713,6 +1051,12 @@ int main() {
   test_external_flatten_times_out();
   test_external_kill_and_shutdown();
   test_external_fill_and_stale_reports();
+  test_close_position_on_shutdown();
+  test_close_is_off_unless_asked();
+  test_close_after_kill_and_routine_ends_do_not_close();
+  test_close_partial_fills_and_giving_up();
+  test_close_refusals();
+  test_close_prices_and_waiting();
   test_stale_feed();
   test_stale_found_by_next_line();
   test_heartbeats_keep_the_feed_alive();

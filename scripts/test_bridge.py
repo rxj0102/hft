@@ -899,6 +899,212 @@ def test_fill_around_cancel():
         ex.stop()
 
 
+def ioc_req(i, px_, qty=5, side="sell", seg=1):
+    return {"t": "new", "seg": seg, "id": i, "side": side, "px": px_, "qty": qty, "type": 2}
+
+
+def test_close_orders():
+    print("closing orders: an immediate-or-cancel order, checked against the exchange's own quote, answered from its record")
+    # the exchange is at 81000.00 / 81000.10
+    ex, tmp = fresh("io1")
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80990.00), qty=5))
+    check(until(lambda: b.reps("canceled") or b.reps("fill")), "a sell through the bid is answered")
+    kinds = [(r["rt"], r["qty"], r["leaves"]) for r in b.reports]
+    check(kinds == [("accepted", 5, 5), ("fill", 5, 0)], "accepted, then filled in full: %s" % kinds)
+    f = b.reps("fill")[0]
+    check(f["px"] == px(81000.00) and f["side"] == "sell", "at the price it traded (the touch), not at the limit: %s" % f)
+    body = ex.ioc_orders
+    check(len(body) == 1 and body[0][0] == "sell" and body[0][3] > 0, "the exchange saw one immediate-or-cancel order: %s" % body)
+    check(not ex.open_orders(), "and nothing rests")
+    # partial: the rest is cancelled, and reported as such
+    ex.ioc_fill_fraction = 0.6
+    b.send(ioc_req(2, px(81010.00), qty=5, side="buy"))
+    check(until(lambda: len(b.reps("canceled")) == 1), "a partial fill: the rest is cancelled")
+    kinds = [(r["id"], r["rt"], r["qty"], r["leaves"]) for r in b.reports if r["id"] == 2]
+    check(kinds == [(2, "accepted", 5, 5), (2, "fill", 3, 2), (2, "canceled", 2, 0)], "3 filled, 2 cancelled: %s" % kinds)
+    check(b.reps("fill")[1]["px"] == px(81000.10), "a buy trades at the ask")
+    # not marketable: nothing trades
+    ex.ioc_fill_fraction = 1.0
+    b.send(ioc_req(3, px(81000.50), qty=4, side="sell"))
+    check(until(lambda: [r for r in b.reports if r["id"] == 3 and r["rt"] == "canceled"]), "an order that does not reach the touch is cancelled whole")
+    kinds = [(r["rt"], r["qty"]) for r in b.reports if r["id"] == 3]
+    check(kinds == [("accepted", 4), ("canceled", 4)], "with no fill: %s" % kinds)
+    time.sleep(0.5)
+    check(prom_value(tmp, "hft_bridge_ioc_placed_total") == 3 and prom_value(tmp, "hft_bridge_ioc_fills_total") == 2, "counted")
+    rc, _ = b.finish("eof")
+    check(rc == 0, "exit 0")
+    ex.stop()
+
+    # refusals before anything is sent
+    ex, tmp = fresh("io2")
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80000.00)))            # 123 bps from the mid: outside the 100 bps band
+    check(until(lambda: b.reps("rejected")), "a price far from the exchange's mid is rejected")
+    r = b.reps("rejected")[0]
+    check(r["reason"] == "badprice" and not ex.ioc_orders and not ex.posted, "as a bad price, and never sent: %s" % r)
+    b.send(ioc_req(2, px(81000.00), qty=100000, side="sell"))  # 1 BTC at 81000 USD: over the 25 USD default notional cap
+    check(until(lambda: len(b.reps("rejected")) == 2), "an order over the notional cap is rejected")
+    check(b.reps("rejected")[1]["reason"] == "badqty" and not ex.posted, "as a bad size, and never sent")
+    b.send({"t": "new", "seg": 1, "id": 3, "side": "sell", "px": px(81000.00), "qty": 5, "type": 1})
+    check(until(lambda: len(b.reps("rejected")) == 3) and not ex.posted, "a market order is not carried out: rejected, not sent")
+    b.send({"t": "new", "seg": 1, "id": 4, "side": "sell", "px": px(81000.00), "qty": 5, "type": 0})
+    check(until(lambda: len(b.reps("rejected")) == 4) and not ex.posted, "nor a plain limit order")
+    rc, _ = b.finish("eof")
+    ex.stop()
+    # a wider band lets the same order through
+    ex, tmp = fresh("io3")
+    b = loop_bridge(ex, tmp, ["--sync-s", "600", "--ioc-band-bps", "200"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80000.00)))
+    check(until(lambda: b.reps("fill")), "--ioc-band-bps 200 lets a price 123 bps away through")
+    b.finish("eof")
+    ex.stop()
+
+    # no quote to check against: refused
+    ex, tmp = fresh("io4")
+    ex.best_bid = ex.best_ask = 0.0
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(81000.00)))
+    check(until(lambda: b.reps("rejected")) and b.reps("rejected")[0]["reason"] == "other" and not ex.posted, "an unusable quote: rejected, not sent")
+    time.sleep(0.5)
+    check(prom_value(tmp, "hft_bridge_ioc_no_ticker_total") == 1, "and counted")
+    b.finish("eof")
+    ex.stop()
+
+    # the exchange refuses the order
+    ex, tmp = fresh("io5")
+    ex.fail_post_number = 1
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(81000.00)))
+    check(until(lambda: b.reps("rejected")) and not b.reps("accepted"), "a refused POST: rejected, never accepted")
+    b.finish("eof")
+    ex.stop()
+
+
+def test_close_details():
+    print("closing orders: the details")
+    # the band is measured from the mid of the exchange's own bid and ask, not from one side of it
+    ex, tmp = fresh("id1")
+    ex.best_bid, ex.best_ask = 80000.00, 82000.00            # mid 81000
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80400.00), side="sell"))   # 74 bps from the mid, 50 bps above the bid
+    check(until(lambda: b.reps("canceled") or b.reps("fill")), "answered")
+    b.send(ioc_req(2, px(81700.00), side="buy"))             # 86 bps above the mid, 213 bps above the bid
+    check(until(lambda: [r for r in b.reports if r["id"] == 2 and r["rt"] in ("canceled", "fill", "rejected")]), "answered")
+    check([r["rt"] for r in b.reports if r["id"] == 1][0] == "accepted" and [r["rt"] for r in b.reports if r["id"] == 2][0] == "accepted",
+          "both are inside 100 bps of the mid, so both are sent: %s" % [(r["id"], r["rt"]) for r in b.reports])
+    b.send(ioc_req(3, px(82000.00), side="buy"))             # 123 bps above the mid
+    check(until(lambda: [r for r in b.reports if r["id"] == 3]) and [r for r in b.reports if r["id"] == 3][0]["rt"] == "rejected", "123 bps above the mid is not")
+    b.finish("eof")
+    ex.stop()
+
+    # an order without a type is the post-only quote of older versions, never a taking order
+    ex, tmp = fresh("id2")
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), {"t": "new", "seg": 1, "id": 1, "side": "buy", "px": px(80000.00), "qty": 5})
+    check(until(lambda: b.reps("accepted")) and len(ex.open_orders()) == 1 and not ex.ioc_orders, "no type: a resting post-only order")
+    b.finish("eof")
+    ex.stop()
+
+    # a record that claims more than the order's size is capped
+    ex, tmp = fresh("id3")
+    ex.ioc_fill_fraction = 3.0
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80990.00), qty=5))
+    check(until(lambda: b.reps("fill")), "filled")
+    time.sleep(0.3)
+    kinds = [(r["rt"], r["qty"], r["leaves"]) for r in b.reports]
+    check(kinds == [("accepted", 5, 5), ("fill", 5, 0)], "capped at the order's size, nothing cancelled: %s" % kinds)
+    b.finish("eof")
+    ex.stop()
+
+    # a record that does not say the order has ended is not an answer
+    ex, tmp = fresh("id4")
+    ex.ioc_record_status = "pending"
+    b = loop_bridge(ex, tmp, ["--sync-s", "0.3"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80990.00), qty=5))
+    check(until(lambda: b.events("ioc_outcome_unknown"), 20), "the bridge reads it again, then gives up and says so")
+    check([r["rt"] for r in b.reports] == ["accepted"], "and reports no fill and no cancel: %s" % [r["rt"] for r in b.reports])
+    b.finish("eof")
+    ex.stop()
+
+    # part of the fill came from the socket, the record then says the same: no lot twice
+    ex, tmp = fresh("id5")
+    ex.start_ws()
+    ex.ioc_fill_fraction = 0.6
+    ex.hide_done = True
+    b = ws_bridge(ex, tmp, ["--sync-s", "0.3"])
+    until(lambda: ex.ws_subscriptions)
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80990.00), qty=5))
+    check(until(lambda: b.reps("fill")), "the socket's match is reported (3 of 5 lots)")
+    ex.hide_done = False
+    check(until(lambda: b.reps("canceled"), 20), "then the record is readable and the rest is cancelled")
+    time.sleep(1.0)
+    kinds = [(r["rt"], r["qty"], r["leaves"]) for r in b.reports]
+    check(kinds == [("accepted", 5, 5), ("fill", 3, 2), ("canceled", 2, 0)], "each lot once: %s" % kinds)
+    b.finish("eof")
+    ex.stop()
+
+
+def test_close_unsettled():
+    print("closing orders: when the record cannot be read, nothing is guessed")
+    # no websocket, record gone: the outcome is unknown and nothing is reported after 'accepted'
+    ex, tmp = fresh("iu1")
+    ex.hide_done = True
+    b = loop_bridge(ex, tmp, ["--sync-s", "0.3"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80990.00)))
+    check(until(lambda: b.reps("accepted")), "accepted")
+    check(until(lambda: b.events("ioc_outcome_unknown"), 20), "the bridge gives up after a few reads and says so")
+    check([r["rt"] for r in b.reports] == ["accepted"], "and sends no fill and no cancel: %s" % [r["rt"] for r in b.reports])
+    time.sleep(0.5)
+    check(prom_value(tmp, "hft_bridge_ioc_unsettled_total") == 1 and prom_value(tmp, "hft_bridge_ioc_unknown_total") == 1, "counted")
+    check(prom_value(tmp, "hft_bridge_working_orders") == 0, "and it is no longer held as working")
+    b.finish("eof")
+    ex.stop()
+
+    # the record is unreadable once (500), then readable: reported late, once
+    ex, tmp = fresh("iu2")
+    ex.fail_get_order = True
+    b = loop_bridge(ex, tmp, ["--sync-s", "0.3"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80990.00)))
+    check(until(lambda: b.reps("accepted")), "accepted")
+    time.sleep(0.4)
+    ex.fail_get_order = False
+    check(until(lambda: b.reps("fill"), 20), "once the record can be read the fill is reported")
+    time.sleep(1.0)
+    check([r["rt"] for r in b.reports] == ["accepted", "fill"] and b.reps("fill")[0]["qty"] == 5, "exactly once: %s" % [r["rt"] for r in b.reports])
+    b.finish("eof")
+    ex.stop()
+
+    # with the websocket the fill is known even though the record is hidden
+    ex, tmp = fresh("iu3")
+    ex.start_ws()
+    ex.hide_done = True
+    b = ws_bridge(ex, tmp, ["--sync-s", "0.3"])
+    until(lambda: b.events("ws_subscribed") or ex.ws_subscriptions)
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), ioc_req(1, px(80990.00)))
+    check(until(lambda: b.reps("fill"), 20), "the socket's match becomes the fill")
+    time.sleep(1.5)
+    fills = b.reps("fill")
+    check(len(fills) == 1 and fills[0]["qty"] == 5 and fills[0]["px"] == px(81000.00), "once, at the traded price: %s" % fills)
+    check(not b.reps("canceled"), "and the order is not also reported cancelled")
+    b.finish("eof")
+    ex.stop()
+
+
 if __name__ == "__main__":
     live = sys.argv[1] if len(sys.argv) > 1 else None
     test_signing()
@@ -916,6 +1122,9 @@ if __name__ == "__main__":
     test_loop_latency_and_segments()
     test_ws_fills()
     test_fill_around_cancel()
+    test_close_orders()
+    test_close_details()
+    test_close_unsettled()
     test_hft_live_mirror(live)
     print("test_bridge: " + ("all checks passed" if not fails else "%d FAILED" % fails))
     sys.exit(1 if fails else 0)

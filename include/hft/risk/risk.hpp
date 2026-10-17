@@ -49,6 +49,7 @@ enum class RiskResult : std::uint8_t {
   MaxPosition,
   MaxOpenOrders,
   RateLimit,
+  NotReducing,  // a closing order that would not shrink the position, or that comes while other orders are working
 };
 
 enum class KillReason : std::uint8_t { None = 0, Manual, MaxLoss, SessionGap, Disconnect };
@@ -100,6 +101,22 @@ class RiskEngine {
       return RiskResult::PriceBand;
     if (!position_ok(side, pos, qty)) return RiskResult::MaxPosition;
     if (pos.open_orders >= cfg_.max_open_orders) return RiskResult::MaxOpenOrders;
+    return take_token(now_ns) ? RiskResult::Ok : RiskResult::RateLimit;
+  }
+
+  // A reduce-only order for closing a position. What differs from check_new: the kill switch and the loss limit do not block it
+  // (closing is what you want after either), and the position limit is replaced by "this must shrink the position, by no more than
+  // the whole of it, and nothing else may be working" (so that it cannot add to exposure however the reports arrive). Size,
+  // notional, price band and the rate limit still apply. Only the live session's close routine calls this.
+  RiskResult check_close(Side side, Price price, Qty qty, const Position& pos, std::uint64_t now_ns) noexcept {
+    if (qty <= 0 || price.raw() <= 0) return RiskResult::BadParams;
+    if (qty > cfg_.max_order_qty) return RiskResult::MaxOrderQty;
+    if (cfg_.price_band_bps > 0 && ref_ == Price::invalid()) return RiskResult::NoReference;
+    if (core::notional_raw(price, qty) > cfg_.max_order_notional_raw) return RiskResult::MaxNotional;
+    if (cfg_.price_band_bps > 0 && !core::within_bps(price, ref_, cfg_.price_band_bps)) return RiskResult::PriceBand;
+    // qty > 0 here, so this also means the position has the opposite sign
+    const bool shrinks = side == Side::Sell ? qty <= pos.pos : qty <= -pos.pos;
+    if (!shrinks || pos.open_orders != 0) return RiskResult::NotReducing;
     return take_token(now_ns) ? RiskResult::Ok : RiskResult::RateLimit;
   }
 

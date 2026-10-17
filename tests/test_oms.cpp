@@ -484,6 +484,68 @@ void test_risk_limits() {
   }
 }
 
+void test_risk_close() {
+  RiskConfig c = no_rate_limit(base_cfg());
+  c.max_order_notional_raw = 1'000'000'000'000LL;
+  Position long5;
+  long5.pos = 5;
+  Position short5;
+  short5.pos = -5;
+  {  // reducing orders pass, and pass even with the kill switch latched and the loss limit blown
+    RiskEngine r = mk_risk(c);
+    CHECK(r.check_close(Side::Sell, PX(kRef), 5, long5, 0) == RiskResult::Ok);
+    CHECK(r.check_close(Side::Sell, PX(kRef), 2, long5, 0) == RiskResult::Ok);
+    CHECK(r.check_close(Side::Buy, PX(kRef), 5, short5, 0) == RiskResult::Ok);
+    r.kill(hft::risk::KillReason::Manual);
+    CHECK(r.check_new(Side::Sell, OrderType::Limit, PX(kRef), 5, long5, 0) == RiskResult::KillSwitch);
+    CHECK(r.check_close(Side::Sell, PX(kRef), 5, long5, 0) == RiskResult::Ok);
+    Position broke = long5;
+    broke.cash = -static_cast<hft::core::i128>(100'000) * 1000;  // far past max_loss_raw
+    CHECK(r.check_close(Side::Sell, PX(kRef), 5, broke, 0) == RiskResult::Ok);
+  }
+  {  // anything that does not shrink the position is refused
+    RiskEngine r = mk_risk(c);
+    const Position flat{};
+    CHECK(r.check_close(Side::Sell, PX(kRef), 1, flat, 0) == RiskResult::NotReducing);
+    CHECK(r.check_close(Side::Buy, PX(kRef), 1, flat, 0) == RiskResult::NotReducing);
+    CHECK(r.check_close(Side::Buy, PX(kRef), 1, long5, 0) == RiskResult::NotReducing);   // adds
+    CHECK(r.check_close(Side::Sell, PX(kRef), 1, short5, 0) == RiskResult::NotReducing);  // adds
+    CHECK(r.check_close(Side::Sell, PX(kRef), 6, long5, 0) == RiskResult::NotReducing);   // would flip
+    CHECK(r.check_close(Side::Buy, PX(kRef), 6, short5, 0) == RiskResult::NotReducing);
+    Position busy = long5;
+    busy.open_orders = 1;  // a working order could also sell, so the sum could flip
+    CHECK(r.check_close(Side::Sell, PX(kRef), 5, busy, 0) == RiskResult::NotReducing);
+  }
+  {  // the sanity limits still apply
+    RiskEngine r = mk_risk(c);
+    CHECK(r.check_close(Side::Sell, PX(kRef), 0, long5, 0) == RiskResult::BadParams);
+    CHECK(r.check_close(Side::Sell, PX(0), 5, long5, 0) == RiskResult::BadParams);
+    Position big;
+    big.pos = 101;
+    CHECK(r.check_close(Side::Sell, PX(kRef), 101, big, 0) == RiskResult::MaxOrderQty);
+    CHECK(r.check_close(Side::Sell, PX(105'000), 5, long5, 0) == RiskResult::Ok);
+    CHECK(r.check_close(Side::Sell, PX(105'001), 5, long5, 0) == RiskResult::PriceBand);
+    CHECK(r.check_close(Side::Sell, PX(94'999), 5, long5, 0) == RiskResult::PriceBand);
+    RiskEngine noref = mk_risk(c, false);
+    CHECK(noref.check_close(Side::Sell, PX(kRef), 5, long5, 0) == RiskResult::NoReference);
+    RiskConfig n = c;
+    n.max_order_notional_raw = 400'000;
+    RiskEngine rn = mk_risk(n);
+    CHECK(rn.check_close(Side::Sell, PX(kRef), 4, long5, 0) == RiskResult::Ok);
+    CHECK(rn.check_close(Side::Sell, PX(kRef), 5, long5, 0) == RiskResult::MaxNotional);
+  }
+  {  // the rate limit applies too, and a refused order costs no token
+    RiskConfig rc = base_cfg();  // burst 5
+    rc.max_order_notional_raw = 1'000'000'000'000LL;
+    RiskEngine r = mk_risk(rc);
+    for (int i = 0; i < 5; ++i) CHECK(r.check_close(Side::Sell, PX(kRef), 1, long5, 1000) == RiskResult::Ok);
+    CHECK(r.check_close(Side::Sell, PX(kRef), 1, long5, 1000) == RiskResult::RateLimit);
+    RiskEngine r2 = mk_risk(rc);
+    for (int i = 0; i < 20; ++i) CHECK(r2.check_close(Side::Buy, PX(kRef), 1, long5, 1000) == RiskResult::NotReducing);
+    for (int i = 0; i < 5; ++i) CHECK(r2.check_close(Side::Sell, PX(kRef), 1, long5, 1000) == RiskResult::Ok);
+  }
+}
+
 void test_risk_rate_limit() {
   RiskConfig c = base_cfg();  // 1000/s = one token per millisecond, burst 5
   const Position flat{};
@@ -717,6 +779,7 @@ int main(int argc, char** argv) {
   test_eviction();
   test_risk_limits();
   test_risk_rate_limit();
+  test_risk_close();
   test_risk_kill_and_loss();
   test_risk_replace();
   test_risk_differential(n);

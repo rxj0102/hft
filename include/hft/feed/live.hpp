@@ -68,6 +68,12 @@ struct LiveConfig {
   // on_exchange_report(). Flatten then waits for real cancel confirmations, at most flatten_timeout_ns of the caller's clock.
   bool external_venue = false;
   std::uint64_t flatten_timeout_ns = 5'000'000'000ULL;
+  // External venue only. When the session ends for good (shutdown or kill), after the cancels are confirmed, bring the net position
+  // to zero with reduce-only IOC orders priced close_collar_bps beyond the touch (each attempt waits at most flatten_timeout_ns).
+  // The feed must be fresh and the book two-sided; if not, or after close_max_attempts, the position stays and the summary says so.
+  bool close_position = false;
+  std::int64_t close_collar_bps = 30;
+  std::uint32_t close_max_attempts = 5;
   OrderTap order_tap = nullptr;               // mirror of the order flow for an order-entry bridge (nullptr: none)
   void* order_tap_ctx = nullptr;
 };
@@ -97,6 +103,11 @@ struct SegmentSummary {
   std::uint32_t open_before_flatten = 0;
   std::int64_t net_position_lots = 0;  // signed filled quantity at the end of the segment (flatten cancels orders, it does not close positions)
   std::uint64_t fills = 0;  // orders the flatten had to take down
+  std::uint32_t close_attempts = 0;    // closing orders sent (close_position)
+  std::int64_t closed_lots = 0;        // |position| before closing minus |position| after
+  bool close_failed = false;           // closing was wanted and the position is not zero
+  const char* close_why_not = "";      // when close_failed: why it stopped
+  std::uint8_t close_risk_code = 0;    // when the risk engine refused: its RiskResult
   bool flat = false;            // nothing left working at the venue or in the OMS
   bool kill_latched = false;    // the risk engine's kill switch was on when the segment ended
   bool book_matched_model = false;
@@ -117,6 +128,7 @@ struct LiveStats {
   std::uint64_t sent_new = 0, sent_replace = 0, sent_cancel = 0, risk_rejects = 0, pulled_cancels = 0, kill_cancels = 0;
   std::uint64_t reports = 0, acc = 0, rep = 0, canc = 0, rej_cross = 0;
   std::uint64_t fills = 0;
+  std::uint64_t close_orders = 0, close_failures = 0;
   // external venue
   std::uint64_t exchange_reports = 0, reports_stale = 0, snapshots_dropped_ending = 0, ignored_ending = 0;
   std::uint64_t conv_adds = 0, conv_reduces = 0, conv_deletes = 0, out_of_window = 0, crossed = 0;
@@ -328,6 +340,10 @@ class LiveSession {
     // external venue
     std::uint64_t number = 0, xseq = 0;
     bool ending = false;
+    bool final_stop = false;     // shutdown or kill has been asked for (possibly while a routine end was already waiting)
+    bool closing = false;        // a closing order has been sent: the IOC cancels itself, so the flatten must not cancel it
+    std::uint32_t close_tries = 0;
+    std::int64_t pos_before_close = 0;
     EndReason end_why = EndReason::Marker;
     std::uint64_t end_started = 0, end_deadline = 0;
     SegmentSummary pending;
@@ -457,7 +473,10 @@ class LiveSession {
   void end_segment(std::uint64_t now, EndReason why) {
     if (!seg_) return;
     Seg& s = *seg_;
-    if (s.ending) return;  // already on its way out; the first reason stands
+    if (s.ending) {  // already on its way out; the first reason stands, but a stop for good is remembered
+      if (why == EndReason::Kill || why == EndReason::Shutdown) s.final_stop = true;
+      return;
+    }
     SegmentSummary sm;
     sm.reason = why;
     sm.packets = s.pkts;
@@ -467,6 +486,7 @@ class LiveSession {
     auto& g = s.pipe->gateway();
     if (cfg_.external_venue) {
       s.ending = true;
+      s.final_stop = why == EndReason::Kill || why == EndReason::Shutdown;
       s.end_why = why;
       s.end_started = now;
       s.end_deadline = now + cfg_.flatten_timeout_ns;
@@ -504,18 +524,68 @@ class LiveSession {
     Seg& s = *seg_;
     auto& g = s.pipe->gateway();
     if (g.oms().open_orders() == 0) {
+      if (cfg_.close_position && s.final_stop && !s.pending.close_failed && step_close(now)) return;  // an order is out: wait for its reports
       finish_segment(s.pending, true, 0, now, s.end_started, s.end_why);
     } else if (now >= s.end_deadline) {
       finish_segment(s.pending, false, 0, now, s.end_started, s.end_why);
-    } else {
+    } else if (!s.closing) {
       g.cancel_all(now);  // an order whose ack just arrived can be cancelled now
     }
+  }
+
+  // The cancels are confirmed and the session is stopping for good. If the position is not zero, send the next reduce-only IOC.
+  // Returns true while an order is out. On any reason not to, records it in the summary and returns false (the segment then ends).
+  bool step_close(std::uint64_t now) {
+    Seg& s = *seg_;
+    auto& g = s.pipe->gateway();
+    const std::int64_t pos = g.oms().position().pos;
+    if (pos == 0) return false;
+    auto stop = [&](const char* why) {
+      s.pending.close_failed = true;
+      s.pending.close_why_not = why;
+      ++st_.close_failures;
+      return false;
+    };
+    if (s.close_tries >= cfg_.close_max_attempts) return stop("attempts used up");
+    if (!(now >= last_feed_ && now - last_feed_ < cfg_.stale_ns)) return stop("feed not fresh");
+    const auto& bk = s.pipe->book();
+    const core::Price bid = bk.best_bid(), ask = bk.best_ask();
+    if (bid == core::Price::invalid() || ask == core::Price::invalid()) return stop("no two-sided book");
+    const std::int64_t tick = cfg_.l2.tick_raw > 0 ? cfg_.l2.tick_raw : 1;
+    const bool sell = pos > 0;
+    std::int64_t px;
+    if (sell) {  // as low as the collar allows, on the grid, rounded away from the market
+      px = bid.raw() - bid.raw() * cfg_.close_collar_bps / 10'000;
+      px = px / tick * tick;
+    } else {
+      px = ask.raw() + ask.raw() * cfg_.close_collar_bps / 10'000;
+      px = (px + tick - 1) / tick * tick;
+    }
+    const std::int64_t want = sell ? pos : -pos;
+    // the whole position in one order; the strategy's own cap keeps it far below max_order_qty, and if it were not, the risk engine refuses
+    const auto r = g.close_order(sell ? core::Side::Sell : core::Side::Buy, core::Price::from_raw(px), want, now);
+    if (!r.ok()) {
+      s.pending.close_risk_code = static_cast<std::uint8_t>(r.risk);
+      return stop("refused by risk or OMS");
+    }
+    if (s.close_tries == 0) s.pos_before_close = pos;
+    s.closing = true;
+    ++s.close_tries;
+    ++s.pending.close_attempts;
+    ++st_.close_orders;
+    s.end_deadline = now + cfg_.flatten_timeout_ns;  // each attempt gets the full time
+    return true;
   }
 
   void finish_segment(SegmentSummary sm, bool flat, std::uint64_t rounds, std::uint64_t t, std::uint64_t now, EndReason why) {
     Seg& s = *seg_;
     auto& g = s.pipe->gateway();
     sm.net_position_lots = g.oms().position().pos;
+    if (s.close_tries > 0) {
+      const std::int64_t before = s.pos_before_close < 0 ? -s.pos_before_close : s.pos_before_close;
+      const std::int64_t after = sm.net_position_lots < 0 ? -sm.net_position_lots : sm.net_position_lots;
+      sm.closed_lots = before - after;
+    }
     sm.fills = g.oms().position().fills;
     st_.fills += sm.fills;
     sm.flat = flat;

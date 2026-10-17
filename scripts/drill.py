@@ -566,13 +566,58 @@ async def drill_loop_exchange_dead_at_stop(feed, port):
     r.cleanup()
 
 
+async def close_drill(feed, port, tune, want_rc, closed):
+    """The strategy gets a fill, then SIGTERM arrives while it holds a position and --close-position is on."""
+    ex = new_exchange()
+    ex.start_ws()
+    r = loop_run(feed, port, ex, extra=["--close-position"], bridge_extra="--ws-fills --ws-url " + ex.ws_url)
+    await until(lambda: len(ex.open_orders()) >= 1, 20)
+    victim = ex.open_orders()[0]
+    ex.best_bid, ex.best_ask = 100.00, 100.10   # from now on the exchange quotes where the invented feed does
+    tune(ex)
+    ex.fill(victim["id"])
+    want = 5 if victim["side"] == "buy" else -5
+    check(await until(lambda: live_metric(r, "hft_live_position_lots") == want, 10), "the fill reached hft_live: position %+d lots" % want)
+    rc = await r.stop()
+    ends = r.live_events("segment_end")
+    e = ends[-1]
+    check(rc == want_rc, "supervisor exit %d (got %s)" % (want_rc, rc))
+    check(len(ex.open_orders()) == 0, "nothing left resting on the exchange")
+    if closed:
+        check(len(ex.ioc_orders) == 1 and ex.ioc_orders[0][0] == ("sell" if want > 0 else "buy"), "one closing order, against the position: %s" % ex.ioc_orders)
+        check(e["position_lots"] == 0 and e["closed_lots"] == abs(want) and not e["close_failed"], "the segment ends flat in position: %s" % {k: e[k] for k in ("position_lots", "closed_lots", "close_attempts", "close_failed")})
+        check(not r.sup("stop_not_flat") and not r.live_events("position_not_closed"), "no alarm")
+    else:
+        check(e["position_lots"] == want and e["closed_lots"] == 0 and e["close_failed"] == 1, "the position stays and the segment says the close failed: %s" % {k: e[k] for k in ("position_lots", "closed_lots", "close_attempts", "close_failed", "close_why_not")})
+        check(bool(r.sup("stop_not_flat")) and bool(r.live_events("position_not_closed")), "and it is loud: stop_not_flat and position_not_closed")
+    ex.stop()
+    r.cleanup()
+
+
+async def drill_loop_close(feed, port):
+    await close_drill(feed, port, lambda ex: None, 0, True)
+
+
+async def drill_loop_close_no_liquidity(feed, port):
+    await close_drill(feed, port, lambda ex: setattr(ex, "ioc_fill_fraction", 0.0), 4, False)
+
+
+async def drill_loop_close_off_the_market(feed, port):
+    # the exchange's own quote is 20% away from the local book (a stale or wrong feed): the bridge refuses to send the order
+    def far(ex):
+        ex.best_bid, ex.best_ask = 80.00, 80.10
+    await close_drill(feed, port, far, 4, False)
+    # (best prices are set again inside close_drill before tune() runs, so `far` wins)
+
+
 DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill_kill_capture),
           ("kill_live", drill_kill_live), ("hang", drill_hang), ("sigterm", drill_sigterm), ("term_ignored", drill_term_ignored),
           ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity),
           ("bridge_flow", drill_bridge_flow), ("kill_bridge", drill_kill_bridge), ("kill_live_bridge", drill_kill_live_bridge),
           ("exchange_down", drill_exchange_down), ("bad_credentials", drill_bad_credentials), ("bridge_hang", drill_bridge_hang),
           ("loop_flow", drill_loop_flow), ("loop_fill", drill_loop_fill), ("loop_fill_ws", drill_loop_fill_ws), ("loop_ws_refused", drill_loop_ws_refused), ("loop_slow", drill_loop_exchange_slow),
-          ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop)]
+          ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop),
+          ("loop_close", drill_loop_close), ("loop_close_no_liquidity", drill_loop_close_no_liquidity), ("loop_close_off_market", drill_loop_close_off_the_market)]
 
 
 async def main(only):
