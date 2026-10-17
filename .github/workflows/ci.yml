@@ -87,7 +87,8 @@ jobs:
         run: |
           for t in fuzz_md fuzz_match fuzz_oms fuzz_codec fuzz_venue fuzz_pipeline; do
             mkdir -p corpus/$t
-            build/fuzz/fuzz/$t -max_total_time=45 -timeout=10 corpus/$t
+            seeds=""; [ -d fuzz/seeds/${t#fuzz_} ] && seeds="fuzz/seeds/${t#fuzz_}"
+            build/fuzz/fuzz/$t -max_total_time=45 -timeout=10 corpus/$t $seeds
           done
           mkdir -p corpus/fuzz_l2
           build/fuzz/fuzz/fuzz_l2 -max_total_time=45 -timeout=10 corpus/fuzz_l2 fuzz/seeds/l2
@@ -95,6 +96,13 @@ jobs:
           build/fuzz/fuzz/fuzz_live -max_total_time=45 -timeout=10 corpus/fuzz_live fuzz/seeds/live
           mkdir -p corpus/fuzz_external
           build/fuzz/fuzz/fuzz_external -max_total_time=45 -timeout=10 corpus/fuzz_external fuzz/seeds/external
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: crash-*
+          if-no-files-found: ignore
 
   # The performance gate. Wall-clock time on a shared runner is noise, so the
   # gate counts instructions under valgrind (deterministic) against the checked

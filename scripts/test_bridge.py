@@ -641,7 +641,10 @@ def test_ws_fills():
     check(len(b.reps("fill")) == 2, "unknown orders, a size that is not a number, a negative size and a zero price report nothing")
     check(until(lambda: (prom_value(tmp, "hft_bridge_ws_matches_unknown_order_total") or 0) >= 1 and (prom_value(tmp, "hft_bridge_ws_matches_bad_total") or 0) >= 3, 3.0),
           "and are counted (%s unknown, %s bad)" % (prom_value(tmp, "hft_bridge_ws_matches_unknown_order_total"), prom_value(tmp, "hft_bridge_ws_matches_bad_total")))
-    check(prom_value(tmp, "hft_bridge_ws_fills_total") == 2 and prom_value(tmp, "hft_bridge_ws_subscribed") == 1, "metrics: two websocket fills, subscribed")
+    # the metrics file is rewritten every 0.2 s, so wait for it instead of reading whatever snapshot is there
+    until(lambda: prom_value(tmp, "hft_bridge_ws_fills_total") == 2 and prom_value(tmp, "hft_bridge_ws_subscribed") == 1, 5.0)
+    check(prom_value(tmp, "hft_bridge_ws_fills_total") == 2 and prom_value(tmp, "hft_bridge_ws_subscribed") == 1,
+          "metrics: two websocket fills, subscribed (fills %s, subscribed %s)" % (prom_value(tmp, "hft_bridge_ws_fills_total"), prom_value(tmp, "hft_bridge_ws_subscribed")))
     check(not ex.requests("DELETE", "/orders/"), "no cancel was sent for the order that had filled")
     ex.ws_send({"type": "match", "maker_order_id": by2, "taker_order_id": "x", "size": "0.00020", "price": "80990.00"})   # more than the order's size
     check(until(lambda: len(b.reps("fill")) == 3), "a match larger than the order")

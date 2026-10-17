@@ -40,7 +40,7 @@ struct Out {
   struct Acc {
     core::OrderId id = 0;
     core::Qty offered = 0, filled = 0;
-  } acc[16];
+  } acc[32];  // the venue's orders have ids 1001..1020: every one must fit, or a fill for an untracked id looks like a bug
   void report(const sim::Report& r) {
     Acc* a = nullptr;
     for (Acc& x : acc)
@@ -49,7 +49,7 @@ struct Out {
       if (!a)
         for (Acc& x : acc)
           if (x.id == 0 && !a) a = &x;
-      if (!a) return;  // table of ids is tiny; extra ids just are not tracked
+      if (!a) fail();  // cannot happen with 20 possible ids and 32 slots; do not hide it if it does
       a->id = r.id;
       a->offered += r.qty;
     } else if (r.type == sim::ReportType::Fill) {
