@@ -611,7 +611,12 @@ def test_ws_fills():
     ex, tmp = fresh("ws1")
     ex.start_ws()
     b = ws_bridge(ex, tmp, ["--sync-s", "600"])
+    n_gets = len(ex.requests("GET", "/orders"))
     check(until(lambda: b.events("ws_subscribed")), "the bridge authenticates and subscribes (the fake checks the signature itself)")
+    # (re)subscribing makes the bridge run one REST sync. A fill that lands while that sync is in flight is found by the sync instead of
+    # the socket (each lot is reported once either way), which would make the socket counters below depend on timing: let it finish first.
+    until(lambda: len(ex.requests("GET", "/orders")) > n_gets, 5.0)
+    time.sleep(0.3)
     b.send(hello(), new(1, px(81000.00), qty=10))
     check(until(lambda: b.reps("accepted")), "order accepted")
     by = {o["price"]: o["id"] for o in ex.open_orders()}
