@@ -51,6 +51,14 @@ def report(rows, raw=(), fee=0.0, horizons=(1, 5, 30)):
     return r
 
 
+print("two samples in the same millisecond: the later line wins, whatever the values")
+r = report([fill(1000, "buy", 1_000_000, 100_000, 2_010_000, 100_000), mid(1000, 2_000_000)])
+check(near(r["last_mid"], 100.0) and near(r["unrealised_quote"], 0.0), "a mid logged after a fill in the same ms is the last mid")
+r = report([mid(1000, 2_020_000), mid(1000, 2_000_000), fill(500, "buy", 1_000_000, 100_000, 2_000_000, 100_000)])
+check(near(r["last_mid"], 100.0), "of two mid lines with one timestamp the later line is the last mid")
+r = report([mid(1000, 2_000_000), fill(1000, "buy", 1_000_000, 100_000, 2_030_000, 100_000)])
+check(near(r["last_mid"], 101.5), "a fill's own mid, logged after a mid line in the same ms, is the last mid")
+
 print("a round trip, by hand")
 rows = [mid(0, 2_000_000),
         fill(1000, "buy", 999_000, 100_000, 2_000_000, 100_000),       # buy 1.0 at 99.90, mid 100.00

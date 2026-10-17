@@ -52,6 +52,9 @@ jobs:
       - name: PnL report tests
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: python3 scripts/test_pnl.py
+      - name: Strategy lab tests
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        run: python3 scripts/test_lab.py
       - name: Capture script tests
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: scripts/ci_retry.sh test_capture python3 scripts/test_capture.py

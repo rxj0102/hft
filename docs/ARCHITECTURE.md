@@ -61,7 +61,7 @@ Sizes that matter for latency, all fixed at init: book price grid (`BookConfig::
 | `risk/` | pre-trade checks, kill switch |
 | `gw/` | order-entry wire protocol, `Gateway`, exchange-side edge |
 | `strat/` | `MarketMaker` |
-| `bt/` | backtester, virtual venue with queue-position fills, synthetic market, metrics |
+| `bt/` | backtester, virtual venue with queue-position fills, synthetic market, metrics, strategy lab (`lab.hpp`, tool `hft_lab`: variants over many markets, paired statistics, event logs for `pnl_report.py`) |
 | `t2t/` | `Pipeline`, `Session` (record/replay), stage probes |
 | `feed/` | real-data tooling (not hot path): JSON/decimal parsing, level-2 to ITCH conversion, capture loader, paper venue, replay runner |
 

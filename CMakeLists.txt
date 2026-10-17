@@ -35,6 +35,8 @@ add_executable(hft_replay src/tools/hft_replay.cpp)
 target_link_libraries(hft_replay PRIVATE hft_core)
 add_executable(hft_live src/tools/hft_live.cpp)
 target_link_libraries(hft_live PRIVATE hft_core)
+add_executable(hft_lab src/tools/hft_lab.cpp)
+target_link_libraries(hft_lab PRIVATE hft_core)
 
 # Fuzz targets need clang's libFuzzer runtime: use the "fuzz" preset.
 option(HFT_BUILD_FUZZ "Build libFuzzer targets (requires clang)" OFF)

@@ -69,3 +69,7 @@ add_test(NAME test_t2t COMMAND test_t2t 100000)
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
   add_test(NAME test_t2t_gate COMMAND test_t2t 400000)
 endif()
+
+add_executable(test_lab test_lab.cpp)
+target_link_libraries(test_lab PRIVATE hft_core)
+add_test(NAME test_lab COMMAND test_lab)

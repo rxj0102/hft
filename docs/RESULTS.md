@@ -30,15 +30,19 @@ Read this with care:
 
 Command: `python3 scripts/perf_gate.py --bench build/perf/bench/bench_t2t --strict` (callgrind, deterministic). Result at Phase 19, the last run: 797.80 instructions per input, 2.95 mispredicts per input, identical to the stored baseline. No hot-path code has changed since, and the gate runs in CI on every push.
 
+## Strategy variants on simulated fills
+
+Command: `./build/release/hft_lab --markets 16 --requests 200000 --variant noalpha:alpha16=0 --variant wide:half_spread16=32 --sweep skew16=0,4`, run twice, on seeds 1000 to 1015 and 5000 to 5015, 2026-10-17. Tables and reading are in [STRATEGY_LAB.md](STRATEGY_LAB.md). In short: removing the imbalance lean or quoting wider lost about 17 per market on every one of 32 markets; removing the inventory skew gained 7.5 and 8.7 per market but held positions up to the cap of 40 (the base peaked near 12), and most of its gain was inventory. These are simulated fills in generated markets, in the generator's currency units over about 2 s of market time per market; they are not returns, and the report from the same fills through `pnl_report.py` agrees with the backtester's own accounting to rounding (tested on 20 runs).
+
 ## What the checks add up to
 
 | Check | Result | Command |
 |---|---|---|
-| C++ unit, property and gate tests | 18 of 18 pass (release) | `ctest --test-dir build/release` |
+| C++ unit, property and gate tests | 19 of 19 pass (release) | `ctest --test-dir build/release` |
 | Sanitizers | ASan, UBSan and TSan builds pass the suites (CI cells) | presets `asan`, `ubsan`, `tsan` |
 | Compilers | gcc 13 and clang 18, release, ASan and UBSan cells | CI matrix |
 | Fuzzing | 9 libFuzzer targets, 45 s each in CI; longer local runs were clean after the fixes listed in the changelog | `fuzz-smoke` job |
-| Python suites | capture script, live tool, order bridge, sandbox smoke test, PnL report, all against local fakes | `scripts/ci_local.sh` |
+| Python suites | capture script, live tool, order bridge, sandbox smoke test, PnL report, strategy lab, all against local fakes | `scripts/ci_local.sh` |
 | Fault drills | 28 drills against a fake feed and a fake exchange: connection drop, silence, kill -9 of each process, hang, crash loop, exchange down, bad credentials, close with and without liquidity, restart with a carried position, account mismatch | `python3 scripts/drill.py` |
 | GitHub Actions | 9 jobs, green on the latest push to master and main at the time of writing | `gh run list` |
 
@@ -53,6 +57,7 @@ At every phase from the start, bugs were injected into the new code on purpose a
 | 19 | position carried across segments | 31 | 7 |
 | 20 | account check against the position file | 23 | 3 |
 | 21 | PnL report and fill events | 30 | 7 |
+| 23 | strategy lab, backtester hooks, report tie order | 133 | 24 of 95 in the first round, 3 of 33 in the second (equivalent) |
 
 A few survivors in each phase were equivalent mutants (the changed code behaves the same) and are said to be so in the changelog.
 
@@ -62,10 +67,10 @@ Offline replay of Coinbase BTC-USD level-2 captures through the same pipeline, w
 
 ## Size
 
-About 20,800 lines of C++ (include, src, tests, bench, fuzz) and about 6,000 lines of Python (scripts), counted with `wc -l` on 2026-10-17. 32 architecture decision records, listed in [DECISIONS.md](DECISIONS.md).
+About 21,800 lines of C++ (include, src, tests, bench, fuzz) and about 6,100 lines of Python (scripts), counted with `wc -l` on 2026-10-17. 33 architecture decision records, listed in [DECISIONS.md](DECISIONS.md).
 
 ## What has not been measured
 
 - Anything against the real Coinbase sandbox. The order bridge, the closed loop, the closing orders, the account check and the PnL report have only ever run against a local fake exchange written from the public documentation. The first real run is an experiment and will probably find differences.
-- Whether the strategy makes money. There is no PnL figure on this page because there is no run against real fills. The report exists so that a run can be judged, and it is tested against hand-computed answers.
+- Whether the strategy makes money. The only PnL figures are from simulated fills in generated markets; there is no run against real fills. The report exists so that a run can be judged, and it is tested against hand-computed answers.
 - Bare-metal latency, NIC and kernel-bypass paths, multi-instrument operation, or any run longer than minutes.

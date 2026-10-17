@@ -25,7 +25,7 @@ These exclude the NIC, kernel, TLS, JSON parsing and the exchange, and p99.9 and
 
 **The hot path** (`include/hft`, header-only): feed handler with A/B line arbitration, gap detection and snapshot recovery; order book with flat price levels and intrusive order lists; market maker with an imbalance signal and inventory skew; pre-trade risk with a latched kill switch; an eight-state OMS; a length-prefixed order-entry protocol. No heap, exceptions, RTTI, virtual calls, locks or syscalls on the path; this is checked by compiler flags, an allocation trap and a page-fault check in the benchmark.
 
-**Around it, offline:** a matching engine and exchange simulator, a queue-aware backtester, and a byte-exact replay oracle: a backtest is recorded and replayed through the production pipeline, and the wire bytes must be identical before the benchmark prints any latency.
+**Around it, offline:** a matching engine and exchange simulator, a queue-aware backtester, and a byte-exact replay oracle: a backtest is recorded and replayed through the production pipeline, and the wire bytes must be identical before the benchmark prints any latency. `hft_lab` runs strategy parameter variants over many generated markets and compares them with paired statistics (see [docs/STRATEGY_LAB.md](docs/STRATEGY_LAB.md)); its simulated fills go through the same PnL report that will judge real ones.
 
 **Live, paper:** `hft_live` runs the same pipeline on the live public Coinbase level-2 feed against a paper venue, with guards for a dropped connection, a price off the grid and a silent feed, and it checks its own book against an independent model while running.
 
@@ -35,11 +35,11 @@ These exclude the NIC, kernel, TLS, JSON parsing and the exchange, and p99.9 and
 
 ## How it was checked
 
-- Sanitizers (ASan, UBSan, TSan), gcc and clang, 18 CTest suites, Python test suites for the scripts (capture, live tool, bridge, smoke test, PnL report) plus the drills.
+- Sanitizers (ASan, UBSan, TSan), gcc and clang, 18 CTest suites, Python test suites for the scripts (capture, live tool, bridge, smoke test, PnL report, strategy lab) plus the drills.
 - Nine libFuzzer targets, including one where the fuzz input plays the exchange.
 - Mutation checks at every phase: bugs injected on purpose, and a test had to fail. The first runs always had survivors, and each was either killed with a new test or removed as unobservable. Counts are in [docs/RESULTS.md](docs/RESULTS.md) and the changelog.
 - GitHub Actions with nine jobs (build and test cells, TSan, fuzz smoke, performance gate). It has found real faults that local runs missed, such as a missing Python package in five cells and a race in a test. See [docs/CI.md](docs/CI.md).
-- 32 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
+- 33 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Build and run
 
@@ -78,13 +78,14 @@ The smoke test places a few minimum-size orders worth under 5 USD and writes a r
 | [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | per-stage budget, method, noise |
 | [docs/LIVE_FEED.md](docs/LIVE_FEED.md), [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md) | real data replay and the paper session |
 | [docs/SANDBOX.md](docs/SANDBOX.md), [docs/CLOSED_LOOP.md](docs/CLOSED_LOOP.md) | sandbox order entry, closed loop, closing, account check |
+| [docs/STRATEGY_LAB.md](docs/STRATEGY_LAB.md) | comparing strategy variants offline, and what that can and cannot say |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md), [docs/RUNBOOK.md](docs/RUNBOOK.md), [docs/FAILURE_MODES.md](docs/FAILURE_MODES.md) | running it, what fails and what the engine does |
 | [docs/CI.md](docs/CI.md), [CHANGELOG.md](CHANGELOG.md) | the workflow, per-phase changes |
 
 ## Limits
 
 - Not run against the real sandbox, so nothing about real fills, latencies, rate limits or the real response formats is known. The first real run will find differences.
-- No claim about profitability. The market maker is a mechanism to exercise the engine; the PnL report exists so that a run can be judged.
+- No claim about profitability. The market maker is a mechanism to exercise the engine; the PnL report exists so that a run can be judged, and the strategy lab compares variants only on simulated fills in generated markets.
 - Timings are from a shared VM with hypervisor stalls. No bare-metal run, no NIC or kernel-bypass path, one product, one venue.
 - Recorded exchange data is not committed. Real-data replay is offline and level 2 only.
 - Not built: a FIX parser, AVX2 paths, MSan, multi-instrument operation. Nothing places orders on a production exchange, and the bridge refuses any URL but the sandbox.

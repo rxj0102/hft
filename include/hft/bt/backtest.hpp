@@ -143,6 +143,11 @@ struct Link {
 //   md(now, i)          tape event i reached the strategy
 //   report(now, d, n)   report bytes reached the gateway
 //   sent(now, d, n)     the gateway put a frame on the wire
+// An observer may also define, and the backtester then calls (checked at compile
+// time, so the observers above are unchanged):
+//   fill(ts, side, price, qty, mid2, pos)   a fill at the venue; mid2 is the venue mid
+//                                           (doubled) when it happened, pos the position after it
+//   mid(ts, valid, mid2)                    the venue book after a tape event
 struct NullObserver {
   void md(std::uint64_t, std::size_t) noexcept {}
   void report(std::uint64_t, const std::uint8_t*, std::size_t) noexcept {}
@@ -198,10 +203,14 @@ class Backtester {
     return gw_.init(arena, cfg.oms, cfg.risk);
   }
 
-  void run() noexcept {
+  // Replays the tape. `max_steps` bounds the number of events handled (tape events at both ends plus messages in
+  // both directions); a strategy that answers every report with another request never lets the queues drain, and
+  // this turns that from a hang into a `false` return. The default is no bound. On `false` the state is partial.
+  bool run(std::uint64_t max_steps = ~std::uint64_t{0}) noexcept {
     constexpr std::uint64_t kInf = ~std::uint64_t{0};
     VenueOut out{this};
     std::size_t iv = 0, is = 0;
+    std::uint64_t steps = 0;
     for (;;) {
       const std::uint64_t t1 = iv < n_ ? tape_[iv].ts : kInf;
       const std::uint64_t t2 = to_venue_.empty() ? kInf : to_venue_.front_eff();
@@ -213,6 +222,7 @@ class Backtester {
       if (t3 < t) t = t3, which = 3;
       if (t4 < t) t = t4, which = 4;
       if (t == kInf) break;
+      if (++steps > max_steps) return false;
       now_ = t;
       switch (which) {
         case 1: {
@@ -221,6 +231,8 @@ class Backtester {
           venue_.on_tape(e, out);
           vbook_.apply(e);
           metrics_.on_mid(vbook_.two_sided(), vbook_.two_sided() ? vbook_.mid2() : 0);
+          if constexpr (requires { obs_.mid(t, true, std::int64_t{0}); })
+            obs_.mid(t, vbook_.two_sided(), vbook_.two_sided() ? vbook_.mid2() : 0);
           last_tape_ts_ = t;
           break;
         }
@@ -248,6 +260,7 @@ class Backtester {
     }
     metrics_.before_event(last_tape_ts_);
     metrics_.finish(last_tape_ts_);
+    return true;
   }
 
   BtReport report() const noexcept {
@@ -314,8 +327,12 @@ class Backtester {
   };
 
   void venue_report(const sim::Report& r) noexcept {
-    if (r.type == sim::ReportType::Fill)
-      metrics_.on_fill(r.ts, r.side == core::Side::Buy ? std::int8_t{1} : std::int8_t{-1}, r.price.raw(), r.qty);
+    if (r.type == sim::ReportType::Fill) {
+      const std::int8_t sd = r.side == core::Side::Buy ? std::int8_t{1} : std::int8_t{-1};
+      metrics_.on_fill(r.ts, sd, r.price.raw(), r.qty);
+      if constexpr (requires { obs_.fill(r.ts, sd, r.price.raw(), r.qty, metrics_.mid2(), metrics_.pos()); })
+        obs_.fill(r.ts, sd, r.price.raw(), r.qty, metrics_.mid2(), metrics_.pos());
+    }
     std::uint8_t buf[gw::kMaxFrame];
     const std::size_t n = gw::encode_report(buf, ++wire_seq_, r);
     to_client_.push(buf, n);

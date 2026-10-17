@@ -112,7 +112,8 @@
   <text x="355" y="468" font-size="11" text-anchor="middle" fill="#475569">queue-aware backtester,</text>
   <text x="355" y="484" font-size="11" text-anchor="middle" fill="#475569">byte-exact replay oracle,</text>
   <text x="355" y="500" font-size="11" text-anchor="middle" fill="#475569">9 fuzz targets, mutation</text>
-  <text x="355" y="516" font-size="11" text-anchor="middle" fill="#475569">checks, fault drills</text>
+  <text x="355" y="516" font-size="11" text-anchor="middle" fill="#475569">checks, fault drills,</text>
+  <text x="355" y="532" font-size="11" text-anchor="middle" fill="#475569">strategy lab (hft_lab)</text>
 
   <text x="470" y="582" font-size="11" fill="#475569">Blue: the C++ process. Orange: the Python bridge. Dashed: tooling that never touches an exchange.</text>
 </svg>

@@ -47,15 +47,14 @@ def load(paths):
                             raise ValueError
                         fills.append({"ts": ts, "sign": 1 if side == "buy" else -1, "px": int(e["px"]), "qty": int(e["qty"]),
                                       "mid_x2": int(e.get("mid_x2", -1)), "pos": int(e["pos"])})
+                        if fills[-1]["mid_x2"] > 0:    # in file order, so that of two samples in one millisecond the later line wins
+                            mids.append((ts, fills[-1]["mid_x2"]))
                     elif ev == "mid" and int(e["mid_x2"]) > 0:
                         mids.append((ts, int(e["mid_x2"])))
                 except (KeyError, ValueError, TypeError):
                     bad += 1
     fills.sort(key=lambda x: x["ts"])
-    for f in fills:
-        if f["mid_x2"] > 0:
-            mids.append((f["ts"], f["mid_x2"]))
-    mids.sort()
+    mids.sort(key=lambda m: m[0])     # stable: samples with the same timestamp keep the order they were logged in
     return fills, mids, last_ts, bad
 
 
