@@ -120,6 +120,112 @@ check(rc == 2 and "cannot write" in err, "an events directory that does not exis
 rc, out, err = lab(*SMALL, "--json", "/nonexistent_dir_for_lab/x.json")
 check(rc == 2 and "cannot write" in err, "an unwritable json path: exit 2")
 
+print("held-out grid search: option checking")
+G = ["--requests", "5000", "--markets", "3"]
+for args, why in [
+    (["--grid", "skew16=1,2", "--variant", "a:qty=1"], "grid with --variant"),
+    (["--grid", "skew16=1,2", "--sweep", "qty=1,2"], "grid with --sweep"),
+    (["--grid", "skew16"], "grid axis without values"),
+    (["--grid", "skew16=1;skew16=2"], "repeated grid axis"),
+    (["--grid", "nope=1,2"], "unknown grid parameter"),
+    (["--grid", "skew16=1,2", "--top", "0"], "top 0"),
+    (["--grid", "skew16=1,2", "--top", "21"], "top 21"),
+    (["--grid", "skew16=1,2", "--risk-penalty", "abc"], "non-numeric risk penalty"),
+    (["--grid", "skew16=1,2", "--risk-penalty", "-1"], "negative risk penalty"),
+    (["--grid", "skew16=1,2", "--test-markets", "0"], "zero test markets"),
+    (["--grid", "skew16=1,2", "--seed", "1000", "--markets", "4", "--test-seed", "1003"], "overlapping seeds (test starts inside training)"),
+    (["--grid", "skew16=1,2", "--seed", "1000", "--markets", "4", "--test-seed", "998", "--test-markets", "3"], "overlapping seeds (test ends inside training)"),
+    (["--top", "2"], "--top without --grid"),
+    (["--risk-penalty", "1"], "--risk-penalty without --grid"),
+    (["--test-markets", "2"], "--test-markets without --grid"),
+    (["--test-seed", "5"], "--test-seed without --grid"),
+]:
+    rc, out, err = lab(*args)
+    check(rc == 1 and "usage" in err and out == "", "exit 1 and usage for " + why)
+rc, out, err = lab(*G, "--grid", "skew16=1,2", "--seed", "1000", "--test-seed", "1003", "--test-markets", "1", "--top", "1")
+check(rc == 0, "touching but disjoint seed ranges are fine (1000..1002 and 1003)")
+rc, out, err = lab(*G, "--grid", "skew16=1,2", "--seed", "1005", "--test-seed", "1002", "--test-markets", "3", "--top", "1")
+check(rc == 0, "test range ending just before the training range is fine (1002..1004 and 1005..)")
+
+
+def score(row, pen):
+    return sum(row["pnl"]) / len(row["pnl"]) - pen * sum(row["max_pos"]) / len(row["max_pos"])
+
+
+print("held-out grid search: a run")
+with tempfile.TemporaryDirectory() as d:
+    ev = os.path.join(d, "ev")
+    os.mkdir(ev)
+    js = os.path.join(d, "g.json")
+    args = G + ["--grid", "skew16=0,1,2,4", "--test-markets", "2", "--top", "2", "--json", js, "--events", ev]
+    rc, o1, e1 = lab(*args)
+    check(rc == 0, "exit 0 (stderr: %s)" % e1.strip()[:80])
+    rc, o2, _ = lab(*G, "--grid", "skew16=0,1,2,4", "--test-markets", "2", "--top", "2")
+    check(o1 == o2, "same arguments, same report")
+    check("search: 4 grid points plus the base, trained on 3 markets; objective = mean PnL - 0 x mean largest position" in o1, "search header")
+    check("held-out markets (seeds 101000..101001)" in o1, "default held-out seeds start 100000 above the training seeds")
+    check("training results, best 2 of 4" in o1, "says how many were kept")
+    r = json.load(open(js))
+    check(len(r["variants"]) == 5 and r["variants"][0]["name"] == "base" and len(r["selected"]) == 2 and len(r["test_variants"]) == 3, "json: 5 trained variants, 2 selected, 3 held-out rows")
+    check(r["test_variants"][0]["name"] == "base" and [v["name"] for v in r["test_variants"][1:]] == r["selected"], "json: held-out rows are the base then the selected, in order")
+    check(all(len(v["pnl"]) == 3 for v in r["variants"]) and all(len(v["pnl"]) == 2 for v in r["test_variants"]), "json: 3 training and 2 held-out markets per row")
+    check(r["test_seed"] == 101000 and r["test_markets"] == 2 and r["risk_penalty"] == 0, "json: held-out settings")
+    ranked = sorted(r["variants"][1:], key=lambda v: -score(v, 0))
+    check([v["name"] for v in ranked[:2]] == r["selected"], "the selected are the two best by training mean PnL, recomputed from the json")
+    check(r["selected"][0] in o1 and "chosen variant" in o1, "report lists the chosen")
+    def check_gains(o, r, pen, label):
+        base_tr, base_te = score(r["variants"][0], pen), score(r["test_variants"][0], pen)
+        tr_by_name = {v["name"]: v for v in r["variants"]}
+        ok, gs_tr, gs_te = True, [], []
+        for tv in r["test_variants"][1:]:
+            g_tr, g_te = score(tr_by_name[tv["name"]], pen) - base_tr, score(tv, pen) - base_te
+            gs_tr.append(g_tr)
+            gs_te.append(g_te)
+            m = re.search(r"^%s\s+([+-]\d+\.\d+)\s+([+-]\d+\.\d+)\s+(\S+)$" % re.escape(tv["name"]), o.split("\nchosen variant ")[1], re.M)
+            if not m or abs(float(m.group(1)) - g_tr) > 0.006 or abs(float(m.group(2)) - g_te) > 0.006:
+                ok = False
+            elif g_tr > 0 and m.group(3) != "%.0f%%" % (100 * g_te / g_tr):
+                ok = False
+            elif g_tr <= 0 and m.group(3) != "n/a":
+                ok = False
+        check(ok, label + ": train gain, held-out gain and retained are what the json says")
+        m = re.search(r"average of the chosen: train gain ([+-]\d+\.\d+), held-out gain ([+-]\d+\.\d+), shrinkage \(winner's curse\) ([+-]\d+\.\d+)", o)
+        n = len(gs_tr)
+        check(m is not None and abs(float(m.group(1)) - sum(gs_tr) / n) < 0.006 and abs(float(m.group(2)) - sum(gs_te) / n) < 0.006
+              and abs(float(m.group(3)) - (sum(gs_tr) - sum(gs_te)) / n) < 0.011, label + ": the average line is the mean of the table, and the shrinkage is train minus held-out")
+
+    check_gains(o1, r, 0, "penalty 0")
+    check(not set(r["variants"][0]["digest"]) & set(r["test_variants"][0]["digest"]), "the held-out markets are different markets from the training ones (no shared run digests)")
+    with tempfile.TemporaryDirectory() as d2:
+        jp = os.path.join(d2, "p.json")
+        _, op, _ = lab(*G, "--grid", "skew16=0,1,2,4", "--test-markets", "2", "--top", "3", "--risk-penalty", "20", "--json", jp)
+        check_gains(op, json.load(open(jp)), 20, "penalty 20")
+    edge_expected = any(n.endswith("=0") or n.endswith("=4") for n in r["selected"])
+    check(("grid edge:" in o1) == edge_expected, "the grid-edge warning appears exactly when a chosen value is the smallest or largest on its axis")
+    files = sorted(os.listdir(ev))
+    check(len(files) == 5 * 3 + 3 * 2 and "skew16=0_m0.jsonl" in files and "test_base_m1.jsonl" in files and "test_%s_m0.jsonl" % r["selected"][0] in files,
+          "event files: 15 training and 6 held-out, held-out ones prefixed test_")
+
+print("held-out grid search: settings")
+_, a, _ = lab(*G, "--grid", "skew16=0,2,4", "--top", "9")
+check("best 3 of 3" in a, "--top larger than the grid is clipped to the grid")
+check("held-out markets (seeds 101000..101002)" in a, "the default number of held-out markets is the training count")
+_, b, _ = lab(*G, "--grid", "skew16=0,2,4", "--test-seed", "7000", "--test-markets", "1")
+check("seeds 7000..7000" in b, "--test-seed and --test-markets are used")
+_, c, _ = lab(*G, "--grid", "skew16=2")
+check("grid edge" not in c and "best 1 of 1" in c, "a one-value axis never counts as an edge")
+with tempfile.TemporaryDirectory() as d:
+    j0, j1 = os.path.join(d, "a.json"), os.path.join(d, "b.json")
+    lab(*G, "--grid", "skew16=0,1,2,4", "--top", "4", "--json", j0)
+    lab(*G, "--grid", "skew16=0,1,2,4", "--top", "4", "--risk-penalty", "50", "--json", j1)
+    r0, r1 = json.load(open(j0)), json.load(open(j1))
+    exp0 = [v["name"] for v in sorted(r0["variants"][1:], key=lambda v: -score(v, 0))]
+    exp1 = [v["name"] for v in sorted(r1["variants"][1:], key=lambda v: -score(v, 50))]
+    check(r0["selected"] == exp0 and r1["selected"] == exp1 and r1["risk_penalty"] == 50, "the risk penalty is applied to the ranking (recomputed from the json)")
+    check(exp0 != exp1, "and the penalty changes the order here (so the check means something)")
+_, d1, _ = lab(*G, "--grid", "skew16=0,2", "--risk-penalty", "0.5")
+check("objective = mean PnL - 0.5 x mean largest position" in d1, "the penalty is shown in the header")
+
 print("a run that cannot finish is reported, not hung")
 rc, out, err = lab("--requests", "5000", "--markets", "2", "--variant", "loop:requote_ticks=0,min_interval_ns=0", timeout=60)
 check(rc == 3 and "UNHEALTHY run (variant loop, market 0)" in err and "did not finish" in err and "do not use these numbers" in err, "livelocked variant: exit 3 naming the variant")

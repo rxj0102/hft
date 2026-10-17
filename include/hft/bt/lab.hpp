@@ -12,6 +12,7 @@
 // from one generator, and a comparison of K variants makes K tests that are
 // not adjusted for each other.
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -71,6 +72,21 @@ inline bool apply_param(strat::MmConfig& c, std::string_view key, std::string_vi
   err = "unknown parameter '" + std::string(key) +
         "' (half_spread16 alpha16 skew16 depth_levels qty max_pos requote_ticks min_leaves min_interval_ns)";
   return false;
+}
+
+// The current value of a field by name; the counterpart of apply_param.
+inline bool get_param(const strat::MmConfig& c, std::string_view key, long long& out) {
+  if (key == "half_spread16") out = c.half_spread16;
+  else if (key == "alpha16") out = c.alpha16;
+  else if (key == "skew16") out = c.skew16;
+  else if (key == "depth_levels") out = c.depth_levels;
+  else if (key == "qty") out = c.qty;
+  else if (key == "max_pos") out = c.max_pos;
+  else if (key == "requote_ticks") out = c.requote_ticks;
+  else if (key == "min_leaves") out = c.min_leaves;
+  else if (key == "min_interval_ns") out = static_cast<long long>(c.min_interval_ns);
+  else return false;
+  return true;
 }
 
 inline bool valid_name(std::string_view n) {
@@ -309,6 +325,218 @@ inline std::string run_problem(const RunResult& r) {
   std::string s = health_problem(r.rep);
   if (!r.finished) s = std::string("did not finish within the step budget (a requote loop?)") + (s.empty() ? "" : ", ") + s;
   return s;
+}
+
+// ---- many markets, many variants ------------------------------------------------------------------------------
+
+inline std::uint64_t mix64(std::uint64_t h, std::uint64_t v) {
+  h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+  return h * 0x100000001B3ULL;
+}
+constexpr std::uint64_t kDigestSeed = 1469598103934665603ULL;
+
+// One variant's results, one entry per market.
+struct Row {
+  std::vector<double> pnl, edge, inventory, fill_rate, adverse1ms, sharpe;
+  std::vector<std::uint64_t> fills, digest, risk_rejects;
+  std::vector<std::int64_t> max_pos;
+};
+
+// Runs every variant on `markets` generated markets with seeds seed, seed+1, ... Appends to `rows` (one per variant,
+// created on the first call). Unhealthy runs are reported on stderr and counted. Returns 0, or 2 when an event file
+// cannot be written or the backtester cannot be set up. `tag` prefixes event file names.
+inline int evaluate(const std::vector<Variant>& vars, long long seed, long long markets, long long requests, const BtConfig& bc,
+                    const risk::RiskConfig& rc, const std::string& events_dir, const std::string& tag, std::vector<Row>& rows,
+                    std::uint64_t& digest, int& unhealthy) {
+  rows.assign(vars.size(), Row{});
+  for (long long mi = 0; mi < markets; ++mi) {
+    MarketConfig mc;
+    mc.requests = static_cast<std::uint64_t>(requests);
+    mc.seed = static_cast<std::uint64_t>(seed + mi);
+    const Market m = MarketGen::generate(mc);
+    for (std::size_t vi = 0; vi < vars.size(); ++vi) {
+      std::FILE* ev = nullptr;
+      if (!events_dir.empty()) {
+        const std::string path = events_dir + "/" + tag + vars[vi].name + "_m" + std::to_string(mi) + ".jsonl";
+        ev = std::fopen(path.c_str(), "w");
+        if (!ev) {
+          std::fprintf(stderr, "hft_lab: cannot write %s\n", path.c_str());
+          return 2;
+        }
+      }
+      const RunResult r = run_one(m, bc, vars[vi].cfg, rc, ev);
+      if (ev) std::fclose(ev);
+      if (!r.ok) {
+        std::fprintf(stderr, "hft_lab: backtester setup failed\n");
+        return 2;
+      }
+      const std::string bad = run_problem(r);
+      if (!bad.empty()) {
+        std::fprintf(stderr, "hft_lab: UNHEALTHY run (variant %s, market %lld): %s\n", vars[vi].name.c_str(), mi, bad.c_str());
+        ++unhealthy;
+      }
+      Row& w = rows[vi];
+      w.pnl.push_back(r.rep.pnl);
+      w.edge.push_back(r.rep.edge);
+      w.inventory.push_back(r.rep.inventory);
+      w.fill_rate.push_back(r.rep.fill_rate_quotes);
+      w.adverse1ms.push_back(r.rep.adverse[1]);
+      w.sharpe.push_back(r.rep.sharpe_per_bin);
+      w.fills.push_back(r.rep.fills);
+      w.digest.push_back(r.rep.digest);
+      w.risk_rejects.push_back(r.rep.risk_rejects);
+      w.max_pos.push_back(r.rep.max_abs_pos);
+      digest = mix64(digest, r.rep.digest);
+    }
+  }
+  return 0;
+}
+
+// ---- grid search -----------------------------------------------------------------------------------------------
+
+inline bool parse_double(std::string_view s, double& out) {
+  if (s.empty()) return false;
+  const std::string t(s);
+  char* end = nullptr;
+  const double v = std::strtod(t.c_str(), &end);
+  if (end != t.c_str() + t.size() || !std::isfinite(v)) return false;
+  out = v;
+  return true;
+}
+
+constexpr std::size_t kMaxGridAxes = 8, kMaxAxisValues = 50, kMaxGridPoints = 500;
+
+struct GridAxis {
+  std::string key;
+  std::vector<long long> vals;
+};
+
+// "key=v1,v2;key2=w1,w2" -> every combination, each a Variant over `base` named "key=v1_key2=w1". The first axis
+// changes slowest. Refuses repeated keys, empty axes, bad values and grids over 500 points.
+inline bool parse_grid(std::string_view spec, const strat::MmConfig& base, std::vector<Variant>& out, std::string& err,
+                       std::vector<GridAxis>* axes_out = nullptr) {
+  struct Axis {
+    std::string key;
+    std::vector<std::string> vals;
+  };
+  std::vector<Axis> axes;
+  std::string_view rest = spec;
+  while (true) {
+    const std::size_t semi = rest.find(';');
+    const std::string_view one = rest.substr(0, semi);
+    const std::size_t eq = one.find('=');
+    if (eq == std::string_view::npos) {
+      err = "grid axis wants key=v1,v2,...: '" + std::string(one) + "'";
+      return false;
+    }
+    Axis a;
+    a.key = std::string(one.substr(0, eq));
+    for (const Axis& b : axes)
+      if (b.key == a.key) {
+        err = "grid axis repeated: " + a.key;
+        return false;
+      }
+    std::string_view vs = one.substr(eq + 1);
+    while (true) {
+      const std::size_t comma = vs.find(',');
+      a.vals.emplace_back(vs.substr(0, comma));
+      if (comma == std::string_view::npos) break;
+      vs = vs.substr(comma + 1);
+    }
+    if (a.vals.size() > kMaxAxisValues) {
+      err = "grid axis " + a.key + " has more than 50 values";
+      return false;
+    }
+    axes.push_back(a);
+    if (axes.size() > kMaxGridAxes) {
+      err = "more than 8 grid axes";
+      return false;
+    }
+    if (semi == std::string_view::npos) break;
+    rest = rest.substr(semi + 1);
+  }
+  std::size_t total = 1;
+  for (const Axis& a : axes) {
+    total *= a.vals.size();
+    if (total > kMaxGridPoints) {
+      err = "grid has more than 500 points";
+      return false;
+    }
+  }
+  out.clear();
+  if (axes_out) {
+    axes_out->clear();
+    for (const Axis& a : axes) {
+      GridAxis g;
+      g.key = a.key;
+      for (const std::string& v : a.vals) {
+        long long x = 0;
+        parse_int(v, x);  // already accepted by apply_param below, which would fail first otherwise
+        g.vals.push_back(x);
+      }
+      axes_out->push_back(g);
+    }
+  }
+  std::vector<std::size_t> idx(axes.size(), 0);
+  for (std::size_t n = 0; n < total; ++n) {
+    Variant v;
+    v.cfg = base;
+    for (std::size_t k = 0; k < axes.size(); ++k) {
+      if (!apply_param(v.cfg, axes[k].key, axes[k].vals[idx[k]], err)) return false;
+      v.name += std::string(k ? "_" : "") + axes[k].key + "=" + axes[k].vals[idx[k]];
+    }
+    if (!valid_name(v.name)) {
+      err = "grid point name too long or odd: '" + v.name + "' (fewer or shorter axes)";
+      return false;
+    }
+    out.push_back(v);
+    for (std::size_t k = axes.size(); k-- > 0;) {
+      if (++idx[k] < axes[k].vals.size()) break;
+      idx[k] = 0;
+    }
+  }
+  return true;
+}
+
+// Objective for choosing parameters: mean PnL per market minus a penalty times the mean largest position. With the
+// penalty at zero it is plain mean PnL.
+inline double score(const Row& r, double risk_penalty) {
+  std::vector<double> pos;
+  for (const std::int64_t p : r.max_pos) pos.push_back(static_cast<double>(p));
+  return summarize(r.pnl).mean - risk_penalty * summarize(pos).mean;
+}
+
+// Indices of rows[first..] best first by score; equal scores keep their order.
+inline std::vector<std::size_t> rank(const std::vector<Row>& rows, std::size_t first, double risk_penalty) {
+  std::vector<std::size_t> idx;
+  for (std::size_t i = first; i < rows.size(); ++i) idx.push_back(i);
+  std::vector<double> sc(rows.size(), 0.0);
+  for (std::size_t i = first; i < rows.size(); ++i) sc[i] = score(rows[i], risk_penalty);
+  std::stable_sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) { return sc[a] > sc[b]; });
+  return idx;
+}
+
+// The axes on which `c` sits at the smallest or largest value of the grid (only axes with at least two different
+// values count): the true optimum may lie beyond the edge, so the grid should be widened there.
+inline std::vector<std::string> edge_axes(const std::vector<GridAxis>& axes, const strat::MmConfig& c) {
+  std::vector<std::string> out;
+  for (const GridAxis& a : axes) {
+    long long lo = a.vals.empty() ? 0 : a.vals[0], hi = lo, cur = 0;
+    for (const long long v : a.vals) {
+      lo = v < lo ? v : lo;
+      hi = v > hi ? v : hi;
+    }
+    if (lo == hi || !get_param(c, a.key, cur)) continue;
+    if (cur == lo) out.push_back(a.key + " (smallest)");
+    if (cur == hi) out.push_back(a.key + " (largest)");
+  }
+  return out;
+}
+
+// How much of the gain over the base seen in training was still there on held-out markets. NaN when training showed no
+// gain (there is nothing to retain).
+inline double retained(double train_gain, double test_gain) {
+  return train_gain > 0 ? test_gain / train_gain : std::nan("");
 }
 
 }  // namespace hft::bt::lab

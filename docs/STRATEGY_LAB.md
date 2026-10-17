@@ -56,6 +56,33 @@ skew16=4                          -4.82      0.21  -23.10     0/16/0   <0.0001  
 - Removing the skew (`skew16=0`) gained 7.5 with t 2.8 but won only 11 of 16 markets (sign p 0.21). On 16 other markets (`--seed 5000`) it gained 8.7, won 14 of 16 (p 0.004), and the same tradeoff held: its largest position was 40 (the cap) against 11. The honest reading is a higher expected PnL bought with a much larger position, and the lab's PnL figure does not price that risk.
 - The first and second sets of markets agree in direction and roughly in size, which is what a result that is not an accident of the seeds looks like. They are still generated markets.
 
+## Parameter search with held-out markets
+
+```
+./build/release/hft_lab --markets 8 --requests 200000 \
+    --grid "alpha16=0,8,16,24;skew16=0,1,2,4;half_spread16=16,20,28" --top 3 --risk-penalty 0
+```
+
+`--grid` runs every combination (up to 500) plus the base on the training markets (seeds `--seed` and up), ranks them by an objective, keeps the best `--top` (default 3), and then runs only those and the base on held-out markets (`--test-seed`, default seed + 100000, and `--test-markets`, default the training count; overlapping seed ranges are refused). Grid points that were not chosen are never run on the held-out markets, so the held-out numbers cannot be used to pick a different winner. See ADR 34.
+
+The objective is mean PnL minus `--risk-penalty` times the mean largest absolute position, so a penalty above zero prefers points that earn their PnL with less inventory. For each chosen point the report gives the training gain and the held-out gain over the base in that objective, the fraction retained, and the average shrinkage (training gain minus held-out gain: the winner's curse). It also warns when a chosen value is the smallest or largest on its axis, because then the best value may lie outside the grid.
+
+Two runs on 2026-10-17 (seeds 1000 to 1007 for training, 101000 to 101007 held out; 42 s each on the VM):
+
+| Grid, penalty | Best point chosen | Train gain | Held-out gain | Retained | Largest position (train, held out) |
+|---|---|---|---|---|---|
+| alpha 0,8,16,24; skew 0,1,2,4; half spread 16,20,28; penalty 0 | alpha 24, skew 0, half spread 16 | +33.5 | +34.9 | 104% | 40, 40 (base 12, 14) |
+| the same grid, third pick | alpha 16, skew 0, half spread 16 | +18.2 | +16.4 | 90% | 40 |
+| alpha 8,16,24,32; skew 1,2,4,8; half spread 12,16,20,28; penalty 1 | alpha 32, skew 1, half spread 12 | +41.1 | +40.3 | 98% | 29, 32 |
+
+What this says and does not say:
+
+- The gains survive on fresh markets. The choice is not an accident of the training seeds, and the shrinkage is about zero or slightly negative (noise). The grids here are small relative to the effect sizes, so there is little winner's curse to see.
+- Every chosen point sits at the edge of its grid (the largest alpha, the smallest half spread, often the smallest skew), and widening the grid moved the optimum with it: more lean, tighter quotes, more fills (3,000 per market against 550 for the base), more position. That is a property of the generator, which has informed flow that the book imbalance reveals, not a finding about markets.
+- With a penalty of 1 the winner still held 29 to 32 lots. The penalty is a way to express a preference; it does not make a point safe.
+- Held-out markets from the same generator test the choice against sampling noise, not against a different market. Retention near 100 percent would not be expected on real data.
+- If you adjust the grid after seeing held-out results, use fresh seeds, because the old ones are spent.
+
 ## What it cannot tell you
 
 - The fills are simulated. The queue model is exact for the tape it replays, but the tape does not react to the strategy's orders (no market impact), so a strategy that would move the market looks better than it is.

@@ -34,6 +34,8 @@ Command: `python3 scripts/perf_gate.py --bench build/perf/bench/bench_t2t --stri
 
 Command: `./build/release/hft_lab --markets 16 --requests 200000 --variant noalpha:alpha16=0 --variant wide:half_spread16=32 --sweep skew16=0,4`, run twice, on seeds 1000 to 1015 and 5000 to 5015, 2026-10-17. Tables and reading are in [STRATEGY_LAB.md](STRATEGY_LAB.md). In short: removing the imbalance lean or quoting wider lost about 17 per market on every one of 32 markets; removing the inventory skew gained 7.5 and 8.7 per market but held positions up to the cap of 40 (the base peaked near 12), and most of its gain was inventory. These are simulated fills in generated markets, in the generator's currency units over about 2 s of market time per market; they are not returns, and the report from the same fills through `pnl_report.py` agrees with the backtester's own accounting to rounding (tested on 20 runs).
 
+Parameter search with held-out markets (`--grid`, ADR 34), 2026-10-17: grids of 48 and 64 points on 8 training markets, the best 3 re-run on 8 fresh markets. The best points kept 90 to 104 percent of their training gain over the base on the held-out markets, so there was almost no winner's curse in these grids, and every chosen point sat at the edge of the grid (more imbalance lean, tighter quotes, more inventory). Details and the reading are in [STRATEGY_LAB.md](STRATEGY_LAB.md). Same caveats: simulated fills, one generator.
+
 ## What the checks add up to
 
 | Check | Result | Command |
@@ -58,6 +60,7 @@ At every phase from the start, bugs were injected into the new code on purpose a
 | 20 | account check against the position file | 23 | 3 |
 | 21 | PnL report and fill events | 30 | 7 |
 | 23 | strategy lab, backtester hooks, report tie order | 133 | 24 of 95 in the first round, 3 of 33 in the second (equivalent) |
+| 24 | grid search with held-out markets | 60 | 17 of 60 in the first round (3 equivalent, 7 did not compile and were rewritten) |
 
 A few survivors in each phase were equivalent mutants (the changed code behaves the same) and are said to be so in the changelog.
 
@@ -67,7 +70,7 @@ Offline replay of Coinbase BTC-USD level-2 captures through the same pipeline, w
 
 ## Size
 
-About 21,800 lines of C++ (include, src, tests, bench, fuzz) and about 6,100 lines of Python (scripts), counted with `wc -l` on 2026-10-17. 33 architecture decision records, listed in [DECISIONS.md](DECISIONS.md).
+About 21,800 lines of C++ (include, src, tests, bench, fuzz) and about 6,100 lines of Python (scripts), counted with `wc -l` on 2026-10-17. 34 architecture decision records, listed in [DECISIONS.md](DECISIONS.md).
 
 ## What has not been measured
 

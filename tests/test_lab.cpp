@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "check.hpp"
 #include "hft/bt/lab.hpp"
 
@@ -320,6 +323,180 @@ void test_runs() {
   std::fclose(f);
 }
 
+
+void test_get_param() {
+  strat::MmConfig c;
+  std::string err;
+  const char* keys[] = {"half_spread16", "alpha16", "skew16", "depth_levels", "qty", "max_pos", "requote_ticks", "min_leaves", "min_interval_ns"};
+  long long k = 3;
+  for (const char* key : keys) {
+    CHECK(lab::apply_param(c, key, std::to_string(k), err));
+    long long got = -1;
+    CHECK(lab::get_param(c, key, got) && got == k);
+    k += 2;
+  }
+  long long got = 0;
+  CHECK(!lab::get_param(c, "nope", got));
+}
+
+void test_parse_double() {
+  double v = 0;
+  CHECK(lab::parse_double("0.5", v) && v == 0.5);
+  CHECK(lab::parse_double("1e3", v) && v == 1000.0);
+  CHECK(lab::parse_double("-2", v) && v == -2.0);
+  CHECK(!lab::parse_double("", v) && !lab::parse_double("x", v) && !lab::parse_double("1x", v));
+  CHECK(!lab::parse_double("nan", v) && !lab::parse_double("inf", v) && !lab::parse_double("1e999", v));
+}
+
+void test_grid() {
+  const strat::MmConfig base;
+  std::vector<lab::Variant> g;
+  std::vector<lab::GridAxis> axes;
+  std::string err;
+  CHECK(lab::parse_grid("skew16=0,4", base, g, err, &axes));
+  CHECK(g.size() == 2 && g[0].name == "skew16=0" && g[1].name == "skew16=4" && g[0].cfg.skew16 == 0 && g[1].cfg.skew16 == 4);
+  CHECK(g[0].cfg.alpha16 == base.alpha16);
+  CHECK(axes.size() == 1 && axes[0].key == "skew16" && axes[0].vals.size() == 2 && axes[0].vals[1] == 4);
+  // two axes: the first changes slowest
+  CHECK(lab::parse_grid("alpha16=0,8;skew16=1,2,3", base, g, err, &axes));
+  CHECK(g.size() == 6 && axes.size() == 2);
+  CHECK(g[0].name == "alpha16=0_skew16=1" && g[1].name == "alpha16=0_skew16=2" && g[2].name == "alpha16=0_skew16=3" && g[3].name == "alpha16=8_skew16=1" &&
+        g[5].name == "alpha16=8_skew16=3");
+  CHECK(g[4].cfg.alpha16 == 8 && g[4].cfg.skew16 == 2 && g[4].cfg.half_spread16 == base.half_spread16);
+  // a single value is a grid of one; negative values work
+  CHECK(lab::parse_grid("alpha16=-8", base, g, err) && g.size() == 1 && g[0].name == "alpha16=-8" && g[0].cfg.alpha16 == -8);
+  // the axes pointer is optional and axes are cleared on every call
+  CHECK(lab::parse_grid("qty=1", base, g, err, &axes) && axes.size() == 1);
+  // refusals
+  const char* bad[] = {"", "skew16", "skew16=", "=3", "skew16=1;", ";skew16=1", "skew16=1,,2", "skew16=x", "skew16=1;skew16=2", "nope=1", "qty=0", "qty=101",
+                       "alpha16=0,8;skew16=1,-1"};
+  for (const char* b : bad) CHECK(!lab::parse_grid(b, base, g, err));
+  err.clear();
+  CHECK(!lab::parse_grid("skew16=1;skew16=2", base, g, err) && err.find("repeated") != std::string::npos);
+  // size limits: 50 values on an axis is fine, 51 is not; 500 points is fine, more is not; 8 axes fine, 9 not
+  std::string v50 = "min_interval_ns=0", v51;
+  for (int i = 1; i < 50; ++i) v50 += "," + std::to_string(i);
+  v51 = v50 + ",50";
+  CHECK(lab::parse_grid(v50, base, g, err) && g.size() == 50);
+  CHECK(!lab::parse_grid(v51, base, g, err) && err.find("50 values") != std::string::npos);
+  CHECK(lab::parse_grid("qty=1,2,3,4,5;max_pos=1,2,3,4,5,6,7,8,9,10;requote_ticks=0,1,2,3,4,5,6,7,8,9", base, g, err) && g.size() == 500);
+  CHECK(!lab::parse_grid("qty=1,2,3,4,5,6,7;max_pos=1,2,3,4,5,6,7,8;requote_ticks=0,1,2,3,4,5,6,7,8", base, g, err) && err.find("500") != std::string::npos);
+  // eight axes pass the axis limit (the point name is then too long); nine stop at the axis limit
+  err.clear();
+  CHECK(!lab::parse_grid("half_spread16=1;alpha16=1;skew16=1;depth_levels=1;qty=1;max_pos=1;requote_ticks=1;min_leaves=1", base, g, err) &&
+        err.find("too long") != std::string::npos);
+  err.clear();
+  CHECK(!lab::parse_grid("half_spread16=1;alpha16=1;skew16=1;depth_levels=1;qty=1;max_pos=1;requote_ticks=1;min_leaves=1;min_interval_ns=1", base, g, err) &&
+        err.find("8 grid axes") != std::string::npos);
+  // a name over 48 characters is refused with a hint
+  err.clear();
+  CHECK(!lab::parse_grid("half_spread16=1048576;alpha16=-1048576;skew16=1048576;min_interval_ns=1000000", base, g, err) && err.find("too long") != std::string::npos);
+}
+
+lab::Row row_of(std::vector<double> pnl, std::vector<std::int64_t> pos) {
+  lab::Row r;
+  r.pnl = std::move(pnl);
+  r.max_pos = std::move(pos);
+  return r;
+}
+
+void test_rank() {
+  std::vector<lab::Row> rows;
+  rows.push_back(row_of({0, 0}, {5, 5}));       // 0: base
+  rows.push_back(row_of({10, 12}, {40, 40}));   // 1: mean 11, pos 40
+  rows.push_back(row_of({8, 8}, {10, 10}));     // 2: mean 8, pos 10
+  rows.push_back(row_of({9, 7}, {10, 10}));     // 3: mean 8, pos 10 (ties 2)
+  rows.push_back(row_of({3, 3}, {2, 2}));       // 4: mean 3, pos 2
+  CHECK(near(lab::score(rows[1], 0), 11.0) && near(lab::score(rows[1], 0.5), 11.0 - 20.0) && near(lab::score(rows[4], 1.0), 1.0));
+  std::vector<std::size_t> o = lab::rank(rows, 1, 0);
+  CHECK(o.size() == 4 && o[0] == 1 && o[1] == 2 && o[2] == 3 && o[3] == 4);   // tie between 2 and 3 keeps index order
+  o = lab::rank(rows, 1, 0.5);   // 1: -9, 2: 3, 3: 3, 4: 2
+  CHECK(o[0] == 2 && o[1] == 3 && o[2] == 4 && o[3] == 1);
+  o = lab::rank(rows, 0, 0);     // the base can be ranked too when asked
+  CHECK(o.size() == 5 && o[4] == 0);
+  CHECK(lab::rank(rows, 5, 0).empty());
+  // many equal scores keep their order (std::sort would not guarantee it)
+  std::vector<lab::Row> eq;
+  eq.push_back(row_of({0}, {0}));
+  for (int i = 0; i < 60; ++i) eq.push_back(row_of({1}, {1}));
+  o = lab::rank(eq, 1, 0);
+  bool in_order = o.size() == 60;
+  for (std::size_t i = 0; in_order && i < o.size(); ++i) in_order = o[i] == i + 1;
+  CHECK(in_order);
+  // retained
+  CHECK(near(lab::retained(10, 5), 0.5) && near(lab::retained(4, 6), 1.5) && near(lab::retained(10, -5), -0.5));
+  CHECK(std::isnan(lab::retained(0, 5)) && std::isnan(lab::retained(-1, 5)));
+}
+
+void test_edge_axes() {
+  std::vector<lab::GridAxis> axes = {{"alpha16", {0, 8, 16}}, {"skew16", {2}}, {"nope", {1, 2}}, {"qty", {5, 1, 3}}};
+  strat::MmConfig c;
+  c.alpha16 = 16;
+  c.skew16 = 2;
+  c.qty = 3;
+  std::vector<std::string> e = lab::edge_axes(axes, c);
+  CHECK(e.size() == 1 && e[0] == "alpha16 (largest)");
+  c.alpha16 = 0;
+  c.qty = 1;   // unsorted axis: 1 is its smallest
+  e = lab::edge_axes(axes, c);
+  CHECK(e.size() == 2 && e[0] == "alpha16 (smallest)" && e[1] == "qty (smallest)");
+  c.alpha16 = 8;
+  c.qty = 5;
+  e = lab::edge_axes(axes, c);
+  CHECK(e.size() == 1 && e[0] == "qty (largest)");
+  c.qty = 3;
+  CHECK(lab::edge_axes(axes, c).empty());
+}
+
+void test_evaluate() {
+  std::vector<lab::Variant> vars(2);
+  vars[0].name = "base";
+  vars[1].name = "noalpha";
+  vars[1].cfg.alpha16 = 0;
+  const risk::RiskConfig rc = lab::lab_risk(40);
+  std::vector<lab::Row> rows;
+  std::uint64_t dg = lab::kDigestSeed;
+  int bad = 0;
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, "", "", rows, dg, bad) == 0 && bad == 0);
+  CHECK(rows.size() == 2 && rows[0].pnl.size() == 2 && rows[1].digest.size() == 2 && rows[0].fills.size() == 2 && rows[0].max_pos.size() == 2);
+  // each entry is the single run of that variant on that market, and the digest chains them market-major
+  std::uint64_t want = lab::kDigestSeed;
+  for (long long mi = 0; mi < 2; ++mi) {
+    const bt::Market m = small_market(static_cast<std::uint64_t>(900 + mi), 8000);
+    for (std::size_t vi = 0; vi < 2; ++vi) {
+      const lab::RunResult r = lab::run_one(m, lat(), vars[vi].cfg, rc, nullptr);
+      CHECK(r.rep.pnl == rows[vi].pnl[static_cast<std::size_t>(mi)] && r.rep.digest == rows[vi].digest[static_cast<std::size_t>(mi)]);
+      CHECK(r.rep.max_abs_pos == rows[vi].max_pos[static_cast<std::size_t>(mi)] && r.rep.edge == rows[vi].edge[static_cast<std::size_t>(mi)]);
+      want = lab::mix64(want, r.rep.digest);
+    }
+  }
+  CHECK(dg == want);
+  // the second market has a different seed from the first
+  CHECK(rows[0].digest[0] != rows[0].digest[1]);
+  // rows are rebuilt, not appended to
+  std::uint64_t dg2 = lab::kDigestSeed;
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, "", "", rows, dg2, bad) == 0 && rows[0].pnl.size() == 2 && dg2 == dg);
+  // an events directory that cannot be written is a setup failure
+  CHECK(lab::evaluate(vars, 900, 1, 8000, lat(), rc, "/nonexistent_dir_for_lab", "t_", rows, dg2, bad) == 2);
+  // with a directory, one file per variant and market, named with the tag
+  char tmpl[] = "/tmp/lab_test_XXXXXX";
+  const char* dir = mkdtemp(tmpl);
+  CHECK(dir != nullptr);
+  if (dir) {
+    CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, dir, "t_", rows, dg2, bad) == 0);
+    for (const char* f : {"/t_base_m0.jsonl", "/t_base_m1.jsonl", "/t_noalpha_m0.jsonl", "/t_noalpha_m1.jsonl"}) {
+      const std::string path = std::string(dir) + f;
+      std::FILE* fp = std::fopen(path.c_str(), "r");
+      CHECK(fp != nullptr);
+      if (fp) {
+        std::fclose(fp);
+        std::remove(path.c_str());
+      }
+    }
+    CHECK(rmdir(dir) == 0);
+  }
+}
+
 void test_health() {
   BtReport r;
   CHECK(lab::health_problem(r).empty());
@@ -351,6 +528,12 @@ int main() {
   test_format_p();
   test_event_obs();
   test_runs();
+  test_get_param();
+  test_parse_double();
+  test_grid();
+  test_rank();
+  test_edge_axes();
+  test_evaluate();
   test_health();
   if (g_failures == 0) std::puts("test_lab: all checks passed");
   return g_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
