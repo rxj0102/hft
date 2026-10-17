@@ -35,6 +35,7 @@ Exit codes: 0 stopped (flat), 1 could not get flat or too many errors (restartab
 import argparse
 import base64
 import collections
+import decimal
 import hashlib
 import hmac
 import json
@@ -476,6 +477,39 @@ class LoopBridge(Bridge):
         self.filled = {}                   # key -> lots already reported as filled
         self.ws_seen = {}                  # key -> lots the websocket has said were matched (never above what REST showed)
         self.reports_dead = False
+        self.account = None                # the base currency's balance (Decimal), read once at start; None: not known
+        self.account_asked = False
+
+    # ---- the account (ADR 31) ------------------------------------------------------------------------------
+    def fetch_account(self):
+        """GET /accounts once: the balance in the product's base currency. hft_live compares it with its position file."""
+        self.account_asked = True
+        st, js = self.req("GET", "/accounts")
+        cur = self.a.product.split("-")[0]
+        if st == 200 and isinstance(js, list):
+            for row in js:
+                if isinstance(row, dict) and row.get("currency") == cur:
+                    try:
+                        self.account = decimal.Decimal(str(row["balance"]))
+                    except (KeyError, decimal.InvalidOperation):
+                        self.account = None
+                    break
+        self.log.emit("account", known=self.account is not None, status=st, currency=cur,
+                      base_balance=str(self.account) if self.account is not None else None)
+
+    def send_account(self):
+        rec = {"t": "acct", "ok": 0}
+        if self.account is not None:
+            rec = {"t": "acct", "ok": 1, "base_raw": int((self.account * self.qty_scale).to_integral_value(decimal.ROUND_HALF_EVEN))}
+        self.cnt["account_sent"] += 1
+        if self.reports_dead:
+            return
+        try:
+            self.out.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            self.out.flush()
+        except (BrokenPipeError, ValueError, OSError):
+            self.reports_dead = True
+            self.log.emit("reports_pipe_closed")
 
     # ---- reports ------------------------------------------------------------------------------------------
     def report(self, key, rt, px=0, qty=0, leaves=0, reason="none", side=None):
@@ -499,6 +533,8 @@ class LoopBridge(Bridge):
             self.cnt["events_in"] += 1
             if t == "hello":
                 self.px_scale, self.qty_scale = int(m["px_scale"]), int(m["qty_scale"])
+                if self.account_asked:
+                    self.send_account()
             elif t in ("new", "rep", "can"):
                 self.queue.append(m)
             elif t == "end":
@@ -930,6 +966,8 @@ def main(argv=None):
             log.emit("start_flat", flat=ok)
             if not ok:
                 raise Fatal(1, "could not clear existing orders at start")
+        if a.loop:
+            b.fetch_account()
         if ws_url:
             b.ws = WsFeed(ws_url, a.product, key, secret, passphrase, log, a.test_exchange)
             b.ws.start()

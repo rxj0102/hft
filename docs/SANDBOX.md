@@ -31,7 +31,7 @@ capture_l2.py --out - | hft_live --orders-fd 3 3>| order_bridge.py        (scrip
 
 Create an API key in the Coinbase Exchange sandbox with trade permission on a profile used only for this. Put the three values into environment variables in your shell. Do not paste them into a chat, a file in the repository, or a command line.
 
-1. Smoke test (`scripts/smoke_sandbox.py`, 13 steps, minimum-size orders worth under 5 USD):
+1. Smoke test (`scripts/smoke_sandbox.py`, 14 steps, minimum-size orders worth under 5 USD):
 ```
 python3 scripts/smoke_sandbox.py --report smoke_report.json
 ```
@@ -68,6 +68,7 @@ First runs: 6 of the 28 bridge bugs and 4 of the 15 C++ bugs survived. Each was 
 | `FAIL 2 clock` | Fix the machine's clock. The exchange refuses requests more than 30 s off. |
 | `FAIL 3 product ... DO NOT FIT` | The product's sizes or price step differ from the bridge's 1e-5 lots and cents: change `px_scale`/`qty_scale` or the product before anything else. |
 | `FAIL 5 auth` with 401 or 403 | Key, secret, passphrase, permission (trade), profile, or an IP allow-list. The bridge treats this as fatal (exit 4). |
+| `FAIL 5 account` | `GET /accounts` did not answer, or has no entry for the base currency, or its balance is not a number. `--position-file` would refuse to start. Tell me the response fields (the report has them) and the bridge can be adapted. |
 | `FAIL 6 flat` | Orders already work on the product. Cancel them yourself, or pass `--cancel-existing`. |
 | `FAIL 7 ... filled_size field MISSING` | The closed loop finds fills from this field; it would need a different method. |
 | `PASS 8 cross ... does NOT recognise` | The refusal worked but its message does not contain "post only"; the bridge would report the reason as `other` instead of `cross`. The OMS treats both as a rejection, so this is cosmetic, but tell me the message and the bridge can match it. |

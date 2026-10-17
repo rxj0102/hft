@@ -14,7 +14,7 @@ ADR 29 closes the position when the process stops for good, but each segment had
 - The paper venue never fills, so nothing is carried there.
 
 ## Consequences
-What the file says is trusted. It is wrong after a kill -9 in the window between a fill and the next loop pass, after a crash of the disk, if two processes share it, or if someone trades the account by hand. The exchange is the authority; reading the account's real position at start is not done. A position found at start can only be closed if the process gets a two-sided fresh book within the stale limit; otherwise the exit is 4. The loss limit is not enabled by the live tool, so cash continuity matters only if it is turned on later.
+What the file says was trusted as written; ADR 31 adds a check against the account's balance at start. Before that check: It is wrong after a kill -9 in the window between a fill and the next loop pass, after a crash of the disk, if two processes share it, or if someone trades the account by hand. The exchange is the authority; reading the account's real position at start is not done. A position found at start can only be closed if the process gets a two-sided fresh book within the stale limit; otherwise the exit is 4. The loss limit is not enabled by the live tool, so cash continuity matters only if it is turned on later.
 
 The hot path is unchanged (carry happens at segment boundaries).
 

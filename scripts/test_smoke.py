@@ -92,6 +92,14 @@ def main():
     check(r.returncode == 1 and "FAIL 13 flat" in r.stdout, "an order that appears before the last check: step 13 fails (stray %s)" % [o["id"] for o in ex.open_orders()])
     ex.stop()
 
+    for mode, what in (("fail", "an unreadable /accounts"), ("nobase", "no entry for the base currency"), ("text", "a balance that is not a number")):
+        ex = fake_exchange.FakeExchange(KEY, SECRET, PASS).start().start_ws()
+        ex.accounts_mode = mode
+        r = run(ex)
+        check(r.returncode == 1 and "FAIL  5 account" in r.stdout and "--position-file would refuse" in r.stdout and ex.open_orders() == [],
+              "%s: step 5 fails, says what it means, and nothing was traded" % what)
+        ex.stop()
+
     print("the websocket steps")
     ex = fake_exchange.FakeExchange(KEY, SECRET, PASS).start().start_ws()
     ex.ws_mode = "reject_auth"

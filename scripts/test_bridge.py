@@ -55,13 +55,15 @@ class Bridge:
     def collect_reports(self):
         import threading
         self.reports = []
+        self.accts = []                     # the one report about the account (ADR 31)
 
         def run():
             for l in self.p.stdout:
                 try:
-                    self.reports.append(json.loads(l))
+                    rec = json.loads(l)
                 except ValueError:
-                    pass
+                    continue
+                (self.accts if rec.get("t") == "acct" else self.reports).append(rec)
         self.reader = threading.Thread(target=run, daemon=True)
         self.reader.start()
 
@@ -1108,6 +1110,60 @@ def test_close_unsettled():
     ex.stop()
 
 
+def test_account():
+    print("account: the base balance is read at start and reported once the hello has arrived")
+    ex, tmp = fresh("ac1")
+    ex.base_balance = 1.00005
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("account"))
+    ev = b.events("account")
+    check(ev and ev[0]["known"] and ev[0]["currency"] == "BTC" and ev[0]["status"] == 200, "the balance is read at start: %s" % ev[:1])
+    time.sleep(0.3)
+    check(not b.accts, "and nothing is reported before the hello (the scale is not known yet)")
+    b.send(hello())
+    check(until(lambda: b.accts), "after the hello the account is reported")
+    check(b.accts == [{"t": "acct", "ok": 1, "base_raw": 100005}], "in lots (1e-5): %s" % b.accts)
+    # fills move the balance at the exchange; a restarted bridge reports the new one
+    b.send(ioc_req(1, px(80990.00), qty=5))
+    check(until(lambda: b.reps("fill")), "a sale trades")
+    rc, _ = b.finish("eof")
+    check(rc == 0 and abs(ex.base_balance - 1.0) < 1e-9, "the exchange's balance fell by the lots sold: %.8f" % ex.base_balance)
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    b.send(hello())
+    check(until(lambda: b.accts) and b.accts[0]["base_raw"] == 100000, "and the next bridge reports it: %s" % b.accts)
+    b.finish("eof")
+    ex.stop()
+
+    ex, tmp = fresh("ac4")                                  # rounding to the nearest lot, not truncation
+    ex.base_balance = 0.0123456
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    b.send(hello())
+    check(until(lambda: b.accts) and b.accts[0]["base_raw"] == 1235, "0.0123456 is 1235 lots: %s" % b.accts)
+    b.finish("eof")
+    ex.stop()
+
+    for mode in ("fail", "nobase"):
+        ex, tmp = fresh("ac2")
+        ex.accounts_mode = mode
+        b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+        b.send(hello())
+        check(until(lambda: b.accts), "%s: the bridge still answers" % mode)
+        check(b.accts == [{"t": "acct", "ok": 0}], "%s: and says it does not know: %s" % (mode, b.accts))
+        ev = b.events("account")
+        check(ev and not ev[0]["known"], "%s: logged as unknown" % mode)
+        rc, _ = b.finish("eof")
+        check(rc == 0, "%s: the bridge goes on (the engine decides what to do about it)" % mode)
+        ex.stop()
+
+    ex, tmp = fresh("ac3")                                  # without --loop nothing is fetched
+    b = Bridge(ex, tmp, ["--sync-s", "600"])
+    b.send(hello())
+    time.sleep(0.5)
+    rc, _ = b.finish("eof")
+    check(rc == 0 and not any(path.startswith("/accounts") for (_, _, path, _) in ex.log), "a mirror bridge never reads the account")
+    ex.stop()
+
+
 if __name__ == "__main__":
     live = sys.argv[1] if len(sys.argv) > 1 else None
     test_signing()
@@ -1128,6 +1184,7 @@ if __name__ == "__main__":
     test_close_orders()
     test_close_details()
     test_close_unsettled()
+    test_account()
     test_hft_live_mirror(live)
     print("test_bridge: " + ("all checks passed" if not fails else "%d FAILED" % fails))
     sys.exit(1 if fails else 0)

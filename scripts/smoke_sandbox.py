@@ -212,6 +212,21 @@ def main(argv=None):
             "HTTP %s: %s (key, secret, passphrase, permission or an IP allow-list?)" % (st, api.msg(js)))):
         return finish(1, args)
 
+    # 5b: the account (the engine compares its position file with the base currency's balance, ADR 31) -------------------
+    st_a, acc = api.call("accounts", "GET", "/accounts")
+    base_cur = P.split("-")[0]
+    row = next((r for r in acc if isinstance(r, dict) and r.get("currency") == base_cur), None) if isinstance(acc, list) else None
+    shapes["account_row"] = shape(row) if row else None
+    try:
+        float(row["balance"])
+        numeric = True
+    except (TypeError, KeyError, ValueError):
+        numeric = False
+    if not step(5, "account", numeric,   # numeric implies an entry in a list, which implies a 200
+                ("GET /accounts HTTP 200, a %s entry with a numeric balance (fields %s)" % (base_cur, sorted(row.keys())) if row and numeric else
+                 "GET /accounts HTTP %s, %s entry %s: --position-file would refuse to start" % (st_a, base_cur, "found, balance not numeric" if row else "NOT found"))):
+        return finish(1, args)
+
     # 6 ---------------------------------------------------------------------------------------------------------------
     if js:
         if not args.cancel_existing:
@@ -365,18 +380,27 @@ def bridge_loop(args, far, size_s, ws_url=None):
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ), text=True)
     t0 = time.monotonic()
     got = []
+    acct = []
     try:
         for m in lines:
             p.stdin.write(json.dumps(m) + "\n")
             p.stdin.flush()
             if m["t"] in ("new", "rep", "can"):
-                line = p.stdout.readline()  # the loop bridge answers each request with exactly one report
+                while True:
+                    line = p.stdout.readline()  # the loop bridge answers each request with exactly one report (and once, after the hello, about the account)
+                    if not line:
+                        break
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        rec = {"rt": "unparsable"}
+                    if rec.get("t") == "acct":
+                        acct.append(rec)
+                        continue
+                    got.append(rec)
+                    break
                 if not line:
                     break
-                try:
-                    got.append(json.loads(line))
-                except ValueError:
-                    got.append({"rt": "unparsable"})
         p.stdin.close()
         rc = p.wait(timeout=30)
     except Exception as e:  # noqa: BLE001
@@ -387,9 +411,10 @@ def bridge_loop(args, far, size_s, ws_url=None):
     shapes["bridge_reports"] = [sorted(g.keys()) for g in got][:1]
     errtxt = p.stderr.read()
     clean = ('"event": "exit_flat"' in errtxt and '"flat": true' in errtxt)
-    ok = types == want and rc == 0
-    return ok, "reports %s (wanted %s), bridge exit %s, flat at exit %s, websocket fills %s, %.1f s" % (
-        types, want, rc, clean, "on" if ws_url else "off", time.monotonic() - t0)
+    acct_ok = len(acct) == 1 and acct[0].get("ok") == 1
+    ok = types == want and rc == 0 and acct_ok
+    return ok, "reports %s (wanted %s), account report %s, bridge exit %s, flat at exit %s, websocket fills %s, %.1f s" % (
+        types, want, "ok" if acct_ok else "MISSING or unknown: %s" % acct, rc, clean, "on" if ws_url else "off", time.monotonic() - t0)
 
 
 if __name__ == "__main__":

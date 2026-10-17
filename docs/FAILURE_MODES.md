@@ -129,7 +129,7 @@ Evidence is `scripts/drill.py` against a local fake feed unless stated. The pape
 | (closing) the close cannot be done (no liquidity, feed older than the stale limit, no two-sided book, refused by risk or by the bridge's band) | position stays; `POSITION NOT CLOSED`, exit 4, supervisor `stop_not_flat` | `position_not_closed`, `close_why_not` |
 | (closing) the exchange never says how a closing order ended | bridge reports nothing (`ioc_outcome_unknown`); the engine's timeout fails the close; exit 4 | `ioc_outcome_unknown` |
 | (closing) a position left by a segment that ended for a routine reason | carried into the next segment and closed by the stop (ADR 30); a stop with no segment to price a close: `POSITION NOT CLOSED ... no live segment to price a close`, exit 4 | `segment_end.position_lots` (session total), `position_not_closed` |
-| (closing) a position left by an earlier process | known only with `--position-file`; the file is trusted as written (stale after kill -9 between a fill and the next loop pass; wrong if shared or if the account is traded by hand) | stderr line at start, the file |
+| (closing) a position left by an earlier process | known only with `--position-file`; at start it is checked against the account's base balance (ADR 31): a disagreement, an unreadable balance or no report in 10 s is `ACCOUNT CHECK FAILED`, exit 4, nothing traded, no restart | stderr line at start, `account_mismatch`, the file |
 | supervisor itself dies | nothing restarts it | not handled |
 | host reboot | nothing restarts it | not handled |
 | orders left working at a real exchange after a kill -9 | not modelled (paper venue) | not handled |

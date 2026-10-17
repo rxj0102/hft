@@ -464,33 +464,45 @@ int main(int argc, char** argv) {
     return 1;
   }
   feed::LiveSession session(lc);
-  long long saved_pos = 0, saved_cash = 0;
+  long long saved_pos = 0, saved_cash = 0, saved_base = 0;
+  // ADR 31: the position file also holds the account's base balance minus the position (the "baseline"), written once the
+  // bridge has reported the balance; at the next start the balance must equal baseline + position, or we do not trade.
+  bool baseline_known = false;
+  long long baseline = 0;
+  bool acct_pending = !position_file.empty();
+  bool acct_failed = false;
+  std::string acct_why;
   if (!position_file.empty()) {  // what the previous process left at the exchange (ADR 30)
     if (FILE* f = std::fopen(position_file.c_str(), "r")) {
-      long long p = 0, c = 0;
-      const int n = std::fscanf(f, "%lld %lld", &p, &c);
+      long long p = 0, c = 0, b = 0;
+      const int n = std::fscanf(f, "%lld %lld %lld", &p, &c, &b);
       std::fclose(f);
-      if (n != 2) {
-        std::fprintf(stderr, "--position-file %s exists but is not \"<lots> <cash>\"; refusing to start with an unknown position\n", position_file.c_str());
+      if (n != 2 && n != 3) {
+        std::fprintf(stderr, "--position-file %s exists but is not \"<lots> <cash> [<baseline>]\"; refusing to start with an unknown position\n", position_file.c_str());
         return 1;
       }
       session.seed_position(p, c);
       saved_pos = p;
       saved_cash = c;
+      if (n == 3) {
+        baseline_known = true;
+        baseline = saved_base = b;
+      }
       std::fprintf(stderr, "hft_live: starting with a position of %lld lots (cash %lld) read from %s; make sure it matches the account\n", p, c, position_file.c_str());
     }
   }
   auto save_position = [&] {
     if (position_file.empty()) return;
     const long long p = session.net_position(), c = static_cast<long long>(session.net_cash());
-    if (p == saved_pos && c == saved_cash) return;
+    if (p == saved_pos && c == saved_cash && baseline == saved_base) return;
     const std::string tmp = position_file + ".tmp";
     if (FILE* f = std::fopen(tmp.c_str(), "w")) {
-      const bool ok = std::fprintf(f, "%lld %lld\n", p, c) > 0;
+      const bool ok = std::fprintf(f, "%lld %lld %lld\n", p, c, baseline) > 0;
       const bool cl = std::fclose(f) == 0;
       if (ok && cl && std::rename(tmp.c_str(), position_file.c_str()) == 0) {
         saved_pos = p;
         saved_cash = c;
+        saved_base = baseline;
         return;
       }
     }
@@ -519,6 +531,30 @@ int main(int argc, char** argv) {
     save_position();
   };
   bool exchange_lost = false, lost_handled = false;
+  // The bridge's one report about the account (ADR 31). Without a position file it is not needed and is ignored.
+  auto on_account = [&](bool ok, long long base_raw) {
+    if (!acct_pending) return;
+    acct_pending = false;
+    const long long have = session.net_position();
+    if (!ok) {
+      acct_failed = true;
+      acct_why = "the account's balance could not be read, so the position file cannot be checked";
+    } else if (baseline_known) {
+      const long long expect = baseline + have;
+      const long long diff = base_raw - expect;
+      if (diff > 1 || diff < -1) {
+        acct_failed = true;
+        acct_why = "the account holds " + std::to_string(base_raw) + " lots of the base currency, the position file implies " +
+                   std::to_string(expect) + " (baseline " + std::to_string(baseline) + " + position " + std::to_string(have) + ")";
+      }
+    } else {
+      baseline = base_raw - have;
+      baseline_known = true;
+      std::fprintf(stderr, "hft_live: account balance %lld lots recorded as the baseline in %s (position %lld)\n", base_raw, position_file.c_str(), have);
+    }
+    if (acct_failed) elog.emit("account_mismatch", secs(), std::string("\"why\":\"") + acct_why + "\"");
+    else elog.emit("account_checked", secs(), std::string("\"base_lots\":") + std::to_string(base_raw));
+  };
   // Reads whatever reports are waiting and hands them to the session. A closed pipe means the bridge is gone.
   auto pump_reports = [&] {
     if (rin.fd < 0) return;
@@ -532,7 +568,14 @@ int main(int argc, char** argv) {
           ++rin.lines;
           std::uint64_t seg = 0;
           sim::Report r;
-          if (parse_report(std::string_view(rin.carry).substr(pos, nl - pos), seg, r)) session.on_exchange_report(seg, r, now_ns());
+          const std::string_view ln = std::string_view(rin.carry).substr(pos, nl - pos);
+          std::string_view lt;
+          if (field_str(ln, "t", lt) && lt == "acct") {
+            std::int64_t ok = 0, br = 0;
+            field_i64(ln, "ok", ok);
+            field_i64(ln, "base_raw", br);
+            on_account(ok == 1, br);
+          } else if (parse_report(std::string_view(rin.carry).substr(pos, nl - pos), seg, r)) session.on_exchange_report(seg, r, now_ns());
           else ++rin.bad;
           pos = nl + 1;
         }
@@ -600,7 +643,10 @@ int main(int argc, char** argv) {
     char buf[1 << 16];
     bool eof = false;
     while (!g_stop && !eof) {
-      pollfd p[2] = {{0, POLLIN, 0}, {rin.fd, POLLIN, 0}};  // a negative descriptor is ignored by poll
+      if (acct_pending && secs() > 10.0) on_account(false, 0);   // fail closed: no report about the account
+      if (acct_failed) break;
+      // until the account has been looked at, stdin is not read: no snapshot, no segment, no order
+      pollfd p[2] = {{acct_pending ? -1 : 0, POLLIN, 0}, {rin.fd, POLLIN, 0}};  // a negative descriptor is ignored by poll
       const int r = ::poll(p, 2, spin ? 0 : 1);  // --spin: never sleep, the way a real feed handler polls
       if (r < 0) continue;  // EINTR: the loop condition looks at g_stop
       if (p[1].revents || rin.fd >= 0) pump_reports();
@@ -717,6 +763,10 @@ int main(int argc, char** argv) {
   }
   if (session.summaries().size() > 20) std::printf("  ... %zu more segments\n", session.summaries().size() - 20);
 
+  if (acct_failed) {
+    std::printf("  ACCOUNT CHECK FAILED: %s; not trading (delete %s to start from a new baseline once you have checked the account)\n", acct_why.c_str(), position_file.c_str());
+    return 4;
+  }
   if (lc.close_position && session.net_position() != 0) {
     // the session total (ADR 30): includes what earlier segments left, also when no segment is running now
     const feed::SegmentSummary* last = session.summaries().empty() ? nullptr : &session.summaries().back();

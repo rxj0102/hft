@@ -285,8 +285,9 @@ import threading
 
 class ScriptedExchange:
     """reads order lines, answers each with a report line, optionally with a defect"""
-    def __init__(self, orders_r, reports_w, mode="ok"):
+    def __init__(self, orders_r, reports_w, mode="ok", base=1_000_000, acct="ok"):
         self.orders_r, self.reports_w, self.mode = orders_r, reports_w, mode
+        self.base, self.acct = base, acct      # the account's base balance in lots; what the bridge says about it ("ok", "fail", "none")
         self.seen, self.sent = [], []
         self.garbage_events = 0
         self.filled_one = False
@@ -299,6 +300,8 @@ class ScriptedExchange:
         out.update(kw)
         line = json.dumps(out) + "\n"
         self.sent.append(out)
+        if rt == "fill":
+            self.base += out["qty"] if out["side"] == "buy" else -out["qty"]
         try:
             os.write(self.reports_w, line.encode())
         except OSError:
@@ -310,6 +313,13 @@ class ScriptedExchange:
                 rec = json.loads(line)
                 self.seen.append(rec)
                 t = rec["t"]
+                if t == "hello" and self.acct == "slow":
+                    time.sleep(1.0)                                    # the feed is already waiting when the report comes
+                if t == "hello" and self.acct != "none":
+                    msg = {"t": "acct", "ok": 1, "base_raw": self.base} if self.acct in ("ok", "slow", "twice") else {"t": "acct", "ok": 0}
+                    os.write(self.reports_w, (json.dumps(msg) + "\n").encode())
+                    if self.acct == "twice":                             # a second report (a bridge that saw a second hello) must not matter
+                        os.write(self.reports_w, (json.dumps({"t": "acct", "ok": 1, "base_raw": 7}) + "\n").encode())
                 if self.mode == "silent" or t in ("hello", "end"):
                     continue
                 if self.mode == "garbage" and len(self.seen) % 3 == 0:
@@ -343,24 +353,30 @@ class ScriptedExchange:
                 pass
 
 
-def run_external(mode, feed_text, flatten_s="2", close_exchange_early=False, pace=0.02, extra=()):
+def run_external(mode, feed_text, flatten_s="2", close_exchange_early=False, pace=0.02, extra=(), base=1_000_000, acct="ok"):
     o_r, o_w = os.pipe()          # hft_live -> exchange
     r_r, r_w = os.pipe()          # exchange -> hft_live
     proc = subprocess.Popen([BIN, "--report-s", "1000", "--stale-ms", "5000", "--orders-fd", str(o_w), "--exchange-fd", str(r_r),
                              "--flatten-timeout-s", flatten_s] + list(extra), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, pass_fds=(o_w, r_r))
     os.close(o_w); os.close(r_r)
-    ex = ScriptedExchange(o_r, r_w, mode)
-    for chunk in feed_text:
-        proc.stdin.write(chunk); proc.stdin.flush()
-        time.sleep(pace)
+    ex = ScriptedExchange(o_r, r_w, mode, base, acct)
+    try:
+        for chunk in feed_text:
+            proc.stdin.write(chunk); proc.stdin.flush()
+            time.sleep(pace)
+    except BrokenPipeError:   # hft_live refused to start (the account check) and closed its input
+        pass
     if close_exchange_early:
         try:
             os.close(r_w)
         except OSError:
             pass
         time.sleep(0.3)
-    proc.stdin.close()
+    try:
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
     out, err = proc.communicate(timeout=60)
     ex.th.join(timeout=10)
     return proc.returncode, out, ex
@@ -467,18 +483,21 @@ pf = tempfile.mktemp(suffix=".pos")
 lp = tempfile.mktemp(suffix=".log")
 rc, out, ex = run_external("close_none", ext_feed(30), flatten_s="1", pace=0.03, extra=["--log", lp, "--close-position", "--position-file", pf])
 check(rc == 4 and "POSITION NOT CLOSED" in out, "posfile: an unclosed position is exit 4 (rc=%s)\n%s" % (rc, out[-400:]))
-lots, cash = (int(x) for x in open(pf).read().split())
+lots, cash, baseline = (int(x) for x in open(pf).read().split())
+check(baseline == 1_000_000, "posfile: the first run records the account's balance as the baseline (%d)" % baseline)
+base_after = ex.base
+check(base_after == baseline + lots, "posfile: and the account moved with the position (%d = %d + %d)" % (base_after, baseline, lots))
 check(lots > 0 and cash < 0, "posfile: the file holds the position left at the exchange: %d lots, cash %d" % (lots, cash))
 check(not os.path.exists(pf + ".tmp"), "posfile: no temporary file is left behind")
 
 # a new process with nothing to trade on: it knows the position from the file, cannot price a close, and says so
 rows_before = open(lp).read()
-rc, out, ex = run_external("ok", [], extra=["--log", lp, "--close-position", "--position-file", pf])
+rc, out, ex = run_external("ok", [], extra=["--log", lp, "--close-position", "--position-file", pf], base=base_after)
 check(rc == 4 and "POSITION NOT CLOSED: %d lots left (no live segment to price a close)" % lots in out, "posfile: no feed, a carried position: exit 4, reason named (rc=%s)\n%s" % (rc, out[-400:]))
 check(int(open(pf).read().split()[0]) == lots, "posfile: and the file still holds it")
 
 # a new process with a feed closes the position it was handed, in one order for the whole of it
-rc, out, ex = run_external("close_ok", ext_feed(30), flatten_s="2", pace=0.03, extra=["--close-position", "--position-file", pf])
+rc, out, ex = run_external("close_ok", ext_feed(30), flatten_s="2", pace=0.03, extra=["--close-position", "--position-file", pf], base=base_after + 1)   # one lot off is tolerated
 iocs = [r for r in ex.seen if r["t"] == "new" and r.get("type") == 2]
 check(rc == 0 and len(iocs) == 1, "posfile: the carried position is closed (rc=%s, %d closing orders)\n%s" % (rc, len(iocs), out[-500:]))
 check(iocs and iocs[0]["qty"] >= lots, "posfile: the closing order covers at least the carried %d lots (%s)" % (lots, iocs[:1]))
@@ -487,6 +506,42 @@ fills = [r for r in ex.sent if r["rt"] == "fill"]
 want_cash = cash + sum(-(1 if r["side"] == "buy" else -1) * r["px"] * r["qty"] for r in fills)
 check(int(open(pf).read().split()[1]) == want_cash, "posfile: the cash started from the file's (%d) and moved by the fills: file %s, expected %d" % (cash, open(pf).read().split()[1], want_cash))
 os.remove(pf); os.remove(lp)
+
+# ADR 31: the file is checked against the account before anything is traded
+def acct_case(content, base, acct="ok", feed=None, extra=()):
+    open(pf, "w").write(content)
+    r = run_external("ok", feed if feed is not None else ext_feed(10), flatten_s="1", pace=0.03,
+                     extra=["--close-position", "--position-file", pf] + list(extra), base=base, acct=acct)
+    return r
+
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_095, acct="slow")
+check(rc == 4 and "ACCOUNT CHECK FAILED" in out and "1000095" in out, "account: a balance far from baseline + position is refused (rc=%s)\n%s" % (rc, out[-300:]))
+check(not [r for r in ex.seen if r["t"] != "hello"], "account: and nothing was sent to the exchange although the feed was waiting: %s" % [r["t"] for r in ex.seen])
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_002)
+check(rc == 4 and "ACCOUNT CHECK FAILED" in out, "account: three lots too few is refused (rc=%s)" % rc)
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_003)
+check(rc == 4 and "ACCOUNT CHECK FAILED" in out, "account: two lots too few is refused (rc=%s)" % rc)
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_005, acct="twice")
+check("ACCOUNT CHECK FAILED" not in out and [r for r in ex.seen if r["t"] == "new"], "account: a second report is ignored once the first was looked at (rc=%s)" % rc)
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_006)
+check("ACCOUNT CHECK FAILED" not in out, "account: one lot too many is tolerated (rc=%s)" % rc)
+check(open(pf).read() == "5 -5000000 1000000\n", "account: and the file is untouched")
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_007)
+check(rc == 4 and "ACCOUNT CHECK FAILED" in out, "account: two lots off is refused too (rc=%s)" % rc)
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_004)
+check("ACCOUNT CHECK FAILED" not in out and [r for r in ex.seen if r["t"] == "new"], "account: one lot off is tolerated and trading starts (rc=%s)" % rc)
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_005, acct="fail")
+check(rc == 4 and "ACCOUNT CHECK FAILED" in out and "could not be read" in out, "account: an unreadable balance is refused (rc=%s)" % rc)
+t0 = time.time()
+rc, out, ex = acct_case("5 -5000000 1000000\n", 1_000_005, acct="none")
+check(rc == 4 and "ACCOUNT CHECK FAILED" in out and time.time() - t0 < 30, "account: no report within 10 s is refused (rc=%s, %.0f s)" % (rc, time.time() - t0))
+rc, out, ex = acct_case("5 -5000000\n", 1_000_005, feed=[])
+check("ACCOUNT CHECK FAILED" not in out and open(pf).read().split() == ["5", "-5000000", "1000000"],
+      "account: a file from before the check gets its baseline from the first balance seen: %s" % open(pf).read().split())
+open(pf, "w").write("5 -5000000 1000000\n")
+rc, out, ex = run_external("ok", [], base=7)   # no --position-file: the report is not needed and nothing is checked
+check(rc == 5 and "ACCOUNT CHECK FAILED" not in out, "account: without a position file nothing is checked (rc=%s)" % rc)
+os.remove(pf)
 
 # a file that cannot be written does not stop the run (the warning goes to stderr); the position is still reported
 rc, out, ex = run_external("close_none", ext_feed(30), flatten_s="1", pace=0.03, extra=["--close-position", "--position-file", "/nonexistent-dir/hft.pos"])

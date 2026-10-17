@@ -60,6 +60,8 @@ class FakeExchange:
         self.ioc_fill_fraction = 1.0   # share of an immediate-or-cancel order that finds liquidity at the touch
         self.ioc_record_status = "done"  # what the order record says once the order has been processed ("pending": it does not say yet)
         self.ioc_orders = []           # (side, price, size, filled) of every immediate-or-cancel order
+        self.base_balance = 1.0        # the account's balance in the product's base currency; moves with every fill
+        self.accounts_mode = "ok"       # "fail": GET /accounts answers 500; "nobase": the base currency is missing from the list; "text": its balance is not a number
         self.httpd = None
 
     # ---- helpers for tests ----
@@ -78,6 +80,7 @@ class FakeExchange:
             done += add
             o["filled_size"] = "%.8f" % done
             o["executed_value"] = "%.8f" % (done * float(o["price"]))
+            self.base_balance += add if o["side"] == "buy" else -add
             full = done >= total - 1e-12
             if full:
                 o["status"] = "done"
@@ -306,6 +309,7 @@ class FakeExchange:
                "product_id": o.get("product_id"), "time_in_force": "IOC", "status": self.ioc_record_status, "done_reason": "filled" if full else "canceled",
                "filled_size": "%.8f" % got, "executed_value": "%.8f" % (got * touch)}
         self.done[oid] = rec
+        self.base_balance += got if buy else -got
         self.by_coid[o["client_oid"]] = oid
         self.ioc_orders.append((o["side"], price, size, got))
         self.posted.append((price, size, False))
@@ -324,6 +328,14 @@ class FakeExchange:
             if self.ghost_at and self.nreq == self.ghost_at:
                 self.orders["ghost"] = {"id": "ghost", "client_oid": "ghost", "side": "buy", "price": "1.00", "size": "0.1",
                                         "product_id": "BTC-USD", "status": "open", "filled_size": "0", "executed_value": "0"}
+            if method == "GET" and u.path == "/accounts":
+                if self.accounts_mode == "fail":
+                    return 500, {"message": "internal"}
+                rows = [{"id": "acc-usd", "currency": "USD", "balance": "1000.0000000000000000", "hold": "0", "available": "1000.0000000000000000", "trading_enabled": True}]
+                if self.accounts_mode != "nobase":
+                    rows.append({"id": "acc-base", "currency": "BTC", "balance": "n/a" if self.accounts_mode == "text" else "%.16f" % self.base_balance, "hold": "0.0000000000000000",
+                                 "available": "%.16f" % self.base_balance, "trading_enabled": True})
+                return 200, rows
             if method == "POST" and u.path == "/orders":
                 self.nposts += 1
                 if self.fail_post_number and self.nposts == self.fail_post_number:

@@ -646,6 +646,44 @@ async def drill_loop_carry_restart(feed, port):
         pass
 
 
+async def drill_loop_account_mismatch(feed, port):
+    """Holding a position, hft_live is killed; meanwhile someone trades the account by hand. The restarted process compares the
+    position file with the account (ADR 31), refuses to trade, and the supervisor does not restart it."""
+    import tempfile
+    pf = tempfile.mktemp(suffix=".pos")
+    ex = new_exchange()
+    ex.start_ws()
+    r = loop_run(feed, port, ex, extra=["--close-position", "--position-file", pf], bridge_extra="--ws-fills --ws-url " + ex.ws_url)
+    await until(lambda: len(ex.open_orders()) >= 1, 20)
+    victim = ex.open_orders()[0]
+    ex.best_bid, ex.best_ask = 100.00, 100.10
+    ex.fill(victim["id"])
+    want = 5 if victim["side"] == "buy" else -5
+    check(await until(lambda: live_metric(r, "hft_live_position_lots") == want, 10), "the fill reached hft_live: position %+d lots" % want)
+    def filed():
+        try:
+            return open(pf).read().split()
+        except OSError:
+            return []
+    check(await until(lambda: len(filed()) == 3 and int(filed()[0]) == want, 5), "the file holds position and baseline: %s" % filed())
+    ex.base_balance += 0.001                      # 100 lots bought by hand
+    posts = len(ex.posted)
+    os.kill(r.pid("live", 1), signal.SIGKILL)
+    rc = await asyncio.get_event_loop().run_in_executor(None, lambda: r.p.wait(30))
+    check(rc == 4 and r.sup("fatal_halt"), "the supervisor stops and passes exit 4 on: nobody restarts it (rc=%s)" % rc)
+    check(r.live_events("account_mismatch"), "hft_live logged account_mismatch: %s" % [e.get("why") for e in r.live_events("account_mismatch")][:1])
+    check(len(r.sup("pair_start")) == 2, "it was started exactly twice (%d)" % len(r.sup("pair_start")))
+    check(len(ex.posted) == posts, "and the second process placed no order")
+    check(await until(lambda: len(ex.open_orders()) == 0, 10), "nothing left resting on the exchange")
+    check(filed()[0] == str(want), "and the file was not touched: %s" % filed())
+    ex.stop()
+    r.cleanup()
+    try:
+        os.remove(pf)
+    except OSError:
+        pass
+
+
 DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill_kill_capture),
           ("kill_live", drill_kill_live), ("hang", drill_hang), ("sigterm", drill_sigterm), ("term_ignored", drill_term_ignored),
           ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity),
@@ -654,7 +692,8 @@ DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill
           ("loop_flow", drill_loop_flow), ("loop_fill", drill_loop_fill), ("loop_fill_ws", drill_loop_fill_ws), ("loop_ws_refused", drill_loop_ws_refused), ("loop_slow", drill_loop_exchange_slow),
           ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop),
           ("loop_close", drill_loop_close), ("loop_close_no_liquidity", drill_loop_close_no_liquidity), ("loop_close_off_market", drill_loop_close_off_the_market),
-          ("loop_carry_restart", drill_loop_carry_restart)]
+          ("loop_carry_restart", drill_loop_carry_restart),
+          ("loop_account_mismatch", drill_loop_account_mismatch)]
 
 
 async def main(only):

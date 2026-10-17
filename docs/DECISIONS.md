@@ -32,3 +32,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 28. [When a cancel is accepted, ask the exchange what had traded](adr/0028-ask-the-exchange-what-traded-when-a-cancel-is-accepted.md) (Accepted)
 29. [Close the position with one reduce-only IOC order, only when stopping for good](adr/0029-close-the-position-with-a-reduce-only-ioc-when-stopping.md) (Accepted)
 30. [Carry the position across segments, optionally across runs](adr/0030-carry-the-position-across-segments.md) (Accepted)
+31. [Check the position file against the exchange account before trading](adr/0031-check-the-position-file-against-the-account.md) (Accepted)
