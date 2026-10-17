@@ -49,6 +49,8 @@ class FakeExchange:
         self.posted = []               # (price, size, post_only) of every POST /orders
         self.ws_port, self.ws_loop, self.ws_clients = None, None, set()
         self.ws_mode, self.ws_mute, self.ws_unsent = "ok", False, []
+        self.hide_done = False         # GET /orders/{id} of a finished order answers 404
+        self.fail_get_order = False    # GET /orders/{id} answers 500
         self.ws_cancel_reason = "canceled"
         self.ws_silent = False         # subscribes fine, then never sends an event
         self.ws_subscriptions, self.ws_rejected = 0, 0
@@ -348,7 +350,9 @@ class FakeExchange:
                 return 404, {"message": "NotFound"}
             if method == "GET" and u.path.startswith("/orders/") and not u.path.startswith("/orders/client:"):
                 oid = u.path[len("/orders/"):]
-                rec = self.orders.get(oid) or self.done.get(oid)
+                if self.fail_get_order:
+                    return 500, {"message": "internal"}
+                rec = self.orders.get(oid) or (None if self.hide_done else self.done.get(oid))
                 if rec and self.omit_filled_size:
                     rec = {k: v for k, v in rec.items() if k != "filled_size"}
                 return (200, rec) if rec else (404, {"message": "NotFound"})

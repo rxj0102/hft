@@ -71,6 +71,7 @@ First runs: 6 of the 28 bridge bugs and 4 of the 15 C++ bugs survived. Each was 
 | `FAIL 7 ... filled_size field MISSING` | The closed loop finds fills from this field; it would need a different method. |
 | `PASS 8 cross ... does NOT recognise` | The refusal worked but its message does not contain "post only"; the bridge would report the reason as `other` instead of `cross`. The OMS treats both as a rejection, so this is cosmetic, but tell me the message and the bridge can match it. |
 | `FAIL 6 websocket` | The socket was refused or never confirmed the subscription. Fills then come from the REST sync only (run the bridge without `--ws-fills`). The message in the line is the exchange's own. |
+| `FAIL 9 cancel ... filled_size MISSING` or `afterwards HTTP 404` | After a cancel the bridge reads the order to see what traded. If the exchange does not keep or does not describe cancelled orders, a fill that races a cancel can be missed (ADR 28). |
 | `FAIL 7 ws events` | Subscribed, but the order produced no event on the channel: `--ws-fills` would not see fills either. |
 | `FAIL 8 ... ACCEPTED` | The exchange accepted a crossing post-only order. Do not run the bridge. |
 | `FAIL 12 bridge` | Read the line: the reports seen, the exit code, whether it ended flat. |

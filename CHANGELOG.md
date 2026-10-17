@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 16
+- No fill lost around a cancel or replace (ADR 28, CLOSED_LOOP.md): after the exchange accepts a DELETE, the loop bridge reads the order (`GET /orders/{id}`) and takes `filled_size` as the authority. Lots it had not reported are sent as a `fill` before the `canceled` or `replaced` report, which then carries only what was left; an order the record shows as filled completely gets `cancel_rejected` / `replace_rejected`. The record is capped at the order's size; a 404 invents nothing; an unreadable record is logged (`cancel_unverified`) and counted. This closes the gap named in Phase 15 and works with or without the websocket. Cost: a cancel is two calls, a replace three.
+- Tests: `test_bridge.py` 186 checks (new section: cancel and replace with a fill just before the DELETE, a record larger than the order, a missing or unreadable record, part of a fill from the socket and part from the record). The fake exchange gained `hide_done` and `fail_get_order`. The smoke test's cancel step now also requires `filled_size` on the cancelled order's record (`test_smoke.py`, 33 checks). 10 mutants of the new code, all caught on the first run.
+- Not shown: the real exchange's record of a cancelled order (how long it is kept, whether it has `filled_size`). If it is missing, the cancel is reported from the bridge's own tally, as before, and the smoke test says so.
+
 ### Phase 15
 - Fills from the websocket (ADR 27, CLOSED_LOOP.md): `order_bridge.py --loop --ws-fills` subscribes to the authenticated `user` channel in a thread of its own. A `match` for a working order is reported as a `fill` at the match price at once; the REST sync stays as the authority and, because both paths only raise the lots already reported, each lot is reported once. A (re)subscription or a `done` event for a working order triggers a sync immediately; a fill that comes just before a cancel or replace is read from the socket after the DELETE's answer. A refused or dropped socket is retried (1 s to 15 s) and is not fatal. The websocket URL is guarded like the REST one (sandbox, or ws://127.0.0.1 in test mode).
 - The fake exchange gained a `user` channel (checks the signature with its own code; received/open/match/done events; drop, mute and refuse-auth controls).

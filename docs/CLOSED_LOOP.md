@@ -29,16 +29,16 @@ Every request is carried out and answered by exactly one report line on stdout (
 | Request | Exchange calls | Report |
 |---|---|---|
 | new | POST (post-only limit) | `accepted`; `rejected` with reason `cross` (post-only), `badqty`/`badprice` (exchange text, or the local size and notional caps), `other` (a reply that was lost: the order is also cancelled by client id) |
-| replace | DELETE old, POST new | `replaced`; if the new order is refused the old one is already gone, so `canceled`; if the cancel finds nothing, `replace_rejected` (the sync then says what happened) |
-| cancel | DELETE | `canceled` (size removed); `cancel_rejected` when the order is unknown or already gone |
+| replace | DELETE old, GET old (what traded?), POST new | any fill found in the record first, then `replaced`; if the new order is refused the old one is already gone, so `canceled`; if the cancel finds nothing, `replace_rejected` (the sync then says what happened) |
+| cancel | DELETE, GET the order (what traded?) | any fill found in the record first, then `canceled` (the size that was left); `cancel_rejected` when the order is unknown, already gone, or turns out to have filled completely |
 | (sync, every `--sync-s`) | GET open orders, GET one order | `fill` for new fills (price is the order's limit price, not the exchange's executed value), `canceled` for an order that vanished, stray orders cancelled silently |
 | end of segment | DELETE for orders still resting | none (orphans from a flatten that failed) |
 
-The OMS allows one request in flight per order, so nothing is coalesced here; the rate limit (`--rate`, default 8/s) just queues requests. A replace costs two calls, so each quote move takes at least two round trips.
+The OMS allows one request in flight per order, so nothing is coalesced here; the rate limit (`--rate`, default 8/s) just queues requests. A replace costs three calls (cancel, a look at what traded, new order), so each quote move takes at least three round trips; a cancel costs two. The look is what keeps a fill that came just before the cancel from being lost (ADR 28).
 
 ## What it costs, honestly
 
-- The strategy now trades against exchange latency. A quote move takes the time of two REST calls; in the drills with 0.4 s per call, a stop took about 1.9 s to confirm. Against the real sandbox this is unmeasured.
+- The strategy now trades against exchange latency. A quote move takes the time of three REST calls; in the drills with 0.4 s per call, a stop took about 1.9 s to confirm. Against the real sandbox this is unmeasured.
 - A reconnect or a window exit used to take about 120 ms to quote again; it now also includes the wait for cancel confirmations.
 - Without `--ws-fills`, fills are found by polling. With `--sync-s 5` a filled order can look alive for up to five seconds. Use a shorter interval in loop mode (`--sync-s 1`), at the price of more calls. With `--ws-fills` (below) the socket delivers fills at once and the sync can be slow.
 - There is no replay of an exchange run: it depends on timing. The paper mode stays the deterministic one.
@@ -69,8 +69,14 @@ Real sandbox run; partial-fill handling beyond what the sync sees; closing posit
 | subscription (first or after a drop) | a sync now, to find what happened while the socket was away |
 | `error` (for example authentication) | logged as `ws_error`; retried with a pause of 1 to 15 s; the sync carries on alone |
 
-A `match` never takes an order past its size. A fill that arrives just before a cancel or replace is read from the socket after the DELETE has been answered, so the cancel report counts only what was left (the delay between the exchange's event and its HTTP answer is assumed to be small: the order of the two is not guaranteed by the exchange, and a fill that arrives after the DELETE's answer is found by the next sync only if the order is still tracked, which it is not after a cancel; that fill is then lost to the OMS).
+A `match` never takes an order past its size. A fill that arrives just before a cancel or replace is taken from the socket after the DELETE has been answered, and then the exchange's own record of the order is read (ADR 28): whichever shows more lots decides, and anything the socket missed is reported before the cancel or replace report.
 
 Metrics: `hft_bridge_ws_subscribed` (gauge), `ws_connects`, `ws_messages`, `ws_bad_messages`, `ws_errors`, `ws_failures`, `ws_fills` and the three counters above. Events in `bridge.jsonl`: `ws_subscribed`, `ws_error`, `ws_failed`, `ws_closed`.
 
 Evidence: six scenarios in `test_bridge.py` (fill without a sync, socket and sync together, a lost event, a fill racing a cancel and a replace, an order cancelled elsewhere, a refused socket, a reconnection) against a fake `user` channel that checks the signature with its own code; the drills `loop_fill_ws` (sync a minute away, position in hft_live within seconds) and `loop_ws_refused`. Not shown: the real feed, its message order relative to HTTP answers, or its behaviour under load.
+
+## A fill around a cancel (ADR 28)
+
+After the exchange accepts a DELETE (cancel or the first half of a replace) the bridge reads the order (`GET /orders/{id}`) and compares `filled_size` with the lots it has reported. Lots it had not heard of are reported as a `fill` (at the order's limit price) before the `canceled` or `replaced` report, so the OMS never sees a cancel for lots that were bought, and the cancel report carries only what was left. An order the record shows as filled completely gets `cancel_rejected` (or `replace_rejected`). The record is capped at the order's size. If the record is not found (404: a cancelled order without fills may no longer be on file) nothing is invented; if it cannot be read (5xx, timeout, malformed) the cancel is reported from the bridge's own tally, logged as `cancel_unverified` and counted (`hft_bridge_cancel_unverified_total`), and the next sync is the only other chance to see the fill. Counter `hft_bridge_fills_at_cancel_total` counts fills found this way. The smoke test checks that `GET /orders/{id}` after a cancel returns `done_reason` and `filled_size`.
+
+Evidence: `test_bridge.py` (cancel and replace with a fill just before the DELETE, with and without the socket, a record that says more than the order's size, a record that is missing or unreadable, a fill part from the socket and part from the record); a mutation run of the new code. Not shown: the real exchange's behaviour for a cancelled order's record.

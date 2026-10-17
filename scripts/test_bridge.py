@@ -555,7 +555,7 @@ def test_loop_latency_and_segments():
     t0 = time.monotonic()
     b.send({"t": "rep", "seg": 2, "id": 1, "px": px(79010.00), "qty": 5})
     until(lambda: b.reps("replaced"), 20)
-    check(time.monotonic() - t0 >= 0.3, "a replace takes two round trips (%.2f s at 0.15 s each way)" % (time.monotonic() - t0))
+    check(time.monotonic() - t0 >= 0.45, "a replace takes three round trips: cancel, a look at what traded, new order (%.2f s at 0.15 s each way)" % (time.monotonic() - t0))
     ids = [(r["seg"], r["id"], r["rt"]) for r in b.reports]
     check(ids == [(1, 1, "accepted"), (2, 1, "accepted"), (2, 1, "replaced")], "reports in request order: %s" % ids)
     rc, _ = b.finish("eof", 30)
@@ -718,6 +718,30 @@ def test_ws_fills():
     b.finish("eof")
     ex.stop()
 
+    # 3d. one part of the fill came over the socket, a later part is only in the exchange's record: each is reported once
+    ex, tmp = fresh("ws3d")
+    ex.start_ws()
+    b = ws_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("ws_subscribed"))
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    oid = ex.open_orders()[0]["id"]
+    ex.fill(oid, 0.00004)
+    until(lambda: b.reps("fill"))
+
+    def late(o):
+        ex.ws_mute = True                                          # the event for these 3 lots never reaches the bridge
+        ex.fill(o, 0.00003)
+        ex.ws_unsent.clear()
+        ex.ws_mute = False
+    ex.before_cancel = late
+    b.send({"t": "can", "seg": 1, "id": 1})
+    check(until(lambda: b.reps("canceled")), "cancel answered")
+    kinds = [(r["rt"], r["qty"], r["leaves"]) for r in b.reports if r["rt"] in ("fill", "canceled")]
+    check(kinds == [("fill", 4, 6), ("fill", 3, 3), ("canceled", 3, 0)], "4 lots from the socket, 3 from the record, 3 cancelled: %s" % kinds)
+    b.finish("eof")
+    ex.stop()
+
     # 3a. the socket says the order filled completely while the exchange still accepted our cancel: the fill is reported
     # and the cancel is not (the OMS must not be told that a filled order was cancelled)
     ex, tmp = fresh("ws3a")
@@ -817,6 +841,64 @@ def test_ws_fills():
     ex.stop()
 
 
+def test_fill_around_cancel():
+    print("a fill around a cancel or replace is never lost (no websocket: the exchange's own record decides)")
+    for what in ("can", "rep"):
+        ex, tmp = fresh("fc" + what)
+        b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+        until(lambda: b.events("start_flat"))
+        b.send(hello(), new(1, px(81000.00), qty=10))
+        until(lambda: b.reps("accepted"))
+        ex.before_cancel = lambda oid: ex.fill(oid, 0.00004)           # 4 lots trade just before the DELETE is processed
+        b.send({"t": "can", "seg": 1, "id": 1} if what == "can" else {"t": "rep", "seg": 1, "id": 1, "px": px(80990.00), "qty": 10})
+        final = "canceled" if what == "can" else "replaced"
+        check(until(lambda: b.reps(final)), "%s answered" % what)
+        kinds = [(r["rt"], r["qty"], r["leaves"]) for r in b.reports if r["rt"] in ("fill", "canceled", "replaced")]
+        want = [("fill", 4, 6), ("canceled", 6, 0)] if what == "can" else [("fill", 4, 6), ("replaced", 10, 10)]
+        check(kinds == want, "the 4 lots are reported before the %s: %s" % (final, kinds))
+        f = b.reps("fill")[0]
+        check(f["px"] == px(81000.00), "at the order's limit price")
+        time.sleep(0.5)
+        check(prom_value(tmp, "hft_bridge_fills_at_cancel_total") == 1, "and counted")
+        rc, _ = b.finish("eof")
+        check(rc == 0, "exit 0")
+        ex.stop()
+
+    # more traded than the order's size (a broken record) is capped
+    ex, tmp = fresh("fc3")
+    b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+    until(lambda: b.events("start_flat"))
+    b.send(hello(), new(1, px(81000.00), qty=10))
+    until(lambda: b.reps("accepted"))
+    def liar(oid):
+        with ex.lock:
+            ex.orders[oid]["filled_size"] = "0.00500000"             # 500 lots on a 10-lot order
+    ex.before_cancel = liar
+    b.send({"t": "can", "seg": 1, "id": 1})
+    check(until(lambda: b.reps("cancel_rejected")), "an order that the record says is filled completely: the cancel is refused")
+    f = b.reps("fill")
+    check(len(f) == 1 and f[0]["qty"] == 10 and f[0]["leaves"] == 0, "after a fill capped at the order's size: %s" % f)
+    b.finish("eof")
+    ex.stop()
+
+    # the record is gone (404): nothing is invented; unreadable (500): counted
+    for knob, counter, expect in (("hide_done", "cancel_unverified", 0), ("fail_get_order", "cancel_unverified", 1)):
+        ex, tmp = fresh("fc4")
+        setattr(ex, knob, True)
+        b = loop_bridge(ex, tmp, ["--sync-s", "600"])
+        until(lambda: b.events("start_flat"))
+        b.send(hello(), new(1, px(81000.00), qty=10))
+        until(lambda: b.reps("accepted"))
+        b.send({"t": "can", "seg": 1, "id": 1})
+        check(until(lambda: b.reps("canceled"), 20), "%s: the cancel is still answered" % knob)
+        c = b.reps("canceled")[0]
+        check(c["qty"] == 10 and not b.reps("fill"), "with the whole order as left: %s" % c)
+        time.sleep(0.5)
+        check((prom_value(tmp, "hft_bridge_cancel_unverified_total") or 0) == expect, "unverified cancels counted: %s" % prom_value(tmp, "hft_bridge_cancel_unverified_total"))
+        b.finish("eof")
+        ex.stop()
+
+
 if __name__ == "__main__":
     live = sys.argv[1] if len(sys.argv) > 1 else None
     test_signing()
@@ -833,6 +915,7 @@ if __name__ == "__main__":
     test_loop_fills_and_vanished()
     test_loop_latency_and_segments()
     test_ws_fills()
+    test_fill_around_cancel()
     test_hft_live_mirror(live)
     print("test_bridge: " + ("all checks passed" if not fails else "%d FAILED" % fails))
     sys.exit(1 if fails else 0)

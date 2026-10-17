@@ -437,6 +437,7 @@ class Bridge:
                      "http_5xx", "place_unknown", "refused_local", "refused_max_open", "vanished", "strays", "bad_lines",
                      "cancel_all_cancelled", "fills", "orphans", "reports_accepted", "reports_rejected", "reports_canceled",
                      "reports_replaced", "reports_fill", "reports_cancel_rejected", "reports_replace_rejected",
+                     "fills_at_cancel", "cancel_unverified",
                      "ws_connects", "ws_messages", "ws_bad_messages", "ws_errors", "ws_failures", "ws_fills", "ws_matches_unknown_order",
                      "ws_matches_bad", "ws_matches_already_reported"):
             g("hft_bridge_%s_total" % name, name.replace("_", " ") + ".", self.cnt[name])
@@ -551,6 +552,35 @@ class LoopBridge(Bridge):
             return "gone"
         return "error"
 
+    def settle(self, k, v):
+        """The exchange has accepted our DELETE of order k. How much of it had traded? The exchange's own record is the
+        authority (the socket and the sync may not have told us yet): a fill that came just before the cancel is reported
+        now, ahead of the cancel or replace report, so the OMS never sees a cancel for lots that were bought.
+        Returns the lots filled in all (never more than the order's size)."""
+        self.drain_ws()
+        done = self.filled.get(k, 0)
+        for _ in range(5):
+            st, d = self.req("GET", "/orders/" + v["oid"])
+            if st != 429:
+                break
+        else:
+            st, d = None, None
+        if st == 200 and isinstance(d, dict) and "filled_size" in d:
+            try:
+                theirs = min(self.lots_of(d["filled_size"]), v["qty"])
+            except (ValueError, TypeError):
+                theirs = done
+                self.cnt["cancel_unverified"] += 1
+            if theirs > done:
+                self.cnt["fills_at_cancel"] += 1
+                self.filled[k] = theirs
+                self.report(k, "fill", px=v["px"], qty=theirs - done, leaves=v["qty"] - theirs, side=v["side"])
+                done = theirs
+        elif st != 404:  # 404: a cancelled order with no fills may no longer be on file; anything else we could not check
+            self.cnt["cancel_unverified"] += 1
+            self.log.emit("cancel_unverified", seg=k[0], id=k[1], status=st)
+        return done
+
     def handle(self, m):
         t = m["t"]
         if t == "end":
@@ -584,11 +614,12 @@ class LoopBridge(Bridge):
                 return
             res = self.delete(v["oid"])
             if res == "ok":
-                self.drain_ws()  # a fill that came just before the cancel is already on the socket
-                if k not in self.live:  # filled completely while we cancelled: the fill has been reported
+                done = self.settle(k, v)  # a fill that came just before the cancel is reported first
+                if k not in self.live or done >= v["qty"]:  # filled completely: the fill has been reported
+                    self.live.pop(k, None)
                     self.report(k, "cancel_rejected", reason="unknown")
                     return
-                left = v["qty"] - self.filled.get(k, 0)
+                left = v["qty"] - done
                 self.live.pop(k)
                 self.report(k, "canceled", px=v["px"], qty=left, leaves=0, reason="user", side=v["side"])
             else:  # gone (filled or cancelled elsewhere: the sync will say which) or an error: the order stays ours
@@ -602,8 +633,9 @@ class LoopBridge(Bridge):
             if res != "ok":
                 self.report(k, "replace_rejected", reason="unknown")
                 return
-            self.drain_ws()
-            if k not in self.live:
+            done = self.settle(k, v)
+            if k not in self.live or done >= v["qty"]:
+                self.live.pop(k, None)
                 self.report(k, "replace_rejected", reason="unknown")
                 return
             self.live.pop(k)

@@ -299,9 +299,10 @@ def main(argv=None):
     # 9 ---------------------------------------------------------------------------------------------------------------
     st, js = api.call("cancel", "DELETE", "/orders/" + oid)
     st2, one = api.call("get_order", "GET", "/orders/" + oid)
-    done = isinstance(one, dict) and one.get("done_reason") == "canceled"
-    if not step(9, "cancel", st == 200 and st2 == 200 and done, "DELETE HTTP %s; afterwards HTTP %s, status %s, done_reason %s" % (
-            st, st2, one.get("status") if isinstance(one, dict) else None, one.get("done_reason") if isinstance(one, dict) else None)):
+    done = isinstance(one, dict) and one.get("done_reason") == "canceled" and "filled_size" in one
+    if not step(9, "cancel", st == 200 and st2 == 200 and done, "DELETE HTTP %s; afterwards HTTP %s, status %s, done_reason %s, filled_size %s (the bridge reads it after every cancel)" % (
+            st, st2, one.get("status") if isinstance(one, dict) else None, one.get("done_reason") if isinstance(one, dict) else None,
+            "present" if isinstance(one, dict) and "filled_size" in one else "MISSING")):
         return finish(1, args)
 
     if ws_ok:
