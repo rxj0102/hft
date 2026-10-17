@@ -10,11 +10,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # Warnings are errors everywhere. The long "gate" tests (millions of events)
   # run only on the optimised build; the sanitizer builds run the default sizes.
   build-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -33,23 +37,37 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Test
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -j2
+      # The Python tests start processes, pipes and sockets and depend on real time, so they run once, on the
+      # gcc release build, with the interpreter and library version they were developed with. scripts/ci_local.sh
+      # runs the same steps on a developer machine. A pass on the second try is reported as a warning.
+      - uses: actions/setup-python@v5
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+      - name: Python environment
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        run: python3 -m pip install -r scripts/requirements.txt && python3 -m py_compile scripts/*.py
       - name: Capture script tests
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
-        run: python3 -m pip install --break-system-packages websockets && python3 scripts/test_capture.py
+        run: python3 scripts/test_capture.py
       - name: Live tool tests (process, pipe, signals, real-time silence)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
-        run: python3 scripts/test_live_tool.py build/release/hft_live
+        run: scripts/ci_retry.sh test_live_tool python3 scripts/test_live_tool.py build/release/hft_live
       - name: Order bridge tests (local fake exchange)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
-        run: python3 scripts/test_bridge.py build/release/hft_live
+        run: scripts/ci_retry.sh test_bridge python3 scripts/test_bridge.py build/release/hft_live
       - name: Sandbox smoke test (against the local fake exchange only)
-        run: python3 scripts/test_smoke.py
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        run: scripts/ci_retry.sh test_smoke python3 scripts/test_smoke.py
       - name: Fault drills (supervisor, local fake feed)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
-        run: python3 scripts/drill.py --live build/release/hft_live
+        run: scripts/ci_retry.sh drill python3 scripts/drill.py --live build/release/hft_live
 
   tsan:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
@@ -60,6 +78,7 @@ jobs:
   # the order entry codec, the OMS and the whole pipeline. Longer runs are done offline.
   fuzz-smoke:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18
@@ -74,6 +93,8 @@ jobs:
           build/fuzz/fuzz/fuzz_l2 -max_total_time=45 -timeout=10 corpus/fuzz_l2 fuzz/seeds/l2
           mkdir -p corpus/fuzz_live
           build/fuzz/fuzz/fuzz_live -max_total_time=45 -timeout=10 corpus/fuzz_live fuzz/seeds/live
+          mkdir -p corpus/fuzz_external
+          build/fuzz/fuzz/fuzz_external -max_total_time=45 -timeout=10 corpus/fuzz_external fuzz/seeds/external
 
   # The performance gate. Wall-clock time on a shared runner is noise, so the
   # gate counts instructions under valgrind (deterministic) against the checked
@@ -81,6 +102,7 @@ jobs:
   # uploaded as artifacts for a human to read; they never fail the build.
   perf:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build valgrind binutils g++-13

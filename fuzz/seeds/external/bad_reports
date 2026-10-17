@@ -1,0 +1,18 @@
+#1	start	u	p
+1000	{"type":"snapshot","product_id":"BTC-USD","bids":[["100.00","3"],["99.99","2"],["99.98","4"]],"asks":[["100.10","3"],["100.11","2"],["100.12","4"]]}
+2000	{"type":"l2update","product_id":"BTC-USD","changes":[["buy","100.00","3"]],"time":"t"}
+3000	{"type":"l2update","product_id":"BTC-USD","changes":[["buy","100.00","4"]],"time":"t"}
+4000	{"type":"l2update","product_id":"BTC-USD","changes":[["buy","100.00","5"]],"time":"t"}
+5000	{"type":"l2update","product_id":"BTC-USD","changes":[["buy","100.00","6"]],"time":"t"}
+6000	{"type":"l2update","product_id":"BTC-USD","changes":[["buy","100.00","2"]],"time":"t"}
+7000	{"type":"l2update","product_id":"BTC-USD","changes":[["buy","100.00","7"]],"time":"t"}
+@a1
+@r1,2,3
+@r2,0,9
+@r10,1,5
+@f5
+@f12
+@s
+@a1
+@r2,3,4
+@p100

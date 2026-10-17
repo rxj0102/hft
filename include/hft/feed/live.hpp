@@ -101,7 +101,7 @@ struct SegmentSummary {
   std::uint64_t frames_total = 0;
   std::uint64_t flatten_rounds = 0, flatten_sim_ns = 0;
   std::uint32_t open_before_flatten = 0;
-  std::int64_t net_position_lots = 0;  // signed filled quantity at the end of the segment (flatten cancels orders, it does not close positions)
+  std::int64_t net_position_lots = 0;  // signed filled quantity at the end of the segment (a flatten only cancels orders; --close-position closes it, ADR 29)
   std::uint64_t fills = 0;  // orders the flatten had to take down
   std::uint32_t close_attempts = 0;    // closing orders sent (close_position)
   std::int64_t closed_lots = 0;        // |position| before closing minus |position| after

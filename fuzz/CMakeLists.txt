@@ -52,3 +52,9 @@ add_executable(fuzz_live fuzz_live.cpp)
 target_link_libraries(fuzz_live PRIVATE hft_core)
 target_compile_options(fuzz_live PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
 target_link_options(fuzz_live PRIVATE -fsanitize=fuzzer,address,undefined)
+
+# Live session against an external venue with position closing: the input also plays the exchange (answers, fills, bad reports).
+add_executable(fuzz_external fuzz_external.cpp)
+target_link_libraries(fuzz_external PRIVATE hft_core)
+target_compile_options(fuzz_external PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined)
+target_link_options(fuzz_external PRIVATE -fsanitize=fuzzer,address,undefined)
