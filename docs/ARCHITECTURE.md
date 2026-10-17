@@ -1,12 +1,12 @@
 # Architecture
 
-This is the as-built architecture at release 0.1.0. `DESIGN.md` is the phase-by-phase log with the measurements behind each piece; this document is the map.
+This is the as-built architecture. The core below (everything up to the gateway) is as released in 0.1.0; since then phases 10 to 21 added the live paper session, the supervisor, the sandbox bridge, the closed loop, closing orders, carried positions, the account check and the PnL report. [architecture.svg](architecture.svg) shows the whole system as it is now and [../README.md](../README.md) summarises the later pieces; the text below describes the single-process core. `DESIGN.md` is the phase-by-phase log with the measurements behind each piece; this document is the map.
 
 ## What this is, and what it is not
 
 A tick-to-trade engine in C++20, built as header-only libraries plus tests, benches and fuzzers. Everything runs against a synthetic exchange (and, offline, against recorded real market data): a matching engine and ITCH-style feed publisher in `sim/`, an order-entry wire protocol in `gw/`, and a queue-aware backtester in `bt/`.
 
-It is not a deployable trading binary. There is no NIC driver, no kernel-bypass code, no live exchange connection, and no FIX parser. Those are listed under "Not built" below. The measured path starts when packet bytes are handed to the pipeline and ends when the reaction frames are staged in a buffer.
+It is not a deployable trading binary. There is no NIC driver, no kernel-bypass code and no FIX parser. The live connections added after 0.1.0 (a public feed and a sandbox bridge) are Python and sit outside the measured path; the bridge has never run against the real sandbox. Those are listed under "Not built" below. The measured path starts when packet bytes are handed to the pipeline and ends when the reaction frames are staged in a buffer.
 
 ## Data flow
 

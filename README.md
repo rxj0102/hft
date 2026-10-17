@@ -1,44 +1,47 @@
 # hft
 
-[![ci](https://github.com/rxj0102/hft/actions/workflows/ci.yml/badge.svg)](https://github.com/rxj0102/hft/actions/workflows/ci.yml) See [docs/CI.md](docs/CI.md).
+[![ci](https://github.com/rxj0102/hft/actions/workflows/ci.yml/badge.svg)](https://github.com/rxj0102/hft/actions/workflows/ci.yml)
 
-A tick-to-trade engine in C++20, built in phase gates with measurement at every step: ITCH-style market data in, order book, a market-making strategy, pre-trade risk, an OMS and an order-entry gateway, with a matching-engine exchange simulator and a queue-aware backtester around it.
+A tick-to-trade engine in C++20, built in phase gates with a measurement or a test at every gate. Market data goes in, an order book, a market-making strategy, pre-trade risk, an order management system and an order-entry gateway react in about 115 to 130 ns at the median on a shared VM (hot caches), and around that sit the pieces that make it something you could point at an exchange: a supervisor, a bridge to the Coinbase Exchange sandbox, a closed loop for fills, a position that survives restarts, and a PnL report.
 
-It runs against a synthetic exchange. There is no live connectivity, no NIC driver and no deployable trading binary. Read "Limits" before quoting any number.
+**Honest status:** the C++ pipeline, the replay oracle, the fuzzers and the drills are built and tested. The sandbox bridge and everything that depends on a real exchange (closed loop, closing orders, account check, PnL on real fills) have only run against a local fake exchange written from the public API documentation. No API key was available, so the real sandbox has never been run. [docs/RESULTS.md](docs/RESULTS.md) says exactly what was measured, how, and what was not.
 
-## Measured latency
+![Architecture](docs/architecture.svg)
 
-Packet bytes in to reaction frames staged, hot caches, shared 2-vCPU VM at 2.8 GHz, synthetic market (7233 of 311k packets caused an order):
+## Numbers
 
-| | p50 | p99 | p99.9 |
-|---|---|---|---|
-| tick-to-trade | 128-160 ns | 230-380 ns | 450-560 ns |
-| tick-to-decision (no order) | about 72 ns | about 150 ns | 370 ns |
-| tick-to-trade, cold L1/L2 | about 0.97 us | 2.1-2.9 us | |
+Measured on a shared 2-vCPU Xeon VM at 2.1 GHz, gcc 13.3, one core pinned. Full method, caveats and commands in [docs/RESULTS.md](docs/RESULTS.md).
 
-The range is run to run on the same VM, hours apart (128 ns early in the session, about 160 ns later, both gcc builds equal). A shorter 100,000-request run gave 248 ns because it has only 2414 order ticks and a cold start; use 300,000 requests or more. Per-stage budget, cache analysis and method are in [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md). Cache and branch figures come from a simulator because the sandbox has no hardware counters, and are labelled that way.
+| | p50 | p99 |
+|---|---|---|
+| packet bytes in to order frame staged, hot caches | 115 to 127 ns | 213 to 270 ns |
+| packet in to decision, no order | 71 ns | 150 ns |
+| same, cold L1 and L2 | about 1.0 to 1.1 us | 3.5 to 4.1 us |
+| sustained throughput | 15.5 to 16.9 million inputs per second | |
 
-## Real data
+These exclude the NIC, kernel, TLS, JSON parsing and the exchange, and p99.9 and max are mostly noise from the VM. A callgrind instruction-count gate (797.80 instructions per input) runs in CI because wall-clock time on a shared runner is not reliable enough to gate on.
 
-`hft_replay` runs recorded Coinbase BTC-USD level-2 data through the same pipeline and checks the book against an independent model and against the exchange's own snapshot (20/20, 18/20 and 20/20 identical levels on three live captures). Per feed message the engine costs about 60 ns on this VM; a real packet carries about 14 messages, so per-packet time is about 0.5 us at p50 and 3-4 us at p99. This is offline replay and the paper venue never fills. See [docs/LIVE_FEED.md](docs/LIVE_FEED.md).
+## What is in it
 
-`hft_live` runs the same pipeline on the live public feed in real time against that paper venue (`capture_l2.py --out - | hft_live`): it pulls every quote when the connection drops, the price leaves the grid or the feed goes silent for 3 s, checks the book against the independent model as it runs, and on Ctrl-C or SIGTERM latches the kill switch and cancels everything. Fed the same lines, it puts the same bytes on the wire as the offline replay. At real market spacing, one update message costs about 60-65 us end to end in this tool (JSON parsing included), against about 17-18 us when the same messages are replayed back to back. No order leaves the machine. See [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md).
+**The hot path** (`include/hft`, header-only): feed handler with A/B line arbitration, gap detection and snapshot recovery; order book with flat price levels and intrusive order lists; market maker with an imbalance signal and inventory skew; pre-trade risk with a latched kill switch; an eight-state OMS; a length-prefixed order-entry protocol. No heap, exceptions, RTTI, virtual calls, locks or syscalls on the path; this is checked by compiler flags, an allocation trap and a page-fault check in the benchmark.
 
-`scripts/supervise.py` keeps the capture and `hft_live` running (restart with backoff, crash-loop limit, a watchdog on the metrics file, SIGTERM as the kill path, no restart after an integrity verdict), and `hft_live` writes a JSON event log and Prometheus metrics. `scripts/drill.py` injects eleven faults (connection drop, silence, kill -9 of either process, a hang, SIGTERM, a crash loop, an integrity exit and others) against a local fake feed and checks the outcome. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
+**Around it, offline:** a matching engine and exchange simulator, a queue-aware backtester, and a byte-exact replay oracle: a backtest is recorded and replayed through the production pipeline, and the wire bytes must be identical before the benchmark prints any latency.
 
-`scripts/order_bridge.py` mirrors the strategy's orders to the Coinbase Exchange sandbox over signed REST (post-only, paced under the rate limit, coalesced, cancel-all at start and exit, sandbox URL only, keys from environment variables only). It is a mirror, not a closed loop: the exchange's reports do not reach the strategy. It has been tested against a local fake exchange only; no sandbox key was available. See [docs/SANDBOX.md](docs/SANDBOX.md).
+**Live, paper:** `hft_live` runs the same pipeline on the live public Coinbase level-2 feed against a paper venue, with guards for a dropped connection, a price off the grid and a silent feed, and it checks its own book against an independent model while running.
 
-With `--loop` the loop is closed: the exchange's acks, rejects, cancels and fills go back into the OMS and an end of trust finishes only when the exchange has confirmed the cancels (or a timeout fails the flatten). Against the local fake exchange only. See [docs/CLOSED_LOOP.md](docs/CLOSED_LOOP.md). Everything runs against the paper venue; what a real exchange does with orders left working after a kill -9 is not shown. With `--close-position` a stop for good also closes the position with immediate-or-cancel orders (priced from the local book, checked against the exchange's own quote by the bridge) and exits 4, loudly, if it cannot; a position left by a routine segment end or a restart is not closed. None of this has run against the real sandbox.
+**Live, sandbox (mirror and closed loop):** `scripts/order_bridge.py` carries the strategy's orders to the sandbox over signed REST (post-only quotes, rate-limited, price and notional checks, sandbox URL only, keys from environment variables only). With `--loop` the exchange's acks, fills and cancels go back into the OMS, and a segment ends only when the exchange has confirmed the cancels. With `--close-position` a stop closes the position with a reduce-only immediate-or-cancel order and exits 4, loudly, if it cannot. The position and cash are carried across reconnects and, with `--position-file`, across restarts, and a restarted process refuses to trade if the account balance disagrees with the file.
 
-## What is in the box
+**Operations:** `scripts/supervise.py` restarts with backoff, watches the metrics file, treats SIGTERM as the kill path and does not restart after an integrity verdict. `scripts/drill.py` injects 28 faults and checks the outcome. `scripts/pnl_report.py` turns the event log into PnL, edge against the mid, markouts and inventory.
 
-- Hot path with no heap, exceptions, RTTI, virtual calls, locks or syscalls (compiled with `-fno-exceptions -fno-rtti`; allocation-free by test; page-fault-free by bench check).
-- Byte-exact replay oracle: a backtest is recorded and replayed through the production pipeline; the wire bytes must match before any latency number is printed.
-- Order book, A/B feed arbitration with gap handling and snapshot recovery, OMS with an eight-state machine, pre-trade risk with a latched kill switch, length-prefixed order-entry protocol.
-- Matching engine and exchange simulator, backtester with queue-position fills validated against the engine.
-- Six libFuzzer targets, mutation checks at every phase, ASan/UBSan/TSan, gcc and clang, a callgrind instruction-count regression gate.
+## How it was checked
 
-## Build
+- Sanitizers (ASan, UBSan, TSan), gcc and clang, 18 CTest suites, Python test suites for the scripts (capture, live tool, bridge, smoke test, PnL report) plus the drills.
+- Nine libFuzzer targets, including one where the fuzz input plays the exchange.
+- Mutation checks at every phase: bugs injected on purpose, and a test had to fail. The first runs always had survivors, and each was either killed with a new test or removed as unobservable. Counts are in [docs/RESULTS.md](docs/RESULTS.md) and the changelog.
+- GitHub Actions with nine jobs (build and test cells, TSan, fuzz smoke, performance gate). It has found real faults that local runs missed, such as a missing Python package in five cells and a race in a test. See [docs/CI.md](docs/CI.md).
+- 32 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
+
+## Build and run
 
 ```
 cmake --preset release && cmake --build --preset release
@@ -46,31 +49,43 @@ ctest --test-dir build/release --output-on-failure -j2
 ./build/release/bench/bench_t2t --requests 300000
 ```
 
-Presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fuzz`. Requires CMake 3.25+, gcc 13 or clang 18. `test_sim_gate` takes about 4 minutes.
+Presets: `release`, `relwithdebinfo`, `perf`, `asan`, `ubsan`, `tsan`, `fuzz`. Needs CMake 3.25 or newer and gcc 13 or clang 18. `test_sim_gate` takes about 4 minutes.
+
+Everything that needs no key runs locally:
+
+```
+pip install -r scripts/requirements.txt
+scripts/ci_local.sh                 # after the release build: all Python suites and the 28 drills against local fakes
+```
+
+Running against the real sandbox (your own key, on a profile used only for this; set it in environment variables and never paste it anywhere):
+
+```
+export HFT_CB_KEY=... HFT_CB_SECRET=... HFT_CB_PASSPHRASE=...
+python3 scripts/smoke_sandbox.py --report smoke_report.json
+```
+
+The smoke test places a few minimum-size orders worth under 5 USD and writes a report with no credentials in it. Read [docs/SANDBOX.md](docs/SANDBOX.md) before running the bridge: its cancel-all cancels every open order for the product on the profile.
 
 ## Documentation
 
 | | |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | as-built architecture and module map |
+| [docs/RESULTS.md](docs/RESULTS.md) | every measured number, with command, machine and caveats |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module map and data flow |
 | [docs/DESIGN.md](docs/DESIGN.md) | phase-by-phase design log with measurements |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | decision records, including rejected options |
-| [docs/LIVE_FEED.md](docs/LIVE_FEED.md) | capture, convert and replay real market data; what is proven and what is not |
-| [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md) | the live paper session: guards, drills, real-feed runs, limits |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | logs, metrics, supervisor, fault drills, what they do not show |
-| [docs/CLOSED_LOOP.md](docs/CLOSED_LOOP.md) | exchange reports into the OMS, flatten as a state, what it costs |
-| [docs/SANDBOX.md](docs/SANDBOX.md) | sandbox order entry (mirror): rules, how to run it with your own key, what was and was not tested |
-| [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | measured budget, method, noise, how to reproduce |
-| [docs/FAILURE_MODES.md](docs/FAILURE_MODES.md) | what fails, what the engine does, what proves it |
-| [docs/RUNBOOK.md](docs/RUNBOOK.md) | startup checks, alarms, kill switch, tooling triage |
-| [CHANGELOG.md](CHANGELOG.md) | per-phase changes |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | decision records |
+| [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | per-stage budget, method, noise |
+| [docs/LIVE_FEED.md](docs/LIVE_FEED.md), [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md) | real data replay and the paper session |
+| [docs/SANDBOX.md](docs/SANDBOX.md), [docs/CLOSED_LOOP.md](docs/CLOSED_LOOP.md) | sandbox order entry, closed loop, closing, account check |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md), [docs/RUNBOOK.md](docs/RUNBOOK.md), [docs/FAILURE_MODES.md](docs/FAILURE_MODES.md) | running it, what fails and what the engine does |
+| [docs/CI.md](docs/CI.md), [CHANGELOG.md](CHANGELOG.md) | the workflow, per-phase changes |
 
 ## Limits
 
-- Synthetic data only. The mechanics are tested; the returns and the market are not real.
-- Timings come from a shared VM with hypervisor stalls: p99.9 and max are mostly noise from the machine. Bare-metal confirmation has not been done.
-- The measured path excludes the NIC, kernel and exchange.
-- Not built: FIX 4.4 parser, AVX2, MSan, AF_XDP/DPDK ingress, GoogleTest/vcpkg wiring, multi-instrument operation.
-- Real-data replay is offline and level 2 only (one product, one venue); there is no live trading path. Recorded exchange data is not committed.
-- The GitHub Actions workflow has not been seen running on GitHub from the development sandbox; its commands were run locally.
-- No automatic flatten after a kill; that is a human decision (see the runbook).
+- Not run against the real sandbox, so nothing about real fills, latencies, rate limits or the real response formats is known. The first real run will find differences.
+- No claim about profitability. The market maker is a mechanism to exercise the engine; the PnL report exists so that a run can be judged.
+- Timings are from a shared VM with hypervisor stalls. No bare-metal run, no NIC or kernel-bypass path, one product, one venue.
+- Recorded exchange data is not committed. Real-data replay is offline and level 2 only.
+- Not built: a FIX parser, AVX2 paths, MSan, multi-instrument operation. Nothing places orders on a production exchange, and the bridge refuses any URL but the sandbox.
+- No automatic flatten after a kill unless `--close-position` is on; otherwise that is a human decision (see the runbook).
