@@ -610,6 +610,42 @@ async def drill_loop_close_off_the_market(feed, port):
     # (best prices are set again inside close_drill before tune() runs, so `far` wins)
 
 
+async def drill_loop_carry_restart(feed, port):
+    """Holding a position, hft_live is killed with signal 9. The supervisor restarts it; the new process learns the position from the
+    file (ADR 30), and a later stop closes it."""
+    import tempfile
+    pf = tempfile.mktemp(suffix=".pos")
+    ex = new_exchange()
+    ex.start_ws()
+    r = loop_run(feed, port, ex, extra=["--close-position", "--position-file", pf], bridge_extra="--ws-fills --ws-url " + ex.ws_url)
+    await until(lambda: len(ex.open_orders()) >= 1, 20)
+    victim = ex.open_orders()[0]
+    ex.best_bid, ex.best_ask = 100.00, 100.10
+    ex.fill(victim["id"])
+    want = 5 if victim["side"] == "buy" else -5
+    check(await until(lambda: live_metric(r, "hft_live_position_lots") == want, 10), "the fill reached hft_live: position %+d lots" % want)
+    def filed():
+        try:
+            return int(open(pf).read().split()[0])
+        except (OSError, ValueError, IndexError):
+            return None
+    check(await until(lambda: filed() == want, 5), "and the position file says so (%s)" % filed())
+    os.kill(r.pid("live", 1), signal.SIGKILL)
+    check(await until(lambda: len(r.sup("pair_start")) >= 2, 15), "the pair is restarted")
+    check(await until(lambda: live_metric(r, "hft_live_position_lots") == want and len(r.live_events("segment_start")) >= 2, 20),
+          "the new process quotes with the old position: %s" % live_metric(r, "hft_live_position_lots"))
+    rc = await r.stop()
+    check(rc == 0 and len(ex.ioc_orders) == 1 and ex.ioc_orders[0][0] == ("sell" if want > 0 else "buy"),
+          "a stop closes what the dead process left: exit %s, closing orders %s" % (rc, ex.ioc_orders))
+    check(filed() == 0, "and the file says flat (%s)" % filed())
+    ex.stop()
+    r.cleanup()
+    try:
+        os.remove(pf)
+    except OSError:
+        pass
+
+
 DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill_kill_capture),
           ("kill_live", drill_kill_live), ("hang", drill_hang), ("sigterm", drill_sigterm), ("term_ignored", drill_term_ignored),
           ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity),
@@ -617,7 +653,8 @@ DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill
           ("exchange_down", drill_exchange_down), ("bad_credentials", drill_bad_credentials), ("bridge_hang", drill_bridge_hang),
           ("loop_flow", drill_loop_flow), ("loop_fill", drill_loop_fill), ("loop_fill_ws", drill_loop_fill_ws), ("loop_ws_refused", drill_loop_ws_refused), ("loop_slow", drill_loop_exchange_slow),
           ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop),
-          ("loop_close", drill_loop_close), ("loop_close_no_liquidity", drill_loop_close_no_liquidity), ("loop_close_off_market", drill_loop_close_off_the_market)]
+          ("loop_close", drill_loop_close), ("loop_close_no_liquidity", drill_loop_close_no_liquidity), ("loop_close_off_market", drill_loop_close_off_the_market),
+          ("loop_carry_restart", drill_loop_carry_restart)]
 
 
 async def main(only):

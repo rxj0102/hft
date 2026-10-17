@@ -99,10 +99,13 @@ def main(argv=None):
                     help="with --loop: when hft_live stops for good (shutdown or kill) it first sells or buys back its position with an "
                          "immediate-or-cancel order; if it cannot, it exits 4 and says POSITION NOT CLOSED")
     ap.add_argument("--close-collar-bps", type=int, default=None, help="how far past the touch the closing order is priced (hft_live default 30)")
+    ap.add_argument("--position-file", default=None,
+                    help="with --loop: hft_live keeps its position and cash in this file, so a restarted hft_live knows what the "
+                         "previous one left at the exchange (ADR 30); trusted as written, not checked against the account")
     ap.add_argument("--bridge-cmd", default=None, help="replace the bridge command (shell-split)")
     a = ap.parse_args(argv)
-    if (a.close_position or a.close_collar_bps is not None) and not (a.loop and not a.live_cmd):
-        ap.error("--close-position and --close-collar-bps need --loop and the default hft_live command (add the options to --live-cmd yourself otherwise)")
+    if (a.close_position or a.close_collar_bps is not None or a.position_file) and not (a.loop and not a.live_cmd):
+        ap.error("--close-position, --close-collar-bps and --position-file need --loop and the default hft_live command (add the options to --live-cmd yourself otherwise)")
 
     os.makedirs(a.run_dir, exist_ok=True)
     resnap = os.path.join(a.run_dir, "resnap")
@@ -132,6 +135,8 @@ def main(argv=None):
             live_cmd.append("--close-position")
         if a.close_collar_bps is not None:
             live_cmd += ["--close-collar-bps", str(a.close_collar_bps)]
+        if a.position_file:
+            live_cmd += ["--position-file", a.position_file]
 
     bridge_cmd = None
     if a.loop:

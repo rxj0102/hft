@@ -302,6 +302,17 @@ class LiveSession {
   // The running segment's pipeline, for inspection by tests and status lines.
   const book::OrderBook* book() const noexcept { return seg_ ? &seg_->pipe->book() : nullptr; }
   std::int64_t position_lots() const noexcept { return seg_ ? seg_->pipe->gateway().oms().position().pos : 0; }
+  // The session's whole position at the exchange: the running segment's (which includes what earlier segments
+  // left) or, between segments, the carried one. External venue only; the paper venue never fills (ADR 30).
+  std::int64_t net_position() const noexcept { return seg_ ? seg_->pipe->gateway().oms().position().pos : carried_pos_; }
+  // Seeds the position before the first segment, e.g. from a file the previous process wrote.
+  void seed_position(std::int64_t pos, core::i128 cash) noexcept {
+    if (cfg_.external_venue && sums_.empty()) {
+      carried_pos_ = pos;
+      carried_cash_ = cash;
+    }
+  }
+  core::i128 net_cash() const noexcept { return seg_ ? seg_->pipe->gateway().oms().position().cash : carried_cash_; }
   std::uint32_t open_orders() const noexcept { return seg_ ? seg_->pipe->gateway().oms().open_orders() : 0; }
   std::size_t venue_live() const noexcept { return seg_ ? seg_->venue.live() : 0; }
   const gw::GatewayStats* gateway_stats() const noexcept { return seg_ ? &seg_->pipe->gateway().stats() : nullptr; }
@@ -398,6 +409,13 @@ class LiveSession {
       return;
     }
     s.venue.set_book(&s.pipe->book());
+    if (cfg_.external_venue && (carried_pos_ != 0 || carried_cash_ != 0)) {
+      if (!s.pipe->gateway().oms().carry_in(carried_pos_, carried_cash_)) {
+        ++st_.init_failures;
+        seg_.reset();
+        return;
+      }
+    }
     ++st_.segments;
     last_feed_ = now;
     run_packets(s, now);
@@ -647,6 +665,10 @@ class LiveSession {
     ++st_.ended[static_cast<int>(why)];
     if (rounds > st_.max_flatten_rounds) st_.max_flatten_rounds = rounds;
     if (sm.flatten_sim_ns > st_.max_flatten_sim_ns) st_.max_flatten_sim_ns = sm.flatten_sim_ns;
+    if (cfg_.external_venue) {
+      carried_pos_ = g.oms().position().pos;
+      carried_cash_ = g.oms().position().cash;
+    }
     sums_.push_back(sm);
     seg_.reset();
   }
@@ -655,6 +677,8 @@ class LiveSession {
   LiveStats st_;
   core::Histogram line_ns_, start_ns_;
   std::vector<SegmentSummary> sums_;
+  std::int64_t carried_pos_ = 0;  // external venue: what earlier segments left at the exchange (ADR 30)
+  core::i128 carried_cash_ = 0;
   std::unique_ptr<Seg> seg_;
   std::uint64_t last_now_ = 0, last_feed_ = 0;
   bool halted_ = false, killed_ = false, resnap_ = false, integrity_failed_ = false;

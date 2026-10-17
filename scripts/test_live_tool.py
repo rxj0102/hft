@@ -462,6 +462,45 @@ for args, what in (([BIN, "--exchange-fd", "3"], "without --orders-fd"), ([BIN, 
     check(p_.returncode == 1, "external: --exchange-fd %s: exit 1" % what)
     os.close(rr); os.close(ww)
 
+# 13. positions across runs: --position-file (ADR 30)
+pf = tempfile.mktemp(suffix=".pos")
+lp = tempfile.mktemp(suffix=".log")
+rc, out, ex = run_external("close_none", ext_feed(30), flatten_s="1", pace=0.03, extra=["--log", lp, "--close-position", "--position-file", pf])
+check(rc == 4 and "POSITION NOT CLOSED" in out, "posfile: an unclosed position is exit 4 (rc=%s)\n%s" % (rc, out[-400:]))
+lots, cash = (int(x) for x in open(pf).read().split())
+check(lots > 0 and cash < 0, "posfile: the file holds the position left at the exchange: %d lots, cash %d" % (lots, cash))
+check(not os.path.exists(pf + ".tmp"), "posfile: no temporary file is left behind")
+
+# a new process with nothing to trade on: it knows the position from the file, cannot price a close, and says so
+rows_before = open(lp).read()
+rc, out, ex = run_external("ok", [], extra=["--log", lp, "--close-position", "--position-file", pf])
+check(rc == 4 and "POSITION NOT CLOSED: %d lots left (no live segment to price a close)" % lots in out, "posfile: no feed, a carried position: exit 4, reason named (rc=%s)\n%s" % (rc, out[-400:]))
+check(int(open(pf).read().split()[0]) == lots, "posfile: and the file still holds it")
+
+# a new process with a feed closes the position it was handed, in one order for the whole of it
+rc, out, ex = run_external("close_ok", ext_feed(30), flatten_s="2", pace=0.03, extra=["--close-position", "--position-file", pf])
+iocs = [r for r in ex.seen if r["t"] == "new" and r.get("type") == 2]
+check(rc == 0 and len(iocs) == 1, "posfile: the carried position is closed (rc=%s, %d closing orders)\n%s" % (rc, len(iocs), out[-500:]))
+check(iocs and iocs[0]["qty"] >= lots, "posfile: the closing order covers at least the carried %d lots (%s)" % (lots, iocs[:1]))
+check(int(open(pf).read().split()[0]) == 0, "posfile: flat again, and the file says 0")
+fills = [r for r in ex.sent if r["rt"] == "fill"]
+want_cash = cash + sum(-(1 if r["side"] == "buy" else -1) * r["px"] * r["qty"] for r in fills)
+check(int(open(pf).read().split()[1]) == want_cash, "posfile: the cash started from the file's (%d) and moved by the fills: file %s, expected %d" % (cash, open(pf).read().split()[1], want_cash))
+os.remove(pf); os.remove(lp)
+
+# a file that cannot be written does not stop the run (the warning goes to stderr); the position is still reported
+rc, out, ex = run_external("close_none", ext_feed(30), flatten_s="1", pace=0.03, extra=["--close-position", "--position-file", "/nonexistent-dir/hft.pos"])
+check(rc == 4 and "POSITION NOT CLOSED" in out, "posfile: an unwritable file does not hide the position (rc=%s)" % rc)
+
+# refusals: a file that is not a position, and no exchange to learn the truth from
+open(pf, "w").write("hello\n")
+rr, ww = os.pipe()
+p_ = subprocess.run([BIN, "--orders-fd", str(ww), "--exchange-fd", str(rr), "--position-file", pf], capture_output=True, pass_fds=(rr, ww))
+check(p_.returncode == 1 and b"refusing to start" in p_.stderr, "posfile: garbage in the file: exit 1, refuses (rc=%s)" % p_.returncode)
+p_ = subprocess.run([BIN, "--orders-fd", str(ww), "--position-file", pf], capture_output=True, pass_fds=(rr, ww))
+check(p_.returncode == 1, "posfile: without --exchange-fd: exit 1")
+os.close(rr); os.close(ww); os.remove(pf)
+
 if failures:
     sys.exit("%d live tool test failures" % failures)
 print("test_live_tool: all checks passed")

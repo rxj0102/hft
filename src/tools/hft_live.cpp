@@ -378,7 +378,7 @@ void write_metrics(const std::string& path, const feed::LiveSession& s, double u
 int main(int argc, char** argv) {
   feed::LiveConfig lc;
   lc.timed = true;
-  std::string from, resnap_file, log_path, metrics_path;
+  std::string from, resnap_file, log_path, metrics_path, position_file;
   double metrics_s = 5.0;
   double pace = 0.0, report_s = 10.0, max_seconds = 0.0;
   bool spin = false;
@@ -409,12 +409,13 @@ int main(int argc, char** argv) {
     else if (a == "--orders-fd" && num(v) && v >= 3 && v < 1024) orders_fd = static_cast<int>(v);
     else if (a == "--exchange-fd" && num(v) && v >= 3 && v < 1024) exchange_fd = static_cast<int>(v);
     else if (a == "--flatten-timeout-s" && num(v) && v > 0) lc.flatten_timeout_ns = static_cast<std::uint64_t>(v * 1e9);
+    else if (a == "--position-file" && i + 1 < argc) position_file = argv[++i];
     else if (a == "--close-position") lc.close_position = true;
     else if (a == "--close-collar-bps" && num(v) && v >= 1 && v <= 1000) lc.close_collar_bps = static_cast<std::int64_t>(v);
     else {
       std::fprintf(stderr,
                    "usage: hft_live [--from capture.l2 [--pace X]] [--stale-ms N] [--rtt-us N] [--lots N] [--levels N]\n"
-                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S] [--close-position [--close-collar-bps N]]]\n"
+                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S] [--close-position [--close-collar-bps N]] [--position-file PATH]]\n"
                    "reads capture-format lines from stdin unless --from is given\n");
       return 1;
     }
@@ -458,7 +459,45 @@ int main(int argc, char** argv) {
     rin.fd = exchange_fd;
     lc.external_venue = true;
   }
+  if (!position_file.empty() && exchange_fd < 0) {
+    std::fprintf(stderr, "--position-file needs --exchange-fd (the position is only known from the exchange's reports)\n");
+    return 1;
+  }
   feed::LiveSession session(lc);
+  long long saved_pos = 0, saved_cash = 0;
+  if (!position_file.empty()) {  // what the previous process left at the exchange (ADR 30)
+    if (FILE* f = std::fopen(position_file.c_str(), "r")) {
+      long long p = 0, c = 0;
+      const int n = std::fscanf(f, "%lld %lld", &p, &c);
+      std::fclose(f);
+      if (n != 2) {
+        std::fprintf(stderr, "--position-file %s exists but is not \"<lots> <cash>\"; refusing to start with an unknown position\n", position_file.c_str());
+        return 1;
+      }
+      session.seed_position(p, c);
+      saved_pos = p;
+      saved_cash = c;
+      std::fprintf(stderr, "hft_live: starting with a position of %lld lots (cash %lld) read from %s; make sure it matches the account\n", p, c, position_file.c_str());
+    }
+  }
+  auto save_position = [&] {
+    if (position_file.empty()) return;
+    const long long p = session.net_position(), c = static_cast<long long>(session.net_cash());
+    if (p == saved_pos && c == saved_cash) return;
+    const std::string tmp = position_file + ".tmp";
+    if (FILE* f = std::fopen(tmp.c_str(), "w")) {
+      const bool ok = std::fprintf(f, "%lld %lld\n", p, c) > 0;
+      const bool cl = std::fclose(f) == 0;
+      if (ok && cl && std::rename(tmp.c_str(), position_file.c_str()) == 0) {
+        saved_pos = p;
+        saved_cash = c;
+        return;
+      }
+    }
+    static bool warned = false;
+    if (!warned) std::fprintf(stderr, "hft_live: cannot write %s; the next start will not know the position\n", position_file.c_str());
+    warned = true;
+  };
   const std::uint64_t t_start = mono_ns();
   auto now_ns = [&] { return mono_ns() - t_start; };
   auto secs = [&] { return static_cast<double>(now_ns()) / 1e9; };
@@ -477,6 +516,7 @@ int main(int argc, char** argv) {
   auto after_line = [&] {
     if (session.take_resnap()) touch(resnap_file);
     observe(elog, obs, session, secs(), oo);
+    save_position();
   };
   bool exchange_lost = false, lost_handled = false;
   // Reads whatever reports are waiting and hands them to the session. A closed pipe means the bridge is gone.
@@ -677,15 +717,15 @@ int main(int argc, char** argv) {
   }
   if (session.summaries().size() > 20) std::printf("  ... %zu more segments\n", session.summaries().size() - 20);
 
-  if (lc.close_position && !session.summaries().empty()) {
-    const feed::SegmentSummary& last = session.summaries().back();
-    if (last.net_position_lots != 0) {
-      std::printf("  POSITION NOT CLOSED: %lld lots left (%s)\n", static_cast<long long>(last.net_position_lots),
-                  last.close_failed ? last.close_why_not : "closing did not run");
-      elog.emit("position_not_closed", secs(), std::string("\"position_lots\":") + std::to_string(last.net_position_lots) + ",\"why\":\"" +
-                    (last.close_failed ? last.close_why_not : "closing did not run") + "\"");
-      return 4;  // risk is still open at the exchange: not restartable, an operator has to look
-    }
+  if (lc.close_position && session.net_position() != 0) {
+    // the session total (ADR 30): includes what earlier segments left, also when no segment is running now
+    const feed::SegmentSummary* last = session.summaries().empty() ? nullptr : &session.summaries().back();
+    const char* why = !last ? "no live segment to price a close"
+                      : last->close_failed ? last->close_why_not
+                                           : "closing did not run";
+    std::printf("  POSITION NOT CLOSED: %lld lots left (%s)\n", static_cast<long long>(session.net_position()), why);
+    elog.emit("position_not_closed", secs(), std::string("\"position_lots\":") + std::to_string(session.net_position()) + ",\"why\":\"" + why + "\"");
+    return 4;  // risk is still open at the exchange: not restartable, an operator has to look
   }
   if (exchange_lost) return 6;  // restartable: a new bridge cancels whatever is left on the exchange
   if (st.check_failures || st.final_mismatches || st.flatten_failures || st.desyncs || st.book_errors) return 4;

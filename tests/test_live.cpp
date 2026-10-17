@@ -1040,6 +1040,127 @@ void test_close_prices_and_waiting() {
   }
 }
 
+// ---- positions across segments (ADR 30) -----------------------------------------------------------------------------
+
+void test_position_is_carried_across_segments() {
+  TapLog log;
+  LiveConfig c = close_cfg();
+  c.order_tap = tap_collect;
+  c.order_tap_ctx = &log;
+  LiveSession s(c);
+  std::size_t at = with_position(s, log, core::Side::Buy);   // +5 lots at 100.00
+  CHECK(s.net_position() == 5 && s.position_lots() == 5);
+  const core::i128 cash = s.net_cash();
+  CHECK(cash == -static_cast<core::i128>(5) * 1'000'000);
+  s.on_line("#1050000\treconnect", 1'050'000);                // a routine end: nothing is closed
+  at = answer_all(s, log, at, 1'051'000);
+  CHECK(!s.active() && s.summaries().size() == 1 && s.summaries()[0].net_position_lots == 5);
+  CHECK(s.net_position() == 5 && s.net_cash() == cash && s.position_lots() == 0);   // between segments the carried one
+  warm_up(s, 2'000'000);                                      // the next snapshot starts segment 2
+  CHECK(s.active() && s.position_lots() == 5 && s.net_position() == 5 && s.net_cash() == cash);
+  at = answer_all(s, log, at, 2'010'000);
+  s.shutdown(2'050'000);                                      // the stop closes the whole position, not just segment 2's
+  at = answer_all(s, log, at, 2'051'000);
+  const std::size_t k = first_ioc(log);
+  CHECK(k < log.recs.size() && s.busy());
+  if (k < log.recs.size()) CHECK(log.recs[k].seg == 2 && log.recs[k].qty == 5 && log.recs[k].side == core::Side::Sell);
+  answer_all(s, log, at, 2'052'000);
+  CHECK(!s.busy() && s.summaries().size() == 2);
+  const auto& sm = s.summaries()[1];
+  CHECK(sm.net_position_lots == 0 && sm.closed_lots == 5 && sm.close_attempts == 1 && !sm.close_failed);
+  CHECK(sm.fills == 1);                                       // this segment's own fills, not the carried ones
+  CHECK(s.net_position() == 0);
+  CHECK(s.net_cash() != cash);                                // the sale is in the cash
+}
+
+void test_a_stop_with_no_segment_keeps_the_position() {
+  TapLog log;
+  LiveConfig c = close_cfg();
+  c.order_tap = tap_collect;
+  c.order_tap_ctx = &log;
+  LiveSession s(c);
+  const std::size_t at = with_position(s, log, core::Side::Sell);   // -5 lots
+  s.on_line("#1050000\treconnect", 1'050'000);
+  answer_all(s, log, at, 1'051'000);
+  CHECK(!s.active() && s.net_position() == -5);
+  const std::size_t before = log.recs.size();
+  s.shutdown(1'060'000);                                      // no segment to price a close with
+  CHECK(!s.busy() && s.net_position() == -5 && log.recs.size() == before && first_ioc(log) == log.recs.size());
+  s.kill(1'070'000);
+  CHECK(!s.busy() && s.net_position() == -5);
+}
+
+void test_seeding_the_position() {
+  {  // an external session starts from what the previous process left
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    s.seed_position(7, -4'000'000);
+    CHECK(s.net_position() == 7 && s.net_cash() == -4'000'000);
+    warm_up(s, 1'000'000);
+    CHECK(s.active() && s.position_lots() == 7 && s.net_cash() == -4'000'000);
+    CHECK(s.summaries().empty());
+    const std::size_t at = answer_all(s, log, 0, 1'010'000);
+    s.shutdown(1'050'000);
+    const std::size_t at2 = answer_all(s, log, at, 1'051'000);
+    const std::size_t k = first_ioc(log);
+    CHECK(k < log.recs.size() && log.recs[k].qty == 7 && log.recs[k].side == core::Side::Sell);
+    answer_all(s, log, at2, 1'052'000);
+    CHECK(s.summaries().size() == 1 && s.summaries()[0].net_position_lots == 0 && s.summaries()[0].closed_lots == 7);
+  }
+  {  // too late: once a segment has run, the session's own numbers stand
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    warm_up(s, 1'000'000);
+    s.seed_position(9, 1);
+    CHECK(s.position_lots() == 0 && s.net_position() == 0);
+  }
+  {  // too late, between segments: what the first segment left is not overwritten
+    TapLog log;
+    LiveConfig c = close_cfg();
+    c.order_tap = tap_collect;
+    c.order_tap_ctx = &log;
+    LiveSession s(c);
+    const std::size_t at = with_position(s, log, core::Side::Buy);
+    s.on_line("#1050000\treconnect", 1'050'000);
+    answer_all(s, log, at, 1'051'000);
+    CHECK(!s.active() && s.net_position() == 5);
+    s.seed_position(9, 1);
+    CHECK(s.net_position() == 5 && s.net_cash() == -static_cast<core::i128>(5) * 1'000'000);
+  }
+  {  // the paper venue never fills: a seed is ignored, and nothing is carried
+    LiveSession s(small_cfg());
+    s.seed_position(9, 1);
+    CHECK(s.net_position() == 0 && s.net_cash() == 0);
+    warm_up(s, 1'000'000);
+    s.on_line("#1050000\treconnect", 1'050'000);
+    drive(s, "");
+    CHECK(s.net_position() == 0 && s.net_cash() == 0);
+    warm_up(s, 2'000'000);
+    CHECK(s.position_lots() == 0);
+  }
+}
+
+void test_a_carried_flat_position_stays_flat() {
+  TapLog log;
+  LiveConfig c = close_cfg();
+  c.order_tap = tap_collect;
+  c.order_tap_ctx = &log;
+  LiveSession s(c);
+  std::size_t at = with_position(s, log, core::Side::Buy);
+  s.shutdown(1'050'000);
+  at = answer_all(s, log, at, 1'051'000);
+  answer_all(s, log, at, 1'052'000);
+  CHECK(s.net_position() == 0 && s.summaries().size() == 1 && s.summaries()[0].net_position_lots == 0);
+  warm_up(s, 2'000'000);                                      // a halted session starts no segment; nothing is carried either way
+  CHECK(s.net_position() == 0);
+}
+
 int main() {
   test_equivalence();
   test_multi_packet_messages();
@@ -1057,6 +1178,10 @@ int main() {
   test_close_partial_fills_and_giving_up();
   test_close_refusals();
   test_close_prices_and_waiting();
+  test_position_is_carried_across_segments();
+  test_a_stop_with_no_segment_keeps_the_position();
+  test_seeding_the_position();
+  test_a_carried_flat_position_stays_flat();
   test_stale_feed();
   test_stale_found_by_next_line();
   test_heartbeats_keep_the_feed_alive();

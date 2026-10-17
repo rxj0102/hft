@@ -21,7 +21,7 @@ The engine now sometimes pays the spread plus up to the collar, and a loss-limit
 
 Closing has to finish within the stale limit of the last feed message. When the supervisor stops, the capture stops too, so with the default 3 s limit there is room for about the first attempt and a few retries; in the drill with a 0.6 s limit a closing order that was never filled gave up after three attempts with "feed not fresh".
 
-Limits: a position is tracked per segment. A segment that ended for a routine reason with a position leaves it to a later stop that no longer knows about it, and a restarted process starts from zero; both are visible in `segment_end` (`position_lots`) but are not closed. Only the last segment's position decides the exit code.
+Limits: as first written, a position was tracked per segment, so a position left by a routine segment end or by an earlier process was not known to a later stop. ADR 30 closes that gap (the position is carried across segments and, with `--position-file`, across runs).
 
 ## Evidence
 CLOSED_LOOP.md; `tests/test_live.cpp` (close tests), `tests/test_oms.cpp` (`check_close`), `scripts/test_bridge.py`, `scripts/test_live_tool.py` section 12, drills `loop_close`, `loop_close_no_liquidity`, `loop_close_off_market`; mutation run.

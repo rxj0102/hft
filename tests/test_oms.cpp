@@ -768,6 +768,49 @@ void test_risk_differential(std::uint64_t n) {
 
 }  // namespace
 
+// ADR 30: a position left by an earlier OMS can be carried in, before any order exists.
+void test_carry_in() {
+  {
+    Rig rig;
+    Oms& o = rig.oms;
+    CHECK(o.carry_in(-7, -123456));
+    CHECK(o.position().pos == -7 && o.position().cash == -123456);
+    CHECK(o.position().fills == 0 && o.position().buy_qty == 0 && o.position().sell_qty == 0);
+    CHECK(o.check_invariants());
+    // later fills move the carried numbers, they do not replace them
+    CHECK(o.on_send_new(kId, Side::Buy, OrderType::Limit, PX(100), 10, 1) == Submit::Ok);
+    o.on_report(ack(kId, 10));
+    o.on_report(mkrep(ReportType::Fill, kId, 4, 6));
+    CHECK(o.position().pos == -3 && o.position().fills == 1 && o.position().buy_qty == 4);
+    CHECK(o.position().cash == -123456 - static_cast<core::i128>(4) * PX(100).raw());
+    CHECK(o.check_invariants());
+    CHECK(!o.carry_in(5, 0));   // too late: this OMS has filled
+    CHECK(o.position().pos == -3);
+  }
+  {
+    Rig rig;
+    Oms& o = rig.oms;
+    CHECK(o.on_send_new(kId, Side::Buy, OrderType::Limit, PX(100), 10, 1) == Submit::Ok);
+    o.on_report(ack(kId, 10));
+    o.on_report(mkrep(ReportType::Fill, kId, 10, 0));
+    CHECK(o.position().open_orders == 0 && o.position().pos == 10);
+    CHECK(!o.carry_in(5, 0));   // nothing works any more, but the OMS has filled: its own numbers stand
+    CHECK(o.position().pos == 10);
+  }
+  {
+    Rig rig;
+    Oms& o = rig.oms;
+    CHECK(o.on_send_new(kId, Side::Sell, OrderType::Limit, PX(100), 10, 1) == Submit::Ok);
+    o.on_report(ack(kId, 10));
+    o.on_report(mkrep(ReportType::Canceled, kId, 10, 0, 100, Reason::UserRequested));
+    CHECK(o.carry_in(5, 0));    // nothing working and nothing filled: still safe
+    CHECK(o.position().pos == 5 && o.check_invariants());
+    CHECK(o.on_send_new(kId + 1, Side::Sell, OrderType::Limit, PX(100), 10, 1) == Submit::Ok);
+    CHECK(!o.carry_in(1, 0));   // a working order
+    CHECK(o.position().pos == 5);
+  }
+}
+
 int main(int argc, char** argv) {
   const std::uint64_t n = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 400000ULL;
   test_transition_matrix();
@@ -780,6 +823,7 @@ int main(int argc, char** argv) {
   test_risk_limits();
   test_risk_rate_limit();
   test_risk_close();
+  test_carry_in();
   test_risk_kill_and_loss();
   test_risk_replace();
   test_risk_differential(n);

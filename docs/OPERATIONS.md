@@ -75,7 +75,7 @@ Adds a second pipe, bridge to `hft_live` (`--exchange-fd`). New `hft_live` exit 
 
 ### Closing the position at stop (`--close-position`)
 
-`supervise.py --loop --close-position [--close-collar-bps N]` passes the option on to `hft_live`. On SIGTERM the order is: cancel everything, wait for the exchange, send up to five immediate-or-cancel orders against the position, then exit. If a position remains the exit is 4 (`stop_not_flat`, and `position_not_closed` in `events.jsonl`); read `segment_end` for `close_why_not`. Allow `--term-grace-s` for the extra round trips (about 0.5 s per attempt at `--rate 8`, more with a slow exchange). See CLOSED_LOOP.md and ADR 29.
+`supervise.py --loop --close-position [--close-collar-bps N]` passes the option on to `hft_live`. On SIGTERM the order is: cancel everything, wait for the exchange, send up to five immediate-or-cancel orders against the position, then exit. If a position remains the exit is 4 (`stop_not_flat`, and `position_not_closed` in `events.jsonl`); read `segment_end` for `close_why_not`. Allow `--term-grace-s` for the extra round trips (about 0.5 s per attempt at `--rate 8`, more with a slow exchange). Add `--position-file PATH` so that a restarted `hft_live` knows the position the previous one left (positions are also carried between segments of one run); the file holds `<lots> <cash>`, is trusted as written and is not checked against the account, so after a crash look at the account yourself. See CLOSED_LOOP.md, ADR 29 and ADR 30.
 
 ## What this does not show
 

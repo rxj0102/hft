@@ -151,6 +151,15 @@ class Oms {
     return true;
   }
 
+  // Seeds the position and cash with what an earlier OMS (or an earlier process) left at the exchange. Only valid
+  // while nothing works and nothing has filled; the fill counters stay at zero, they count this OMS's own fills (ADR 30).
+  bool carry_in(std::int64_t pos, i128 cash) noexcept {
+    if (pos_.open_orders != 0 || pos_.fills != 0) return false;
+    pos_.pos = pos;
+    pos_.cash = cash;
+    return true;
+  }
+
   // ---- local actions ---------------------------------------------------------
 
   // Registers a new order as PendingNew (call after risk approved it).
