@@ -1,0 +1,78 @@
+diff --git a/include/hft/bt/lab.hpp b/include/hft/bt/lab.hpp
+index b276eda..5395a1a 100644
+--- a/include/hft/bt/lab.hpp
++++ b/include/hft/bt/lab.hpp
+@@ -69,8 +69,9 @@ inline bool apply_param(strat::MmConfig& c, std::string_view key, std::string_vi
+   if (key == "requote_ticks") return range(0, 1000) && ((c.requote_ticks = static_cast<std::int32_t>(v)), true);
+   if (key == "min_leaves") return range(0, 100) && ((c.min_leaves = v), true);
+   if (key == "min_interval_ns") return range(0, 1'000'000'000) && ((c.min_interval_ns = static_cast<std::uint64_t>(v)), true);
++  if (key == "taper_pct") return range(0, 100) && ((c.taper_pct = static_cast<std::int32_t>(v)), true);
+   err = "unknown parameter '" + std::string(key) +
+-        "' (half_spread16 alpha16 skew16 depth_levels qty max_pos requote_ticks min_leaves min_interval_ns)";
++        "' (half_spread16 alpha16 skew16 depth_levels qty max_pos requote_ticks min_leaves min_interval_ns taper_pct)";
+   return false;
+ }
+ 
+@@ -85,6 +86,7 @@ inline bool get_param(const strat::MmConfig& c, std::string_view key, long long&
+   else if (key == "requote_ticks") out = c.requote_ticks;
+   else if (key == "min_leaves") out = c.min_leaves;
+   else if (key == "min_interval_ns") out = static_cast<long long>(c.min_interval_ns);
++  else if (key == "taper_pct") out = c.taper_pct;
+   else return false;
+   return true;
+ }
+diff --git a/include/hft/strat/market_maker.hpp b/include/hft/strat/market_maker.hpp
+index 94f24ff..71b8667 100644
+--- a/include/hft/strat/market_maker.hpp
++++ b/include/hft/strat/market_maker.hpp
+@@ -38,6 +38,7 @@ struct MmConfig {
+   std::int32_t requote_ticks = 1;      // move a quote when the target is this far away
+   std::int64_t min_leaves = 2;         // refill a partly filled quote below this
+   std::uint64_t min_interval_ns = 50'000;  // per side, between requests
++  std::int32_t taper_pct = 0;          // shrink the side that adds to inventory; 0 = off, 100 = to 1 lot at the cap
+ };
+ 
+ struct MmStats {
+@@ -94,6 +95,18 @@ class MarketMaker {
+   }
+   static std::int64_t ceil_div(std::int64_t a, std::int64_t b) noexcept { return -floor_div(-a, b); }
+ 
++  // Quote size for a side that already holds `held` shares in its own direction.
++  // With taper_pct == 0 this is `qty`. Otherwise a side that adds to a long
++  // (or short) position shrinks linearly with the position, down to 1 lot.
++  // The reducing side always quotes the full size. A size change alone does
++  // not trigger a replace; it applies on the next move or refill.
++  std::int64_t quote_qty(std::int64_t held) const noexcept {
++    if (c_.taper_pct == 0 || held <= 0) return c_.qty;
++    const std::int64_t h = held < c_.max_pos ? held : c_.max_pos;
++    const std::int64_t q = c_.qty * (c_.max_pos * 100 - c_.taper_pct * h) / (c_.max_pos * 100);
++    return q < 1 ? 1 : q;
++  }
++
+   template <class Book, class GW>
+   void side(core::Side s, std::int64_t target_tick, std::uint64_t now, const Book& book, GW& gw) noexcept {
+     SideState& st = s == core::Side::Buy ? bid_ : ask_;
+@@ -108,11 +121,12 @@ class MarketMaker {
+     // exposure of everything else working on this side, plus our post-fill position
+     const std::int64_t others = (s == core::Side::Buy ? pos.open_buy : pos.open_sell) - (o ? o->reserved : 0);
+     const std::int64_t held = s == core::Side::Buy ? pos.pos : -pos.pos;
+-    const bool want = held + others + c_.qty <= c_.max_pos;
++    const std::int64_t q = quote_qty(held);
++    const bool want = held + others + q <= c_.max_pos;
+ 
+     if (!o) {
+       if (!want || !due) return;
+-      const auto r = gw.new_order(s, sim::OrderType::PostOnly, book.price_at(target_tick), c_.qty, now);
++      const auto r = gw.new_order(s, sim::OrderType::PostOnly, book.price_at(target_tick), q, now);
+       st.last = now;
+       st.ever = true;
+       if (r.ok()) {
+@@ -134,7 +148,7 @@ class MarketMaker {
+     const std::int64_t cur = book.tick_index(o->price);
+     const std::int64_t d = cur > target_tick ? cur - target_tick : target_tick - cur;
+     if (d >= c_.requote_ticks || o->leaves < c_.min_leaves) {
+-      const auto r = gw.replace(o->id, book.price_at(target_tick), c_.qty, now);
++      const auto r = gw.replace(o->id, book.price_at(target_tick), q, now);
+       st.last = now;
+       if (r.ok()) {
+         ++stats_.replace_sent;

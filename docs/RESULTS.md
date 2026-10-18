@@ -38,6 +38,8 @@ Latency sweep (`--latency-sweep`, ADR 37), 2026-10-17: 8 markets of 40,000 reque
 
 Queue penalty sweep (`--queue-sweep`, ADR 38), 2026-10-17: 8 markets of 40,000 requests. The base kept 45 percent of its simulated PnL at a penalty of 400 percent against 0 (about a fifth lost already at 25 percent); the no-skew variant stayed ahead of the base at every penalty. Table and reading in [STRATEGY_LAB.md](STRATEGY_LAB.md). A stress on one assumption of the simulator, not a measurement of a real queue.
 
+Position taper experiment (ADR 39), 2026-10-18: a quote size that shrinks with inventory did not beat the unchanged strategy at any skew on held-out markets (6 markets of 20,000 requests, simulated fills) and did not lower the maximum position (39 with and without on the held-out markets). Rejected; patch and outputs in `docs/experiments/`.
+
 Parameter search with held-out markets (`--grid`, ADR 34), 2026-10-17: grids of 48 and 64 points on 8 training markets, the best 3 re-run on 8 fresh markets. The best points kept 90 to 104 percent of their training gain over the base on the held-out markets, so there was almost no winner's curse in these grids, and every chosen point sat at the edge of the grid (more imbalance lean, tighter quotes, more inventory). Details and the reading are in [STRATEGY_LAB.md](STRATEGY_LAB.md). Same caveats: simulated fills, one generator.
 
 ## What the checks add up to

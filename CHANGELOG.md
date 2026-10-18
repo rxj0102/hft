@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 30: a strategy change, judged by the lab, and rejected
+
+- Tried a position-dependent quote size (`taper_pct`) against criteria written before the run. It did not beat the no-taper strategy at any skew on held-out markets, and did not reduce the maximum position. Not adopted: the strategy source is unchanged. Patch and outputs in `docs/experiments/`; ADR 39.
+
 ## 0.2.0
 
 What this release adds over 0.1.0, in one place. The per-phase entries below have the detail, the mutation counts and the caveats. Nothing here was run against the real sandbox: no API key was available, so everything that talks to an exchange has only met a local fake written from the public documentation.

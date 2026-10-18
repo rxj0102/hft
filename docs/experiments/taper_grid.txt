@@ -1,0 +1,43 @@
+hft_lab: 6 markets (seeds 1000..1005) x 20000 requests, 16 variants; md 5 us, ingress 10 us, egress 10 us, jitter 2 us, queue penalty 0%
+risk limits derived from the variants: max order qty 100, max position 80 (the strategy cap should bind first)
+
+search: 15 grid points plus the base, trained on 6 markets; objective = mean PnL - 1 x mean largest position
+training results, best 15 of 15 by the objective (the base is row 0):
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +1.73      0.09        +0.76       +0.98         51    5.7%         8
+taper_pct=25_skew16=2             +1.71      0.10        +0.74       +0.96         51    5.8%         7
+taper_pct=50_skew16=2             +1.71      0.10        +0.74       +0.96         51    5.8%         7
+taper_pct=75_skew16=2             +1.71      0.10        +0.74       +0.96         51    5.8%         7
+taper_pct=100_skew16=2            +1.71      0.10        +0.74       +0.96         51    5.8%         7
+taper_pct=0_skew16=2              +1.73      0.09        +0.76       +0.98         51    5.7%         8
+taper_pct=100_skew16=1            +2.06      0.19        +0.85       +1.21         57    6.0%        10
+taper_pct=25_skew16=1             +2.07      0.19        +0.85       +1.22         57    6.0%        11
+taper_pct=50_skew16=1             +2.07      0.19        +0.85       +1.22         57    6.0%        11
+taper_pct=75_skew16=1             +2.07      0.19        +0.85       +1.22         57    6.0%        11
+taper_pct=0_skew16=1              +2.14      0.15        +0.94       +1.20         62    6.2%        11
+taper_pct=100_skew16=0            +2.39      0.50        +1.14       +1.25         79    8.4%        32
+taper_pct=75_skew16=0             +2.50      0.56        +1.17       +1.33         81    8.4%        38
+taper_pct=50_skew16=0             +2.67      0.64        +1.21       +1.46         83    8.4%        39
+taper_pct=25_skew16=0             +2.72      0.68        +1.22       +1.50         83    8.2%        39
+taper_pct=0_skew16=0              +2.98      0.72        +1.26       +1.72         85    7.9%        40
+
+held-out markets (seeds 101000..101005), chosen variants and base:
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +1.87      0.16        +0.91       +0.96         60    7.0%        11
+taper_pct=25_skew16=2             +1.86      0.16        +0.90       +0.96         60    7.1%        11
+taper_pct=50_skew16=2             +1.86      0.16        +0.90       +0.96         60    7.1%        11
+taper_pct=75_skew16=2             +1.86      0.16        +0.90       +0.96         60    7.1%        11
+taper_pct=100_skew16=2            +1.86      0.16        +0.90       +0.96         60    7.1%        11
+taper_pct=0_skew16=2              +1.87      0.16        +0.91       +0.96         60    7.0%        11
+taper_pct=100_skew16=1            +1.87      0.25        +0.90       +0.97         60    6.6%        17
+taper_pct=25_skew16=1             +1.88      0.26        +0.91       +0.97         60    6.6%        19
+taper_pct=50_skew16=1             +1.88      0.26        +0.91       +0.97         60    6.6%        19
+taper_pct=75_skew16=1             +1.87      0.25        +0.90       +0.97         60    6.6%        17
+taper_pct=0_skew16=1              +2.02      0.25        +0.91       +1.12         60    6.2%        19
+taper_pct=100_skew16=0            +1.92      0.43        +1.01       +0.91         66    7.9%        29
+taper_pct=75_skew16=0             +2.03      0.49        +1.03       +1.00         68    7.9%        34
+taper_pct=50_skew16=0             +2.17      0.61        +1.06       +1.10         70    7.9%        39
+taper_pct=25_skew16=0             +2.22      0.66        +1.10       +1.12         71    7.7%        38
+taper_pct=0_skew16=0              +2.57      0.67        +1.16       +1.41         74    7.6%        39
+
+paired against base on the held-out markets (variant minus base
