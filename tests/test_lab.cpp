@@ -532,6 +532,63 @@ void test_regimes() {
   }
 }
 
+void test_latency() {
+  std::vector<long long> v;
+  std::string err;
+  CHECK(lab::parse_latencies("0", v, err) && v.size() == 1 && v[0] == 0);
+  CHECK(lab::parse_latencies("0,5,20,100000", v, err) && v.size() == 4 && v[0] == 0 && v[1] == 5 && v[2] == 20 && v[3] == 100000);
+  CHECK(lab::parse_latencies("1,2,3,4,5,6,7,8,9,10,11,12", v, err) && v.size() == 12);
+  CHECK(!lab::parse_latencies("1,2,3,4,5,6,7,8,9,10,11,12,13", v, err) && err == "at most 12 latencies");
+  CHECK(!lab::parse_latencies("", v, err) && err.find("latency ''") != std::string::npos);
+  CHECK(!lab::parse_latencies("5,", v, err) && err.find("latency ''") != std::string::npos);
+  CHECK(!lab::parse_latencies(",5", v, err));
+  CHECK(!lab::parse_latencies("5,x", v, err) && err.find("'x'") != std::string::npos);
+  CHECK(!lab::parse_latencies("-1", v, err) && !lab::parse_latencies("100001", v, err) && !lab::parse_latencies("1.5", v, err) && !lab::parse_latencies(" 5", v, err));
+  CHECK(!lab::parse_latencies("5,5", v, err) && err.find("strictly increasing") != std::string::npos);
+  CHECK(!lab::parse_latencies("5,3", v, err) && err.find("'3' follows 5") != std::string::npos);
+  CHECK(!lab::parse_latencies("zz", v, err) && v.empty());       // a failed parse leaves nothing behind
+
+  lab::LatencyAxis ax = lab::LatencyAxis::Md;
+  CHECK(lab::parse_latency_axis("all", ax) && ax == lab::LatencyAxis::All);
+  CHECK(lab::parse_latency_axis("md", ax) && ax == lab::LatencyAxis::Md);
+  CHECK(lab::parse_latency_axis("ingress", ax) && ax == lab::LatencyAxis::Ingress);
+  CHECK(lab::parse_latency_axis("egress", ax) && ax == lab::LatencyAxis::Egress);
+  ax = lab::LatencyAxis::Egress;
+  CHECK(!lab::parse_latency_axis("", ax) && !lab::parse_latency_axis("ALL", ax) && !lab::parse_latency_axis("md ", ax) && ax == lab::LatencyAxis::Egress);
+  CHECK(std::string(lab::axis_name(lab::LatencyAxis::All)) == "all" && std::string(lab::axis_name(lab::LatencyAxis::Md)) == "md" &&
+        std::string(lab::axis_name(lab::LatencyAxis::Ingress)) == "ingress" && std::string(lab::axis_name(lab::LatencyAxis::Egress)) == "egress");
+
+  BtConfig b;
+  b.md_ns = 1000;
+  b.ingress_ns = 2000;
+  b.egress_ns = 3000;
+  b.jitter_ns = 4000;
+  b.queue_penalty_pct = 7;
+  b.seed = 9;
+  const BtConfig a = lab::with_latency(b, lab::LatencyAxis::All, 50);
+  CHECK(a.md_ns == 50000 && a.ingress_ns == 50000 && a.egress_ns == 50000 && a.jitter_ns == 4000 && a.queue_penalty_pct == 7 && a.seed == 9);
+  const BtConfig m = lab::with_latency(b, lab::LatencyAxis::Md, 50);
+  CHECK(m.md_ns == 50000 && m.ingress_ns == 2000 && m.egress_ns == 3000);
+  const BtConfig i = lab::with_latency(b, lab::LatencyAxis::Ingress, 50);
+  CHECK(i.md_ns == 1000 && i.ingress_ns == 50000 && i.egress_ns == 3000);
+  const BtConfig e = lab::with_latency(b, lab::LatencyAxis::Egress, 0);
+  CHECK(e.md_ns == 1000 && e.ingress_ns == 2000 && e.egress_ns == 0);
+  CHECK(b.md_ns == 1000);                                         // the argument is a copy
+
+  // a longer delay on every hop changes the run, and the delayed run is what evaluate sees
+  std::vector<lab::Variant> vars(1);
+  vars[0].name = "base";
+  const risk::RiskConfig rc = lab::lab_risk(40);
+  std::vector<lab::Row> r0, r1;
+  std::uint64_t d0 = lab::kDigestSeed, d1 = lab::kDigestSeed;
+  int bad = 0;
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lab::with_latency(lat(), lab::LatencyAxis::All, 5), rc, bt::MarketConfig{}, 0.0, "", "", r0, d0, bad) == 0);
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lab::with_latency(lat(), lab::LatencyAxis::All, 200), rc, bt::MarketConfig{}, 0.0, "", "", r1, d1, bad) == 0);
+  CHECK(d0 != d1 && r0[0].digest != r1[0].digest);
+  const bt::Market mk = small_market(900, 8000);
+  CHECK(lab::run_one(mk, lab::with_latency(lat(), lab::LatencyAxis::All, 200), vars[0].cfg, rc, nullptr).rep.digest == r1[0].digest[0]);
+}
+
 void test_evaluate() {
   std::vector<lab::Variant> vars(2);
   vars[0].name = "base";
@@ -633,6 +690,7 @@ int main() {
   test_rank();
   test_edge_axes();
   test_regimes();
+  test_latency();
   test_evaluate();
   test_health();
   if (g_failures == 0) std::puts("test_lab: all checks passed");

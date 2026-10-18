@@ -58,6 +58,19 @@ for args, why in [
     (["--regimes", "quiet,quiet"], "repeated regime"),
     (["--regimes", "Quiet"], "regime names are case sensitive"),
     (["--regimes", "quiet", "--grid", "skew16=1,2"], "regimes with a grid"),
+    (["--latency-sweep"], "latency sweep without a value"),
+    (["--latency-sweep", ""], "empty latency sweep"),
+    (["--latency-sweep", "5,x"], "non-numeric latency"),
+    (["--latency-sweep", "5,5"], "repeated latency"),
+    (["--latency-sweep", "20,5"], "latencies not increasing"),
+    (["--latency-sweep", "-1"], "negative latency"),
+    (["--latency-sweep", "100001"], "latency out of range"),
+    (["--latency-sweep", "1,2,3,4,5,6,7,8,9,10,11,12,13"], "too many latencies"),
+    (["--latency-sweep", "0,5", "--regimes", "quiet"], "latency sweep with regimes"),
+    (["--latency-sweep", "0,5", "--grid", "skew16=1,2"], "latency sweep with a grid"),
+    (["--latency-axis", "md"], "latency axis without a sweep"),
+    (["--latency-sweep", "0,5", "--latency-axis", "everything"], "unknown latency axis"),
+    (["--latency-sweep", "0,5", "--latency-axis", "MD"], "latency axis is case sensitive"),
     (["--maker-fee-bps"], "fee without a value"),
     (["--maker-fee-bps", "abc"], "non-numeric fee"),
     (["--maker-fee-bps", "1001"], "fee above the range"),
@@ -101,6 +114,61 @@ with tempfile.TemporaryDirectory() as d:
     check(d1 == d2, "the run digest repeats")
     rc3, out3, _ = lab(*SMALL, "--variant", "noskew:skew16=0", "--regimes", "thin,volatile,default")
     check(re.search(r"run digest (\w+)", out3).group(1) != d1, "the digest depends on the order the regimes were run")
+
+print("latency sweep")
+with tempfile.TemporaryDirectory() as d:
+    jl, ev = os.path.join(d, "l.json"), os.path.join(d, "ev")
+    os.mkdir(ev)
+    rc, out, err = lab(*SMALL, "--variant", "noskew:skew16=0", "--latency-sweep", "0,20,100", "--json", jl, "--events", ev)
+    check(rc == 0 and "latency sweep over 3 delays, axis all, jitter 2 us" in out, "runs, and the header says what was swept")
+    check(all(("\nlatency %s us\n" % u) in out for u in ("0", "20", "100")), "a table for each delay")
+    j = json.load(open(jl))
+    check(j["latency_axis"] == "all" and [x["us"] for x in j["latencies"]] == [0, 20, 100], "json: axis and delays in order")
+    check(all(len(x["variants"]) == 2 and len(x["variants"][0]["pnl"]) == 4 for x in j["latencies"]), "json: both variants on 4 markets at every delay")
+    check(len({tuple(x["variants"][0]["pnl"]) for x in j["latencies"]}) == 3, "json: the delays give different results")
+    sec = out.split("mean PnL by delay (microseconds)")[1].split("difference from the base")[0]
+    rows = {l.split()[0]: l.split() for l in sec.splitlines() if l.startswith(("base ", "noskew "))}
+    for vi, name in enumerate(("base", "noskew")):
+        want = [sum(x["variants"][vi]["pnl"]) / 4 for x in j["latencies"]]
+        got = [float(x) for x in rows[name][1:4]]
+        check(all(abs(g - w) < 0.006 for g, w in zip(got, want)), "mean PnL row for %s recomputed from the json: %s vs %s" % (name, got, want))
+        kept = rows[name][4]
+        check((kept == "n/a") == (want[0] <= 0) and (kept == "n/a" or abs(float(kept.rstrip("%")) - 100 * want[2] / want[0]) < 0.6), "kept for %s: %s" % (name, kept))
+    dsec = out.split("difference from the base by delay")[1]
+    drow = [l for l in dsec.splitlines() if l.startswith("noskew")][0].split()
+    wantd = [sum(x["variants"][1]["pnl"][k] - x["variants"][0]["pnl"][k] for k in range(4)) / 4 for x in j["latencies"]]
+    check(all(abs(float(g) - w) < 0.006 for g, w in zip(drow[1:4], wantd)), "differences from the base recomputed from the json: %s vs %s" % (drow[1:4], wantd))
+    check(drow[4] == "%d/3" % sum(1 for w in wantd if w > 0) and abs(float(drow[5]) - min(wantd)) < 0.006, "better-in and worst: %s" % drow[4:])
+    files = sorted(os.listdir(ev))
+    check(len(files) == 3 * 2 * 4 and all(f.startswith(("lat0us_", "lat20us_", "lat100us_")) for f in files), "event files carry the delay (%d files)" % len(files))
+    rc2, out2, _ = lab(*SMALL, "--variant", "noskew:skew16=0", "--latency-sweep", "0,20,100")
+    check(re.search(r"run digest (\w+)", out).group(1) == re.search(r"run digest (\w+)", out2).group(1), "the digest repeats")
+    rc, outb, _ = lab(*SMALL, "--latency-sweep", "0")
+    check(rc == 0 and "difference from the base" not in outb and "kept" in outb, "base only: no difference table; one delay is allowed")
+    # axis: delaying only one hop gives a different result from delaying all three, and zero on one hop at 0 changes nothing else
+    jm, ji = os.path.join(d, "m.json"), os.path.join(d, "i.json")
+    lab(*SMALL, "--latency-sweep", "100", "--latency-axis", "md", "--json", jm)
+    lab(*SMALL, "--latency-sweep", "100", "--latency-axis", "ingress", "--json", ji)
+    pm, pi, pa = (json.load(open(x))["latencies"][0]["variants"][0]["pnl"] for x in (jm, ji, jl))
+    pa = j["latencies"][2]["variants"][0]["pnl"]
+    check(pm != pi and pm != pa and pi != pa, "md only, ingress only and all three give three different results")
+    check(json.load(open(jm))["latency_axis"] == "md", "json records the axis")
+    check("base" not in [l.split()[0] for l in dsec.splitlines() if l.split()], "the difference table has no row for the base")
+    rc, _, errx = lab(*SMALL, "--latency-axis", "md")
+    check(rc == 1 and "--latency-axis needs --latency-sweep" in errx, "the axis without a sweep says why")
+    # the sweep runs the default regime: a sweep point equals the plain run with the same delays
+    jp, js, jf = (os.path.join(d, n) for n in ("p.json", "s.json", "f.json"))
+    lab(*SMALL, "--md-us", "10", "--ingress-us", "10", "--egress-us", "10", "--json", jp)
+    lab(*SMALL, "--latency-sweep", "10", "--json", js)
+    check(json.load(open(jp))["variants"][0]["pnl"] == json.load(open(js))["latencies"][0]["variants"][0]["pnl"], "a sweep point equals the plain run with those delays")
+    rc, outf, _ = lab(*SMALL, "--latency-sweep", "0,50", "--maker-fee-bps", "2", "--json", jf)
+    jj = json.load(open(jf))
+    ok = all(f > 0 for x in jj["latencies"] for f in x["variants"][0]["fees"]) and "fees: 2 bps" in outf and jj["maker_fee_bps"] == 2
+    ok = ok and all(abs(x["variants"][0]["pnl"][k] - (x["variants"][0]["edge"][k] + x["variants"][0]["inventory"][k] - x["variants"][0]["fees"][k])) < 1e-9
+                    for x in jj["latencies"] for k in range(4))
+    check(ok, "fees apply in a sweep: pnl = edge + inventory - fees at every delay")
+    rc, outm, _ = lab(*SMALL, "--latency-sweep", "0", "--latency-axis", "egress", "--md-us", "7")
+    check("axis egress" in outm and "md 7 us" in outm, "the other hops keep their configured delays: %s" % [l for l in outm.splitlines() if l.startswith("axis")])
 
 print("fees")
 with tempfile.TemporaryDirectory() as d:

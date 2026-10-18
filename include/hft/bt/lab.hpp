@@ -420,6 +420,64 @@ inline AcrossRegimes across_regimes(const std::vector<std::vector<Row>>& per_reg
   return a;
 }
 
+// Latency sweep: the same variants and markets run once per delay. A delay is applied to one hop or to all three
+// (market data in, order in, report out); jitter is left as configured.
+enum class LatencyAxis { All, Md, Ingress, Egress };
+
+inline const char* axis_name(LatencyAxis a) {
+  switch (a) {
+    case LatencyAxis::All: return "all";
+    case LatencyAxis::Md: return "md";
+    case LatencyAxis::Ingress: return "ingress";
+    case LatencyAxis::Egress: return "egress";
+  }
+  return "all";
+}
+
+inline bool parse_latency_axis(std::string_view s, LatencyAxis& out) {
+  for (const LatencyAxis a : {LatencyAxis::All, LatencyAxis::Md, LatencyAxis::Ingress, LatencyAxis::Egress})
+    if (s == axis_name(a)) {
+      out = a;
+      return true;
+    }
+  return false;
+}
+
+inline BtConfig with_latency(BtConfig bc, LatencyAxis axis, long long us) {
+  const std::uint64_t ns = static_cast<std::uint64_t>(us) * 1000;
+  if (axis == LatencyAxis::All || axis == LatencyAxis::Md) bc.md_ns = ns;
+  if (axis == LatencyAxis::All || axis == LatencyAxis::Ingress) bc.ingress_ns = ns;
+  if (axis == LatencyAxis::All || axis == LatencyAxis::Egress) bc.egress_ns = ns;
+  return bc;
+}
+
+// "0,5,20" -> microseconds, strictly increasing, each 0..100000, at most 12 (err says what is wrong).
+inline bool parse_latencies(std::string_view spec, std::vector<long long>& out, std::string& err) {
+  out.clear();
+  std::size_t pos = 0;
+  while (pos <= spec.size()) {
+    const std::size_t comma = spec.find(',', pos);
+    const std::string tok(spec.substr(pos, comma == std::string_view::npos ? std::string_view::npos : comma - pos));
+    long long v = 0;
+    if (!parse_int(tok, v) || v < 0 || v > 100000) {
+      err = "latency '" + tok + "' is not an integer between 0 and 100000 microseconds";
+      return false;
+    }
+    if (!out.empty() && v <= out.back()) {
+      err = "latencies must be strictly increasing ('" + tok + "' follows " + std::to_string(out.back()) + ")";
+      return false;
+    }
+    if (out.size() == 12) {
+      err = "at most 12 latencies";
+      return false;
+    }
+    out.push_back(v);
+    if (comma == std::string_view::npos) break;
+    pos = comma + 1;
+  }
+  return true;
+}
+
 // Fee in currency units for a run that traded `notional` currency units, at `bps` basis points of notional (negative is a
 // rebate). Every fill in a lab run is a maker fill (the strategy only sends post-only orders), so one rate is enough.
 inline double fee_for(double notional, double bps) { return notional * bps / 1e4; }

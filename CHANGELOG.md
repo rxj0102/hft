@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Phase 27
+- Latency sweep (ADR 37). `hft_lab --latency-sweep us1,us2,...` runs the same variants and markets at each delay (strictly increasing, 0 to 100,000 us, at most 12) and prints a table per delay, mean PnL by delay with `kept`, and each variant's difference from the base by delay (count of delays above zero, worst). `--latency-axis all|md|ingress|egress` picks the hop; the others keep their configured delays. `--json` gains `latency_axis` and `latencies`; `--events` files carry `lat<us>us_`. Not combinable with `--grid` or `--regimes`. New helpers in `lab.hpp`: `LatencyAxis`, `parse_latency_axis`, `with_latency`, `parse_latencies`.
+- Example (2026-10-17, 8 markets x 40,000 requests): base PnL +3.44 at 0 us, +3.27 at 20 us, +2.09 at 100 us (kept 61 percent); no-skew variant +6.34, +5.80, +2.19 (its lead over the base fell from +2.90 to +0.10). With the delay on one hop only, market data and order entry cost PnL and report return did not. Simulated fills, one generator.
+
+- Tests: parsing and every error, axis names, which fields each axis changes and keeps, a longer delay changes the run and equals the single run (`tests/test_lab.cpp`); option checks, a table per delay, json, the means, kept and differences recomputed from the json, event names, digest, the three axes give three results, other hops keep their delays, a sweep point equals the plain run, fees apply (`scripts/test_lab.py`).
+- Verification: 27 mutants of the new code. First run: 4 survived (the axis usage message, the sweep running a non-default regime, the base compared with itself, fees dropped in the sweep) and 1 did not compile; after new tests all five were killed. `ci_local.sh` all steps passed; perf gate PASS (hot path untouched).
+- Caveats: the delays are added to a queue-model venue whose tape does not react to us; `kept` is unstable when the smallest-delay PnL is small; 8 markets give means that differ by a few tenths, so small differences between hops are noise.
+
 ### Phase 26
 - Market regimes in the lab (ADR 36). `hft_lab --regimes a,b,...` runs the same variants on the same seeds under named regimes (default, volatile, quiet, informed, uninformed, thin, slow; each is a set of existing generator settings) and prints a table per regime plus, for two or more, a summary of each variant's mean PnL difference from the base per regime, the count of regimes where it is above zero, and the worst. `--json` gains `regimes`; `--events` file names carry the regime; not combinable with `--grid`. `lab::evaluate` takes the market configuration to generate from. Output without the flag is byte-identical to before.
 - Example (2026-10-17, 8 markets x 40,000 requests): removing the inventory skew gained in 5 of 7 regimes (+0.95 to +4.68) and lost in the informed (-1.60) and thin (-1.82) regimes, holding 37 to 41 lots against 6 to 23. Simulated fills, one generator, settings not calibrated to a real market.

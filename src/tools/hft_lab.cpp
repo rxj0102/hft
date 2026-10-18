@@ -33,7 +33,8 @@ int usage(const char* msg) {
   std::fprintf(stderr,
                "usage: hft_lab [--requests N] [--markets M] [--seed S] [--variant name:k=v,...]... [--sweep key=v1,v2,...]...\n"
                "               [--md-us U] [--ingress-us U] [--egress-us U] [--jitter-us U] [--queue-penalty-pct P]\n"
-               "               [--maker-fee-bps X] [--regimes a,b,...] [--json FILE] [--events DIR]\n"
+               "               [--maker-fee-bps X] [--regimes a,b,...] [--latency-sweep us1,us2,... [--latency-axis all|md|ingress|egress]]\n"
+               "               [--json FILE] [--events DIR]\n"
                "       hft_lab --grid \"key=v1,v2;key2=w1,w2\" [--top K] [--risk-penalty X] [--test-markets N] [--test-seed T] [...]\n");
   return 1;
 }
@@ -109,6 +110,92 @@ void print_paired(const std::vector<lab::Variant>& vars, const std::vector<Row>&
   }
 }
 
+struct SweepArgs {
+  long long markets, seed, requests;
+  const BtConfig& bc;
+  const risk::RiskConfig& rc;
+  double maker_fee_bps;
+  const std::string& events_dir;
+  const std::string& json_path;
+  lab::LatencyAxis axis;
+  const std::vector<long long>& lats;
+};
+
+// The same variants and markets at each delay. Prints a table per delay, the mean PnL by delay with what is left at the
+// largest delay, and (with variants) the difference from the base by delay.
+int latency_sweep(const SweepArgs& a, const std::vector<lab::Variant>& vars) {
+  std::vector<std::vector<Row>> per(a.lats.size());
+  std::uint64_t all = lab::kDigestSeed;
+  int unhealthy = 0;
+  for (std::size_t li = 0; li < a.lats.size(); ++li) {
+    const BtConfig bc = lab::with_latency(a.bc, a.axis, a.lats[li]);
+    const std::string tag = "lat" + std::to_string(a.lats[li]) + "us_";
+    if (const int st = lab::evaluate(vars, a.seed, a.markets, a.requests, bc, a.rc, MarketConfig{}, a.maker_fee_bps, a.events_dir, tag, per[li], all, unhealthy)) return st;
+  }
+  std::printf("hft_lab: %lld markets (seeds %lld..%lld) x %lld requests, %zu variants; latency sweep over %zu delays, axis %s, jitter %llu us\n", a.markets, a.seed,
+              a.seed + a.markets - 1, a.requests, vars.size(), a.lats.size(), lab::axis_name(a.axis), static_cast<unsigned long long>(a.bc.jitter_ns / 1000));
+  std::printf("axis %s: %s is set to each delay in turn; the others stay as given (md %llu us, ingress %llu us, egress %llu us)\n", lab::axis_name(a.axis),
+              a.axis == lab::LatencyAxis::All ? "market data, order entry and report return" : (a.axis == lab::LatencyAxis::Md ? "market data" : (a.axis == lab::LatencyAxis::Ingress ? "order entry" : "report return")),
+              static_cast<unsigned long long>(a.bc.md_ns / 1000), static_cast<unsigned long long>(a.bc.ingress_ns / 1000), static_cast<unsigned long long>(a.bc.egress_ns / 1000));
+  if (a.maker_fee_bps != 0) std::printf("fees: %g bps of notional on every fill; PnL is after fees\n", a.maker_fee_bps);
+  for (std::size_t li = 0; li < a.lats.size(); ++li) {
+    std::printf("\nlatency %lld us\n", a.lats[li]);
+    print_table(vars, per[li], a.maker_fee_bps != 0);
+  }
+  std::printf("\nmean PnL by delay (microseconds)\n%-26s", "variant");
+  for (const long long us : a.lats) std::printf(" %9lld", us);
+  std::printf(" %10s\n", "kept");
+  for (std::size_t vi = 0; vi < vars.size(); ++vi) {
+    std::printf("%-26s", vars[vi].name.c_str());
+    std::vector<double> m;
+    for (std::size_t li = 0; li < a.lats.size(); ++li) {
+      m.push_back(lab::summarize(per[li][vi].pnl).mean);
+      std::printf(" %+9.2f", m.back());
+    }
+    const double kept = lab::retained(m.front(), m.back());
+    if (std::isnan(kept)) std::printf(" %10s\n", "n/a");
+    else std::printf(" %9.0f%%\n", 100 * kept);
+  }
+  std::printf("kept = mean PnL at the largest delay over mean PnL at the smallest (n/a when the smallest delay made no money;\nunstable when it made very little).\n");
+  if (vars.size() > 1) {
+    std::printf("\ndifference from the base by delay (variant minus base)\n%-26s", "variant");
+    for (const long long us : a.lats) std::printf(" %9lld", us);
+    std::printf(" %9s %9s\n", "better in", "worst");
+    for (std::size_t vi = 1; vi < vars.size(); ++vi) {
+      const lab::AcrossRegimes x = lab::across_regimes(per, vi);
+      std::printf("%-26s", vars[vi].name.c_str());
+      for (const double d : x.d) std::printf(" %+9.2f", d);
+      std::printf(" %4zu/%-4zu %+9.2f\n", x.better, a.lats.size(), x.worst);
+    }
+  }
+  std::printf("\nRead this with care: the delays are added to a simulated venue whose fills come from a queue model, and the market does\n"
+              "not react to our orders. A variant that holds its PnL as delay grows is less sensitive to latency in this simulator;\n"
+              "it is not shown to be fast enough for a real venue. Every delay uses the same seeds, so the columns are paired by\n"
+              "market but not tested.\n");
+  std::printf("\nrun digest %016llx (changes if any run's result changes)\n", static_cast<unsigned long long>(all));
+  if (!a.json_path.empty()) {
+    std::FILE* f = std::fopen(a.json_path.c_str(), "w");
+    if (!f) {
+      std::fprintf(stderr, "hft_lab: cannot write %s\n", a.json_path.c_str());
+      return 2;
+    }
+    std::fprintf(f, "{\n  \"markets\": %lld, \"requests\": %lld, \"seed\": %lld, \"maker_fee_bps\": %g, \"latency_axis\": \"%s\", \"digest\": \"%016llx\",\n  \"latencies\": [", a.markets,
+                 a.requests, a.seed, a.maker_fee_bps, lab::axis_name(a.axis), static_cast<unsigned long long>(all));
+    for (std::size_t li = 0; li < a.lats.size(); ++li) {
+      std::fprintf(f, "%s\n    {\"us\": %lld, \"variants\": ", li ? "," : "", a.lats[li]);
+      json_variants(f, vars, per[li]);
+      std::fprintf(f, "}");
+    }
+    std::fprintf(f, "\n  ]\n}\n");
+    std::fclose(f);
+  }
+  if (unhealthy) {
+    std::fprintf(stderr, "hft_lab: %d run(s) failed health checks; do not use these numbers\n", unhealthy);
+    return 3;
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -119,6 +206,9 @@ int main(int argc, char** argv) {
   double risk_penalty = 0, maker_fee_bps = 0;
   std::string json_path, events_dir, grid_spec, regime_spec;
   std::vector<const lab::Regime*> regimes;
+  std::vector<long long> lats;
+  lab::LatencyAxis lat_axis = lab::LatencyAxis::All;
+  bool axis_set = false;
   std::vector<lab::Variant> vars;
   lab::Variant base;
   base.name = "base";
@@ -164,6 +254,18 @@ int main(int argc, char** argv) {
       std::string err;
       if (!lab::parse_regimes(v, regimes, err)) return usage((err + " (known: default, volatile, quiet, informed, uninformed, thin, slow)").c_str());
       regime_spec = v;
+    }
+    else if (a == "--latency-sweep") {
+      const char* v = next("--latency-sweep");
+      if (!v) return 1;
+      std::string err;
+      if (!lab::parse_latencies(v, lats, err)) return usage(err.c_str());
+    }
+    else if (a == "--latency-axis") {
+      const char* v = next("--latency-axis");
+      if (!v) return 1;
+      if (!lab::parse_latency_axis(v, lat_axis)) return usage("--latency-axis wants all, md, ingress or egress");
+      axis_set = true;
     }
     else if (a == "--json") { const char* v = next("--json"); if (!v) return 1; json_path = v; }
     else if (a == "--events") { const char* v = next("--events"); if (!v) return 1; events_dir = v; }
@@ -211,6 +313,8 @@ int main(int argc, char** argv) {
     for (std::size_t j = i + 1; j < vars.size(); ++j)
       if (vars[i].name == vars[j].name) return usage(("duplicate variant name '" + vars[i].name + "'").c_str());
 
+  if (!lats.empty() && (have_grid || !regimes.empty())) return usage("--latency-sweep cannot be combined with --grid or --regimes");
+  if (axis_set && lats.empty()) return usage("--latency-axis needs --latency-sweep");
   if (have_grid && !regimes.empty()) return usage("--regimes cannot be combined with --grid (a search over regimes would spend the held-out markets)");
   if (have_grid) {
     if (vars.size() > 1) return usage("--grid cannot be combined with --variant or --sweep");
@@ -237,6 +341,8 @@ int main(int argc, char** argv) {
   bc.jitter_ns = static_cast<std::uint64_t>(jit) * 1000;
   bc.queue_penalty_pct = static_cast<std::uint32_t>(qpen);
   bc.seed = 1;
+
+  if (!lats.empty()) return latency_sweep(SweepArgs{markets, seed, requests, bc, rc, maker_fee_bps, events_dir, json_path, lat_axis, lats}, vars);
 
   const bool have_regimes = !regimes.empty();
   if (!have_regimes) regimes.push_back(lab::find_regime("default"));

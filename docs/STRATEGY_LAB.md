@@ -99,6 +99,22 @@ What this says and does not say:
 
 Example (2026-10-17, 8 markets of 40,000 requests, seeds 1000 to 1007, `--variant noskew:skew16=0`): the mean PnL difference of removing the inventory skew from the base was +2.61 (default), +4.68 (volatile), +0.96 (quiet), -1.60 (informed), +0.95 (uninformed), -1.82 (thin), +2.53 (slow): better in 5 of 7, worst -1.82. In every regime it held positions of 37 to 41 lots against 6 to 23 for the base, so the gain is mostly inventory that happened to drift the right way, and it reverses where the flow is informed or the book is thin. In the informed regime the base made +7.01 of edge and lost 9.05 on inventory (PnL -2.04). The default regime's table matches the table without the flag. Read it as a comparison of seven settings of one simulator; the values were not calibrated to anything real, and the summary does not adjust for the number of comparisons. `--regimes` cannot be combined with `--grid`.
 
+## Latency sweep
+
+`--latency-sweep 0,5,10,20,50,100` (microseconds, strictly increasing; ADR 37) runs the same variants on the same markets once per delay and prints a table per delay, the mean PnL by delay with `kept` (PnL at the largest delay over PnL at the smallest), and the difference from the base by delay. `--latency-axis all|md|ingress|egress` picks the hop that gets the delay (default all three); the others keep their `--md-us`, `--ingress-us`, `--egress-us` values. It cannot be combined with `--grid` or `--regimes`.
+
+Example (2026-10-17, 8 markets of 40,000 requests, seeds 1000 to 1007, jitter 2 us, delay on all three hops):
+
+| variant | 0 | 5 | 10 | 20 | 50 | 100 us | kept |
+|---|---|---|---|---|---|---|---|
+| base | +3.44 | +3.41 | +3.45 | +3.27 | +2.56 | +2.09 | 61% |
+| noskew (`skew16=0`) | +6.34 | +6.23 | +6.25 | +5.80 | +4.65 | +2.19 | 35% |
+| noalpha (`alpha16=0`) | +0.08 | +0.13 | +0.11 | +0.18 | -0.02 | -0.21 | not meaningful |
+
+Up to 20 us the base lost under 5 percent; at 100 us it kept 61 percent. The no-skew variant's lead over the base was +2.90 at 0 us and +0.10 at 100 us, so most of its advantage was gone by then. Which hop is slow matters: at 100 us on one hop only (same markets, other hops at 5, 10 and 10 us), the base kept 65 percent with the delay on market data, 71 percent on order entry and 109 percent on report return, so a late report cost nothing here while a stale book or a late order did. The 109 percent is noise: with 8 markets the means differ by a few tenths. `kept` is unstable when the smallest-delay PnL is small (noalpha: -253 percent from a PnL of +0.08).
+
+Read it as the simulated PnL against delay in a queue model whose tape does not react to us. It does not say how fast a real system has to be.
+
 ## What it cannot tell you
 
 - The fills are simulated. The queue model is exact for the tape it replays, but the tape does not react to the strategy's orders (no market impact), so a strategy that would move the market looks better than it is.

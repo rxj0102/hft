@@ -38,3 +38,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 34. [Choose parameters on training markets, judge them on held-out markets](adr/0034-choose-on-training-markets-judge-on-held-out-markets.md) (Accepted)
 35. [Count fees by liquidity and compare variants after costs](adr/0035-count-fees-by-liquidity-and-compare-after-costs.md) (Accepted)
 36. [Compare variants across named market regimes](adr/0036-compare-variants-across-named-market-regimes.md) (Accepted)
+37. [Sweep latency to see how fast a variant decays](adr/0037-sweep-latency-to-see-how-fast-a-variant-decays.md) (Accepted)
