@@ -51,6 +51,13 @@ for args, why in [
     (["--sweep", "=5"], "sweep with empty key"),
     (["--sweep", "skew16=1,,2"], "sweep with an empty value"),
     (["--sweep", "skew16=1,x"], "sweep with a bad value"),
+    (["--regimes"], "regimes without a value"),
+    (["--regimes", ""], "empty regimes"),
+    (["--regimes", "bogus"], "unknown regime"),
+    (["--regimes", "quiet,"], "trailing comma in regimes"),
+    (["--regimes", "quiet,quiet"], "repeated regime"),
+    (["--regimes", "Quiet"], "regime names are case sensitive"),
+    (["--regimes", "quiet", "--grid", "skew16=1,2"], "regimes with a grid"),
     (["--maker-fee-bps"], "fee without a value"),
     (["--maker-fee-bps", "abc"], "non-numeric fee"),
     (["--maker-fee-bps", "1001"], "fee above the range"),
@@ -58,6 +65,42 @@ for args, why in [
 ]:
     rc, out, err = lab(*args)
     check(rc == 1 and "usage" in err and out == "", "exit 1 and usage for " + why)
+
+print("regimes")
+with tempfile.TemporaryDirectory() as d:
+    jr, ev = os.path.join(d, "r.json"), os.path.join(d, "ev")
+    os.mkdir(ev)
+    plain_rc, plain, _ = lab(*SMALL, "--variant", "noskew:skew16=0")
+    check("regime" not in plain and "across regimes" not in plain, "without --regimes the output does not mention regimes")
+    rc, one, _ = lab(*SMALL, "--variant", "noskew:skew16=0", "--regimes", "default")
+    check(rc == 0 and "regime default: the generator's own settings" in one and "across regimes" not in one, "one regime: labelled, no summary")
+    tbl = lambda t: [l for l in t.splitlines() if l.startswith(("base ", "noskew "))]
+    check(tbl(one) == tbl(plain), "and the default regime's table equals the table without the flag")
+    rc, out, err = lab(*SMALL, "--variant", "noskew:skew16=0", "--regimes", "default,volatile,thin", "--json", jr, "--events", ev)
+    check(rc == 0 and out.count("\nregime ") + (1 if out.startswith("regime ") else 0) >= 3 and "regime volatile: the fair value jumps four times as often" in out, "three regimes, each with a heading")
+    check("regimes: default,volatile,thin" in out, "the header lists the regimes")
+    check(out.count("paired against base, same markets") == 3, "every regime gets its own paired comparison")
+    j = json.load(open(jr))
+    check([r["name"] for r in j["regimes"]] == ["default", "volatile", "thin"], "json: regimes in the order given")
+    check(j["regimes"][0]["variants"][0]["pnl"] == j["variants"][0]["pnl"], "json: top-level variants are the first regime's")
+    check(len({tuple(r["variants"][0]["pnl"]) for r in j["regimes"]}) == 3, "json: the regimes give different results")
+    check(all(len(r["variants"]) == 2 and len(r["variants"][0]["pnl"]) == 4 for r in j["regimes"]), "json: every regime has both variants on 4 markets")
+    sec = out.split("across regimes:")[1].splitlines()
+    head, row = sec[1].split(), [l for l in sec if l.startswith("noskew")][0].split()
+    want = []
+    for r in j["regimes"]:
+        b, v = r["variants"][0]["pnl"], r["variants"][1]["pnl"]
+        want.append(sum(x - y for x, y in zip(v, b)) / len(b))
+    got = [float(x) for x in row[1:4]]
+    check(head[1:4] == ["default", "volatile", "thin"] and all(abs(g - w) < 0.006 for g, w in zip(got, want)), "across table: the per-regime differences are recomputed from the json: %s vs %s" % (got, want))
+    check(row[4] == "%d/3" % sum(1 for w in want if w > 0) and abs(float(row[5]) - min(want)) < 0.006, "across table: better-in count and worst: %s" % row[4:])
+    files = sorted(os.listdir(ev))
+    check(len(files) == 3 * 2 * 4 and all(f.split("_")[0] in ("default", "volatile", "thin") for f in files), "event files carry the regime name, so none is overwritten (%d files)" % len(files))
+    rc2, out2, _ = lab(*SMALL, "--variant", "noskew:skew16=0", "--regimes", "default,volatile,thin")
+    d1 = re.search(r"run digest (\w+)", out).group(1); d2 = re.search(r"run digest (\w+)", out2).group(1)
+    check(d1 == d2, "the run digest repeats")
+    rc3, out3, _ = lab(*SMALL, "--variant", "noskew:skew16=0", "--regimes", "thin,volatile,default")
+    check(re.search(r"run digest (\w+)", out3).group(1) != d1, "the digest depends on the order the regimes were run")
 
 print("fees")
 with tempfile.TemporaryDirectory() as d:

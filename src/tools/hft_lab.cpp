@@ -33,7 +33,7 @@ int usage(const char* msg) {
   std::fprintf(stderr,
                "usage: hft_lab [--requests N] [--markets M] [--seed S] [--variant name:k=v,...]... [--sweep key=v1,v2,...]...\n"
                "               [--md-us U] [--ingress-us U] [--egress-us U] [--jitter-us U] [--queue-penalty-pct P]\n"
-               "               [--maker-fee-bps X] [--json FILE] [--events DIR]\n"
+               "               [--maker-fee-bps X] [--regimes a,b,...] [--json FILE] [--events DIR]\n"
                "       hft_lab --grid \"key=v1,v2;key2=w1,w2\" [--top K] [--risk-penalty X] [--test-markets N] [--test-seed T] [...]\n");
   return 1;
 }
@@ -117,7 +117,8 @@ int main(int argc, char** argv) {
   bool top_set = false, have_grid = false;
   std::vector<lab::GridAxis> axes;
   double risk_penalty = 0, maker_fee_bps = 0;
-  std::string json_path, events_dir, grid_spec;
+  std::string json_path, events_dir, grid_spec, regime_spec;
+  std::vector<const lab::Regime*> regimes;
   std::vector<lab::Variant> vars;
   lab::Variant base;
   base.name = "base";
@@ -156,6 +157,13 @@ int main(int argc, char** argv) {
       const char* v = next("--maker-fee-bps");
       if (!v) return 1;
       if (!lab::parse_double(v, maker_fee_bps) || maker_fee_bps < -100 || maker_fee_bps > 1000) return usage("--maker-fee-bps wants a number between -100 and 1000");
+    }
+    else if (a == "--regimes") {
+      const char* v = next("--regimes");
+      if (!v) return 1;
+      std::string err;
+      if (!lab::parse_regimes(v, regimes, err)) return usage((err + " (known: default, volatile, quiet, informed, uninformed, thin, slow)").c_str());
+      regime_spec = v;
     }
     else if (a == "--json") { const char* v = next("--json"); if (!v) return 1; json_path = v; }
     else if (a == "--events") { const char* v = next("--events"); if (!v) return 1; events_dir = v; }
@@ -203,6 +211,7 @@ int main(int argc, char** argv) {
     for (std::size_t j = i + 1; j < vars.size(); ++j)
       if (vars[i].name == vars[j].name) return usage(("duplicate variant name '" + vars[i].name + "'").c_str());
 
+  if (have_grid && !regimes.empty()) return usage("--regimes cannot be combined with --grid (a search over regimes would spend the held-out markets)");
   if (have_grid) {
     if (vars.size() > 1) return usage("--grid cannot be combined with --variant or --sweep");
     std::vector<lab::Variant> g;
@@ -229,15 +238,23 @@ int main(int argc, char** argv) {
   bc.queue_penalty_pct = static_cast<std::uint32_t>(qpen);
   bc.seed = 1;
 
-  std::vector<Row> rows;
+  const bool have_regimes = !regimes.empty();
+  if (!have_regimes) regimes.push_back(lab::find_regime("default"));
+  std::vector<std::vector<Row>> per_regime(regimes.size());
   std::uint64_t all = lab::kDigestSeed;
   int unhealthy = 0;
-  if (const int st = lab::evaluate(vars, seed, markets, requests, bc, rc, maker_fee_bps, events_dir, "", rows, all, unhealthy)) return st;
+  for (std::size_t ri = 0; ri < regimes.size(); ++ri) {
+    // with several regimes the event files carry the regime name, so they cannot overwrite each other
+    const std::string tag = have_regimes ? std::string(regimes[ri]->name) + "_" : std::string();
+    if (const int st = lab::evaluate(vars, seed, markets, requests, bc, rc, lab::regime_config(*regimes[ri]), maker_fee_bps, events_dir, tag, per_regime[ri], all, unhealthy)) return st;
+  }
+  std::vector<Row>& rows = per_regime[0];
 
   std::printf("hft_lab: %lld markets (seeds %lld..%lld) x %lld requests, %zu variants; md %lld us, ingress %lld us, egress %lld us, jitter %lld us, queue penalty %lld%%\n",
               markets, seed, seed + markets - 1, requests, vars.size(), md, ing, egr, jit, qpen);
   std::printf("risk limits derived from the variants: max order qty %lld, max position %lld (the strategy cap should bind first)\n",
               static_cast<long long>(rc.max_order_qty), static_cast<long long>(rc.max_position));
+  if (have_regimes) std::printf("regimes: %s (same seeds in each; a regime changes generator settings, not the generator)\n", regime_spec.c_str());
   if (maker_fee_bps != 0) std::printf("fees: %g bps of notional on every fill (all fills are maker fills here); PnL is after fees, edge is not\n", maker_fee_bps);
   std::printf("\n");
 
@@ -245,16 +262,38 @@ int main(int argc, char** argv) {
   std::vector<Row> trows;
   std::vector<std::size_t> picked;
   if (!have_grid) {
-    print_table(vars, rows, maker_fee_bps != 0);
-    if (vars.size() > 1) {
+    for (std::size_t ri = 0; ri < regimes.size(); ++ri) {
+      if (have_regimes) std::printf("%sregime %s: %s\n", ri ? "\n" : "", regimes[ri]->name, regimes[ri]->what);
+      print_table(vars, per_regime[ri], maker_fee_bps != 0);
+      if (vars.size() > 1 && have_regimes) {
+        std::printf("\npaired against base, same markets (variant minus base)\n");
+        print_paired(vars, per_regime[ri]);
+      }
+    }
+    if (vars.size() > 1 && have_regimes && regimes.size() > 1) {
+      std::printf("\nacross regimes: mean PnL difference from the base in each regime\n%-26s", "variant");
+      for (const lab::Regime* r : regimes) std::printf(" %11s", r->name);
+      std::printf(" %9s %11s\n", "better in", "worst");
+      for (std::size_t vi = 1; vi < vars.size(); ++vi) {
+        const lab::AcrossRegimes a = lab::across_regimes(per_regime, vi);
+        std::printf("%-26s", vars[vi].name.c_str());
+        for (const double x : a.d) std::printf(" %+11.2f", x);
+        std::printf(" %5zu/%-3zu %+11.2f\n", a.better, regimes.size(), a.worst);
+      }
+      std::printf("A variant that wins in the regime it was tuned for and loses elsewhere is fitted to that regime. 'better in' counts\n"
+                  "regimes where the mean difference is above zero; it is not a test, and every regime uses the same seeds.\n");
+    }
+    if (vars.size() > 1 && !have_regimes) {
       std::printf("\npaired against base, same markets (variant minus base)\n");
       print_paired(vars, rows);
+    }
+    if (vars.size() > 1) {
       std::printf("\nRead this with care: the fills are simulated (queue model, no market impact), the markets come from one synthetic\n"
-                  "generator, and %zu comparisons were made without adjusting p for that. A small p here says a variant beat the base on\n"
+                  "generator%s, and %zu comparisons were made without adjusting p for that. A small p here says a variant beat the base on\n"
                   "these generated markets, not that it would make money anywhere. PnL = edge + inventory: a gain that sits in the inventory\n"
                   "column is the price drifting under a position, which is luck as much as skill. With n markets the smallest possible sign p\n"
                   "is 2/2^n (%.3g here).\n",
-                  vars.size() - 1, lab::sign_test_p(static_cast<std::size_t>(markets), 0));
+                  have_regimes ? " (regimes change its settings, not its kind)" : "", vars.size() - 1, lab::sign_test_p(static_cast<std::size_t>(markets), 0));
     }
   } else {
     // Training: score every grid point, keep the best K.
@@ -274,7 +313,7 @@ int main(int argc, char** argv) {
     print_table(shown, shown_rows, maker_fee_bps != 0);
     // Held-out: only the chosen ones and the base.
     tvars = shown;
-    if (const int st = lab::evaluate(tvars, test_seed, test_markets, requests, bc, rc, maker_fee_bps, events_dir, "test_", trows, all, unhealthy)) return st;
+    if (const int st = lab::evaluate(tvars, test_seed, test_markets, requests, bc, rc, MarketConfig{}, maker_fee_bps, events_dir, "test_", trows, all, unhealthy)) return st;
     std::printf("\nheld-out markets (seeds %lld..%lld), chosen variants and base:\n", test_seed, test_seed + test_markets - 1);
     print_table(tvars, trows, maker_fee_bps != 0);
     std::printf("\npaired against base on the held-out markets (variant minus base)\n");
@@ -316,6 +355,15 @@ int main(int argc, char** argv) {
     std::fprintf(f, "{\n  \"markets\": %lld, \"requests\": %lld, \"seed\": %lld, \"maker_fee_bps\": %g, \"digest\": \"%016llx\",\n  \"variants\": ", markets, requests, seed, maker_fee_bps,
                  static_cast<unsigned long long>(all));
     json_variants(f, vars, rows);
+    if (have_regimes) {
+      std::fprintf(f, ",\n  \"regimes\": [");
+      for (std::size_t ri = 0; ri < regimes.size(); ++ri) {
+        std::fprintf(f, "%s\n    {\"name\": \"%s\", \"variants\": ", ri ? "," : "", regimes[ri]->name);
+        json_variants(f, vars, per_regime[ri]);
+        std::fprintf(f, "}");
+      }
+      std::fprintf(f, "\n  ]");
+    }
     if (have_grid) {
       std::fprintf(f, ",\n  \"test_seed\": %lld, \"test_markets\": %lld, \"risk_penalty\": %g,\n  \"selected\": [", test_seed, test_markets, risk_penalty);
       for (std::size_t k = 0; k < picked.size(); ++k) std::fprintf(f, "%s\"%s\"", k ? ", " : "", vars[picked[k]].name.c_str());

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Phase 26
+- Market regimes in the lab (ADR 36). `hft_lab --regimes a,b,...` runs the same variants on the same seeds under named regimes (default, volatile, quiet, informed, uninformed, thin, slow; each is a set of existing generator settings) and prints a table per regime plus, for two or more, a summary of each variant's mean PnL difference from the base per regime, the count of regimes where it is above zero, and the worst. `--json` gains `regimes`; `--events` file names carry the regime; not combinable with `--grid`. `lab::evaluate` takes the market configuration to generate from. Output without the flag is byte-identical to before.
+- Example (2026-10-17, 8 markets x 40,000 requests): removing the inventory skew gained in 5 of 7 regimes (+0.95 to +4.68) and lost in the informed (-1.60) and thin (-1.82) regimes, holding 37 to 41 lots against 6 to 23. Simulated fills, one generator, settings not calibrated to a real market.
+
+- Tests: the regime table pinned value by value, parsing and its errors, the across-regime summary by hand, `evaluate` with a regime against the single run (`tests/test_lab.cpp`); option checks, one regime equals the plain table, three regimes with headings and a paired comparison each, json, the summary recomputed from the json, event file names, digest repeats and depends on order (`scripts/test_lab.py`).
+- Verification: 27 mutants of the new code. First run: 1 survived (the paired comparison printed only for the first regime), 3 did not compile and were rewritten; after a new test all four were killed. `ci_local.sh` all steps passed; perf gate PASS (hot path untouched).
+- Caveats: the regimes change settings of one simulator; the values are not calibrated to a real market; the summary is not adjusted for the number of comparisons.
+
 ### Phase 25
 - Fees by liquidity (ADR 35). `order_bridge.py` marks every fill report `liq` (`taker` for the closing immediate-or-cancel order, `maker` otherwise; from the order type, not read from the exchange). `hft_live` copies the mark into the `fill` event when present. `pnl_report.py` gets `--maker-fee-bps` (negative is a rebate) and `--taker-fee-bps`; `--fee-bps` covers unmarked fills and any marked kind without its own rate; the report prints the effective rate and fees by liquidity. `hft_lab` gets `--maker-fee-bps` (-100 to 1000): PnL, ranking and the json are after fees, edge stays gross, `pnl = edge + inventory - fees`, the json gains `fees` and `maker_fee_bps`, the run digest is unchanged, and output with no fee is unchanged.
 - Example (2026-10-17, 4 markets, 20,000 requests): `requote_ticks=2` against the base was +2.38 against +1.79 gross and -0.74 against +0.92 at 1 bp, because it traded 157 fills a market against 46. Simulated fills, one generator.

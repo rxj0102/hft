@@ -83,6 +83,22 @@ What this says and does not say:
 - Held-out markets from the same generator test the choice against sampling noise, not against a different market. Retention near 100 percent would not be expected on real data.
 - If you adjust the grid after seeing held-out results, use fresh seeds, because the old ones are spent.
 
+## Market regimes
+
+`--regimes default,volatile,quiet,informed,uninformed,thin,slow` (any subset, in any order; ADR 36) runs the same variants on the same seeds under each regime and prints a table per regime, then a summary of each variant's mean PnL difference from the base per regime, in how many regimes it is above zero, and its worst. A regime is a set of generator settings, not new behaviour:
+
+| regime | what changes |
+|---|---|
+| default | nothing: the generator's own settings |
+| volatile | fair value jumps four times as often (every 100 requests, not 400) |
+| quiet | a quarter as often (1600) |
+| informed | informed takers act 70 percent of the time, not 40, and passive flow leans harder (55, not 35) |
+| uninformed | 10 and 10: a weak signal |
+| thin | 60 resting orders instead of 200 |
+| slow | requests 40 us apart instead of 10 |
+
+Example (2026-10-17, 8 markets of 40,000 requests, seeds 1000 to 1007, `--variant noskew:skew16=0`): the mean PnL difference of removing the inventory skew from the base was +2.61 (default), +4.68 (volatile), +0.96 (quiet), -1.60 (informed), +0.95 (uninformed), -1.82 (thin), +2.53 (slow): better in 5 of 7, worst -1.82. In every regime it held positions of 37 to 41 lots against 6 to 23 for the base, so the gain is mostly inventory that happened to drift the right way, and it reverses where the flow is informed or the book is thin. In the informed regime the base made +7.01 of edge and lost 9.05 on inventory (PnL -2.04). The default regime's table matches the table without the flag. Read it as a comparison of seven settings of one simulator; the values were not calibrated to anything real, and the summary does not adjust for the number of comparisons. `--regimes` cannot be combined with `--grid`.
+
 ## What it cannot tell you
 
 - The fills are simulated. The queue model is exact for the tape it replays, but the tape does not react to the strategy's orders (no market impact), so a strategy that would move the market looks better than it is.

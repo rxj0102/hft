@@ -448,6 +448,90 @@ void test_edge_axes() {
   CHECK(lab::edge_axes(axes, c).empty());
 }
 
+void test_regimes() {
+  // "default" is the generator's own configuration: a run without --regimes is the same run
+  const bt::MarketConfig d;
+  const lab::Regime* def = lab::find_regime("default");
+  CHECK(def != nullptr);
+  const bt::MarketConfig dc = lab::regime_config(*def);
+  CHECK(dc.jump_period == d.jump_period && dc.target_orders == d.target_orders && dc.informed_pct == d.informed_pct && dc.skew_pct == d.skew_pct &&
+        dc.mean_gap_ns == d.mean_gap_ns);
+  // every other regime differs from the default in exactly one setting group, and the names are unique
+  std::size_t n = 0;
+  for (const lab::Regime& r : lab::kRegimes) {
+    ++n;
+    CHECK(lab::find_regime(r.name) == &r);
+    const bt::MarketConfig c = lab::regime_config(r);
+    CHECK(c.jump_period == r.jump_period && c.target_orders == r.target_orders && c.informed_pct == r.informed_pct && c.skew_pct == r.skew_pct && c.mean_gap_ns == r.mean_gap_ns);
+    CHECK(c.informed_pct <= 100 && c.skew_pct <= 100 && c.jump_period >= 1 && c.target_orders >= 1 && c.mean_gap_ns >= 2);
+    if (&r != def) CHECK(c.jump_period != d.jump_period || c.target_orders != d.target_orders || c.informed_pct != d.informed_pct || c.skew_pct != d.skew_pct || c.mean_gap_ns != d.mean_gap_ns);
+  }
+  CHECK(n == 7);
+  // the table, pinned: the documentation says "four times as often" and so on
+  auto pin = [](const char* name, std::uint32_t jp, std::uint32_t tg, std::uint32_t inf, std::uint32_t sk, std::uint64_t gap) {
+    const lab::Regime* r = lab::find_regime(name);
+    return r && r->jump_period == jp && r->target_orders == tg && r->informed_pct == inf && r->skew_pct == sk && r->mean_gap_ns == gap;
+  };
+  CHECK(pin("default", 400, 200, 40, 35, 10'000) && pin("volatile", 100, 200, 40, 35, 10'000) && pin("quiet", 1600, 200, 40, 35, 10'000));
+  CHECK(pin("informed", 400, 200, 70, 55, 10'000) && pin("uninformed", 400, 200, 10, 10, 10'000) && pin("thin", 400, 60, 40, 35, 10'000) &&
+        pin("slow", 400, 200, 40, 35, 40'000));
+  CHECK(lab::find_regime("") == nullptr && lab::find_regime("Default") == nullptr && lab::find_regime("quiet ") == nullptr);
+  CHECK(lab::regime_config(*lab::find_regime("volatile")).jump_period < d.jump_period && lab::regime_config(*lab::find_regime("quiet")).jump_period > d.jump_period);
+  CHECK(lab::regime_config(*lab::find_regime("thin")).target_orders < d.target_orders && lab::regime_config(*lab::find_regime("slow")).mean_gap_ns > d.mean_gap_ns);
+  CHECK(lab::regime_config(*lab::find_regime("informed")).informed_pct > d.informed_pct && lab::regime_config(*lab::find_regime("uninformed")).informed_pct < d.informed_pct);
+
+  // parsing
+  std::vector<const lab::Regime*> out;
+  std::string err;
+  CHECK(lab::parse_regimes("quiet", out, err) && out.size() == 1 && out[0] == lab::find_regime("quiet"));
+  CHECK(lab::parse_regimes("thin,default,slow", out, err) && out.size() == 3 && out[0]->name == std::string("thin") && out[1] == def && out[2]->name == std::string("slow"));
+  CHECK(!lab::parse_regimes("", out, err) && err.find("unknown regime ''") != std::string::npos);
+  CHECK(!lab::parse_regimes("quiet,", out, err) && err.find("unknown regime ''") != std::string::npos);
+  CHECK(!lab::parse_regimes(",quiet", out, err));
+  CHECK(!lab::parse_regimes("quiet,bogus", out, err) && err.find("'bogus'") != std::string::npos);
+  CHECK(!lab::parse_regimes("quiet,thin,quiet", out, err) && err.find("'quiet' listed twice") != std::string::npos);
+  CHECK(lab::parse_regimes("slow", out, err) && out.size() == 1);   // a failed parse does not leave stale entries behind
+  CHECK(!lab::parse_regimes("nope", out, err) && out.empty());
+
+  // across_regimes, by hand: base pnl {1,1} and variant pnl {3,1} (+1 mean), {0,0} (-1), {2,2} (+1)
+  auto mk = [](double a, double b, double c, double e) {
+    std::vector<lab::Row> rows(2);
+    rows[0].pnl = {a, b};
+    rows[1].pnl = {c, e};
+    return rows;
+  };
+  std::vector<std::vector<lab::Row>> pr = {mk(1, 1, 3, 1), mk(1, 1, 0, 0), mk(1, 1, 2, 2)};
+  const lab::AcrossRegimes a = lab::across_regimes(pr, 1);
+  CHECK(a.d.size() == 3 && a.d[0] == 1.0 && a.d[1] == -1.0 && a.d[2] == 1.0 && a.better == 2 && a.worst == -1.0);
+  pr = {mk(0, 0, 0, 0)};     // a tie is not better
+  const lab::AcrossRegimes t = lab::across_regimes(pr, 1);
+  CHECK(t.better == 0 && t.worst == 0.0 && t.d[0] == 0.0);
+  pr = {mk(1, 1, 5, 5), mk(1, 1, 4, 4)};     // worst is the smallest, not the last or the first
+  CHECK(lab::across_regimes(pr, 1).worst == 3.0);
+  pr = {mk(1, 1, 0, 0), mk(1, 1, 5, 5), mk(1, 1, 4, 4)};
+  CHECK(lab::across_regimes(pr, 1).worst == -1.0 && lab::across_regimes(pr, 1).better == 2);
+  CHECK(lab::across_regimes({}, 1).d.empty() && lab::across_regimes({}, 1).worst == 0.0);
+
+  // evaluate with a regime is the single run on that regime's market, and not the default's
+  std::vector<lab::Variant> vars(1);
+  vars[0].name = "base";
+  const risk::RiskConfig rc = lab::lab_risk(40);
+  std::vector<lab::Row> rd, rv;
+  std::uint64_t dg1 = lab::kDigestSeed, dg2 = lab::kDigestSeed;
+  int bad = 0;
+  const bt::MarketConfig vol = lab::regime_config(*lab::find_regime("volatile"));
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, d, 0.0, "", "", rd, dg1, bad) == 0 && lab::evaluate(vars, 900, 2, 8000, lat(), rc, vol, 0.0, "", "", rv, dg2, bad) == 0);
+  CHECK(dg1 != dg2 && rd[0].digest != rv[0].digest);
+  for (std::size_t mi = 0; mi < 2; ++mi) {
+    bt::MarketConfig mc = vol;
+    mc.requests = 8000;
+    mc.seed = 900 + mi;
+    const bt::Market m = bt::MarketGen::generate(mc);
+    const lab::RunResult r = lab::run_one(m, lat(), vars[0].cfg, rc, nullptr);
+    CHECK(r.rep.digest == rv[0].digest[mi] && r.rep.pnl == rv[0].pnl[mi]);
+  }
+}
+
 void test_evaluate() {
   std::vector<lab::Variant> vars(2);
   vars[0].name = "base";
@@ -457,7 +541,7 @@ void test_evaluate() {
   std::vector<lab::Row> rows;
   std::uint64_t dg = lab::kDigestSeed;
   int bad = 0;
-  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, 0.0, "", "", rows, dg, bad) == 0 && bad == 0);
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, bt::MarketConfig{}, 0.0, "", "", rows, dg, bad) == 0 && bad == 0);
   CHECK(rows.size() == 2 && rows[0].pnl.size() == 2 && rows[1].digest.size() == 2 && rows[0].fills.size() == 2 && rows[0].max_pos.size() == 2);
   // each entry is the single run of that variant on that market, and the digest chains them market-major
   std::uint64_t want = lab::kDigestSeed;
@@ -475,13 +559,13 @@ void test_evaluate() {
   CHECK(rows[0].digest[0] != rows[0].digest[1]);
   // rows are rebuilt, not appended to
   std::uint64_t dg2 = lab::kDigestSeed;
-  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, 0.0, "", "", rows, dg2, bad) == 0 && rows[0].pnl.size() == 2 && dg2 == dg);
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, bt::MarketConfig{}, 0.0, "", "", rows, dg2, bad) == 0 && rows[0].pnl.size() == 2 && dg2 == dg);
   // fees: pnl is the gross result less fee_for(volume), edge is untouched, a rebate is the negative, the digest does not move
   CHECK(lab::fee_for(200000.0, 2.5) == 50.0 && lab::fee_for(200000.0, -2.5) == -50.0 && lab::fee_for(0.0, 9.0) == 0.0);
   {
     std::vector<lab::Row> fr, rr;
     std::uint64_t dgf = lab::kDigestSeed, dgr = lab::kDigestSeed;
-    CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, 3.0, "", "", fr, dgf, bad) == 0 && lab::evaluate(vars, 900, 2, 8000, lat(), rc, -3.0, "", "", rr, dgr, bad) == 0);
+    CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, bt::MarketConfig{}, 3.0, "", "", fr, dgf, bad) == 0 && lab::evaluate(vars, 900, 2, 8000, lat(), rc, bt::MarketConfig{}, -3.0, "", "", rr, dgr, bad) == 0);
     CHECK(dgf == dg && dgr == dg);
     for (std::size_t vi = 0; vi < 2; ++vi)
       for (std::size_t mi = 0; mi < 2; ++mi) {
@@ -492,13 +576,13 @@ void test_evaluate() {
       }
   }
   // an events directory that cannot be written is a setup failure
-  CHECK(lab::evaluate(vars, 900, 1, 8000, lat(), rc, 0.0, "/nonexistent_dir_for_lab", "t_", rows, dg2, bad) == 2);
+  CHECK(lab::evaluate(vars, 900, 1, 8000, lat(), rc, bt::MarketConfig{}, 0.0, "/nonexistent_dir_for_lab", "t_", rows, dg2, bad) == 2);
   // with a directory, one file per variant and market, named with the tag
   char tmpl[] = "/tmp/lab_test_XXXXXX";
   const char* dir = mkdtemp(tmpl);
   CHECK(dir != nullptr);
   if (dir) {
-    CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, 0.0, dir, "t_", rows, dg2, bad) == 0);
+    CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, bt::MarketConfig{}, 0.0, dir, "t_", rows, dg2, bad) == 0);
     for (const char* f : {"/t_base_m0.jsonl", "/t_base_m1.jsonl", "/t_noalpha_m0.jsonl", "/t_noalpha_m1.jsonl"}) {
       const std::string path = std::string(dir) + f;
       std::FILE* fp = std::fopen(path.c_str(), "r");
@@ -548,6 +632,7 @@ int main() {
   test_grid();
   test_rank();
   test_edge_axes();
+  test_regimes();
   test_evaluate();
   test_health();
   if (g_failures == 0) std::puts("test_lab: all checks passed");

@@ -342,19 +342,97 @@ struct Row {
   std::vector<std::int64_t> max_pos;
 };
 
+// Named market regimes: settings of the existing generator, nothing new in the generator itself. "default" is the generator's
+// own configuration, so a run without --regimes is unchanged. The others move one thing at a time.
+struct Regime {
+  const char* name;
+  const char* what;
+  std::uint32_t jump_period, target_orders, informed_pct, skew_pct;
+  std::uint64_t mean_gap_ns;
+};
+
+inline constexpr Regime kRegimes[] = {
+    {"default", "the generator's own settings", 400, 200, 40, 35, 10'000},
+    {"volatile", "the fair value jumps four times as often", 100, 200, 40, 35, 10'000},
+    {"quiet", "the fair value jumps a quarter as often", 1600, 200, 40, 35, 10'000},
+    {"informed", "more informed flow and a stronger lean (more adverse selection)", 400, 200, 70, 55, 10'000},
+    {"uninformed", "little informed flow and a weak lean (a weak signal)", 400, 200, 10, 10, 10'000},
+    {"thin", "a third of the resting orders (a thin book)", 400, 60, 40, 35, 10'000},
+    {"slow", "requests four times as far apart (a slow tape)", 400, 200, 40, 35, 40'000},
+};
+
+inline const Regime* find_regime(std::string_view name) {
+  for (const Regime& r : kRegimes)
+    if (name == r.name) return &r;
+  return nullptr;
+}
+
+inline MarketConfig regime_config(const Regime& r) {
+  MarketConfig c;
+  c.jump_period = r.jump_period;
+  c.target_orders = r.target_orders;
+  c.informed_pct = r.informed_pct;
+  c.skew_pct = r.skew_pct;
+  c.mean_gap_ns = r.mean_gap_ns;
+  return c;
+}
+
+// "a,b,c" -> regimes, in order. Unknown names, empty names and repeats are errors (err says which).
+inline bool parse_regimes(std::string_view spec, std::vector<const Regime*>& out, std::string& err) {
+  out.clear();
+  std::size_t pos = 0;
+  while (pos <= spec.size()) {
+    const std::size_t comma = spec.find(',', pos);
+    const std::string_view name = spec.substr(pos, comma == std::string_view::npos ? std::string_view::npos : comma - pos);
+    const Regime* r = find_regime(name);
+    if (!r) {
+      err = "unknown regime '" + std::string(name) + "'";
+      return false;
+    }
+    for (const Regime* q : out)
+      if (q == r) {
+        err = "regime '" + std::string(name) + "' listed twice";
+        return false;
+      }
+    out.push_back(r);
+    if (comma == std::string_view::npos) break;
+    pos = comma + 1;
+  }
+  return true;
+}
+
+// How one variant did against the base in every regime: the mean PnL difference per regime, in how many regimes it is above
+// zero, and the worst one. `per_regime[r][v]` is variant v's row in regime r; row 0 of each is the base.
+struct AcrossRegimes {
+  std::vector<double> d;
+  std::size_t better = 0;
+  double worst = 0;
+};
+
+inline AcrossRegimes across_regimes(const std::vector<std::vector<Row>>& per_regime, std::size_t vi) {
+  AcrossRegimes a;
+  for (const std::vector<Row>& rows : per_regime) a.d.push_back(paired(rows[vi].pnl, rows[0].pnl).mean);
+  a.worst = a.d.empty() ? 0.0 : a.d[0];
+  for (const double x : a.d) {
+    if (x > 0) ++a.better;
+    if (x < a.worst) a.worst = x;
+  }
+  return a;
+}
+
 // Fee in currency units for a run that traded `notional` currency units, at `bps` basis points of notional (negative is a
 // rebate). Every fill in a lab run is a maker fill (the strategy only sends post-only orders), so one rate is enough.
 inline double fee_for(double notional, double bps) { return notional * bps / 1e4; }
 
 // Runs every variant on `markets` generated markets with seeds seed, seed+1, ... and fills `rows` (one per variant,
-// rebuilt on each call). PnL in the rows is after fees at `maker_fee_bps`. Unhealthy runs are reported on stderr and counted. Returns 0, or 2 when an event file
+// rebuilt on each call). PnL in the rows is after fees at `maker_fee_bps`. Markets are generated from `proto` (its requests and seed are replaced). Unhealthy runs are reported on stderr and counted. Returns 0, or 2 when an event file
 // cannot be written or the backtester cannot be set up. `tag` prefixes event file names.
 inline int evaluate(const std::vector<Variant>& vars, long long seed, long long markets, long long requests, const BtConfig& bc,
-                    const risk::RiskConfig& rc, double maker_fee_bps, const std::string& events_dir, const std::string& tag,
+                    const risk::RiskConfig& rc, const MarketConfig& proto, double maker_fee_bps, const std::string& events_dir, const std::string& tag,
                     std::vector<Row>& rows, std::uint64_t& digest, int& unhealthy) {
   rows.assign(vars.size(), Row{});
   for (long long mi = 0; mi < markets; ++mi) {
-    MarketConfig mc;
+    MarketConfig mc = proto;
     mc.requests = static_cast<std::uint64_t>(requests);
     mc.seed = static_cast<std::uint64_t>(seed + mi);
     const Market m = MarketGen::generate(mc);
