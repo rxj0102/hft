@@ -69,6 +69,18 @@ for args, why in [
     (["--latency-sweep", "0,5", "--regimes", "quiet"], "latency sweep with regimes"),
     (["--latency-sweep", "0,5", "--grid", "skew16=1,2"], "latency sweep with a grid"),
     (["--latency-axis", "md"], "latency axis without a sweep"),
+    (["--queue-sweep"], "queue sweep without a value"),
+    (["--queue-sweep", ""], "empty queue sweep"),
+    (["--queue-sweep", "0,x"], "non-numeric queue penalty"),
+    (["--queue-sweep", "50,50"], "repeated queue penalty"),
+    (["--queue-sweep", "100,50"], "queue penalties not increasing"),
+    (["--queue-sweep", "-5"], "negative queue penalty"),
+    (["--queue-sweep", "1001"], "queue penalty out of range"),
+    (["--queue-sweep", "1,2,3,4,5,6,7,8,9,10,11,12,13"], "too many queue penalties"),
+    (["--queue-sweep", "0,50", "--latency-sweep", "0,5"], "queue sweep with latency sweep"),
+    (["--queue-sweep", "0,50", "--regimes", "quiet"], "queue sweep with regimes"),
+    (["--queue-sweep", "0,50", "--grid", "skew16=1,2"], "queue sweep with a grid"),
+    (["--queue-sweep", "0,50", "--latency-axis", "md"], "latency axis with a queue sweep"),
     (["--latency-sweep", "0,5", "--latency-axis", "everything"], "unknown latency axis"),
     (["--latency-sweep", "0,5", "--latency-axis", "MD"], "latency axis is case sensitive"),
     (["--maker-fee-bps"], "fee without a value"),
@@ -122,6 +134,7 @@ with tempfile.TemporaryDirectory() as d:
     rc, out, err = lab(*SMALL, "--variant", "noskew:skew16=0", "--latency-sweep", "0,20,100", "--json", jl, "--events", ev)
     check(rc == 0 and "latency sweep over 3 delays, axis all, jitter 2 us" in out, "runs, and the header says what was swept")
     check(all(("\nlatency %s us\n" % u) in out for u in ("0", "20", "100")), "a table for each delay")
+    check("delays are added to a simulated venue" in out and "mean PnL at the largest delay over mean PnL at the smallest" in out and "stress on one assumption" not in out, "the latency sweep explains itself in latency terms")
     j = json.load(open(jl))
     check(j["latency_axis"] == "all" and [x["us"] for x in j["latencies"]] == [0, 20, 100], "json: axis and delays in order")
     check(all(len(x["variants"]) == 2 and len(x["variants"][0]["pnl"]) == 4 for x in j["latencies"]), "json: both variants on 4 markets at every delay")
@@ -169,6 +182,54 @@ with tempfile.TemporaryDirectory() as d:
     check(ok, "fees apply in a sweep: pnl = edge + inventory - fees at every delay")
     rc, outm, _ = lab(*SMALL, "--latency-sweep", "0", "--latency-axis", "egress", "--md-us", "7")
     check("axis egress" in outm and "md 7 us" in outm, "the other hops keep their configured delays: %s" % [l for l in outm.splitlines() if l.startswith("axis")])
+
+print("queue penalty sweep")
+with tempfile.TemporaryDirectory() as d:
+    jq, ev = os.path.join(d, "q.json"), os.path.join(d, "ev")
+    os.mkdir(ev)
+    rc, out, err = lab(*SMALL, "--variant", "noskew:skew16=0", "--queue-sweep", "0,100,300", "--queue-penalty-pct", "7", "--json", jq, "--events", ev)
+    check(rc == 0 and "queue penalty sweep over 3 values" in out and "--queue-penalty-pct is replaced by each value" in out, "runs, and the header says what was swept")
+    check(all(("\nqueue penalty %s %%\n" % u) in out for u in ("0", "100", "300")), "a table for each value")
+    check("stress on one assumption of the fill model" in out and "largest penalty over mean PnL at the smallest" in out, "the queue sweep explains itself in queue terms")
+    check("delays are added" not in out and "largest delay" not in out, "and does not use the latency sweep's wording")
+    check("latency" not in out.split("Read this with care")[0].lower().replace("md 5 us, ingress 10 us, egress 10 us", ""), "no latency wording in a queue sweep")
+    j = json.load(open(jq))
+    check("latencies" not in j and "latency_axis" not in j and [x["pct"] for x in j["queue_penalties"]] == [0, 100, 300], "json: queue_penalties with pct, no latency keys")
+    check(len({tuple(x["variants"][0]["pnl"]) for x in j["queue_penalties"]}) == 3, "json: the penalties give different results")
+    sec = out.split("mean PnL by queue penalty (percent)")[1].split("difference from the base")[0]
+    rows = {l.split()[0]: l.split() for l in sec.splitlines() if l.startswith(("base ", "noskew "))}
+    for vi, name in enumerate(("base", "noskew")):
+        want = [sum(x["variants"][vi]["pnl"]) / 4 for x in j["queue_penalties"]]
+        got = [float(x) for x in rows[name][1:4]]
+        check(all(abs(g - w) < 0.006 for g, w in zip(got, want)), "mean PnL row for %s recomputed from the json: %s vs %s" % (name, got, want))
+        kept = rows[name][4]
+        check((kept == "n/a") == (want[0] <= 0) and (kept == "n/a" or abs(float(kept.rstrip("%")) - 100 * want[2] / want[0]) < 0.6), "kept for %s: %s" % (name, kept))
+    dsec = out.split("difference from the base by queue penalty")[1]
+    drow = [l for l in dsec.splitlines() if l.startswith("noskew")][0].split()
+    wantd = [sum(x["variants"][1]["pnl"][k] - x["variants"][0]["pnl"][k] for k in range(4)) / 4 for x in j["queue_penalties"]]
+    check(all(abs(float(g) - w) < 0.006 for g, w in zip(drow[1:4], wantd)), "differences from the base recomputed from the json: %s vs %s" % (drow[1:4], wantd))
+    check(drow[4] == "%d/3" % sum(1 for w in wantd if w > 0) and abs(float(drow[5]) - min(wantd)) < 0.006, "better-in and worst: %s" % drow[4:])
+    check("base" not in [l.split()[0] for l in dsec.splitlines() if l.split()], "the difference table has no row for the base")
+    files = sorted(os.listdir(ev))
+    check(len(files) == 3 * 2 * 4 and all(f.startswith(("q0pct_", "q100pct_", "q300pct_")) for f in files), "event files carry the penalty (%d files)" % len(files))
+    rc2, out2, _ = lab(*SMALL, "--variant", "noskew:skew16=0", "--queue-sweep", "0,100,300", "--queue-penalty-pct", "7")
+    check(re.search(r"run digest (\w+)", out).group(1) == re.search(r"run digest (\w+)", out2).group(1), "the digest repeats")
+    # a sweep point equals the plain run with that penalty; the base --queue-penalty-pct does not leak into it
+    jp, js = os.path.join(d, "p.json"), os.path.join(d, "s.json")
+    lab(*SMALL, "--queue-penalty-pct", "100", "--json", jp)
+    lab(*SMALL, "--queue-sweep", "100", "--queue-penalty-pct", "400", "--json", js)
+    check(json.load(open(jp))["variants"][0]["pnl"] == json.load(open(js))["queue_penalties"][0]["variants"][0]["pnl"], "a sweep point equals the plain run with that penalty")
+    rc, outb, _ = lab(*SMALL, "--queue-sweep", "0")
+    check(rc == 0 and "difference from the base" not in outb and "kept" in outb, "base only: no difference table; one value is allowed")
+    jf = os.path.join(d, "f.json")
+    rc, outf, _ = lab(*SMALL, "--queue-sweep", "0,100", "--maker-fee-bps", "2", "--json", jf)
+    jj = json.load(open(jf))
+    ok = "fees: 2 bps" in outf and jj["maker_fee_bps"] == 2 and all(f > 0 for x in jj["queue_penalties"] for f in x["variants"][0]["fees"])
+    ok = ok and all(abs(x["variants"][0]["pnl"][k] - (x["variants"][0]["edge"][k] + x["variants"][0]["inventory"][k] - x["variants"][0]["fees"][k])) < 1e-9
+                    for x in jj["queue_penalties"] for k in range(4))
+    check(ok, "fees apply in a queue sweep: pnl = edge + inventory - fees at every value")
+    rc, outl, _ = lab(*SMALL, "--queue-sweep", "0,50", "--md-us", "7")
+    check("md 7 us" in outl, "the configured latencies are kept: %s" % outl.splitlines()[0][-110:])
 
 print("fees")
 with tempfile.TemporaryDirectory() as d:

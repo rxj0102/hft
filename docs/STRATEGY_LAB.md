@@ -115,6 +115,22 @@ Up to 20 us the base lost under 5 percent; at 100 us it kept 61 percent. The no-
 
 Read it as the simulated PnL against delay in a queue model whose tape does not react to us. It does not say how fast a real system has to be.
 
+## Queue penalty sweep
+
+`--queue-sweep 0,25,50,100,200,400` (percent, strictly increasing; ADR 38) runs the same variants on the same markets once per queue penalty and prints the same three things as the latency sweep. A penalty of p treats every order as if an extra p percent of its level's quantity were ahead of it when it joined, and lets only trades work that off; 0 is the exact queue the tape shows. `--queue-penalty-pct` is replaced by each value. It cannot be combined with the other sweeps, `--grid` or `--regimes`.
+
+Example (2026-10-17, 8 markets of 40,000 requests, seeds 1000 to 1007):
+
+| variant | 0 | 25 | 50 | 100 | 200 | 400 % | kept |
+|---|---|---|---|---|---|---|---|
+| base | +3.47 | +2.75 | +2.81 | +2.40 | +2.10 | +1.57 | 45% |
+| noskew (`skew16=0`) | +6.08 | +5.50 | +4.89 | +4.31 | +4.21 | +3.79 | 62% |
+| noalpha (`alpha16=0`) | +0.07 | -0.01 | +0.01 | +0.02 | -0.04 | +0.09 | not meaningful |
+
+The base lost about a fifth of its PnL at 25 percent and under half of it by 400 percent (fills per market fell from 108 to 51). The no-skew variant stayed ahead of the base at every penalty (+1.91 to +2.75), so its advantage here does not depend on an optimistic queue; as the latency sweep and the regimes showed, it holds much larger positions, which this sweep does not change. The no-alpha variant made about nothing at every penalty. The base is not monotone between 25 and 50 percent (+2.75, +2.81): with 8 markets, differences of a few tenths are noise.
+
+Read it as a stress on one assumption of the simulator, not a measurement of a real queue.
+
 ## What it cannot tell you
 
 - The fills are simulated. The queue model is exact for the tape it replays, but the tape does not react to the strategy's orders (no market impact), so a strategy that would move the market looks better than it is.

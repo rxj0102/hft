@@ -548,6 +548,33 @@ void test_latency() {
   CHECK(!lab::parse_latencies("5,3", v, err) && err.find("'3' follows 5") != std::string::npos);
   CHECK(!lab::parse_latencies("zz", v, err) && v.empty());       // a failed parse leaves nothing behind
 
+  // queue penalties: percent, 0 to 1000, same shape of list
+  CHECK(lab::parse_queue_penalties("0,50,100,1000", v, err) && v.size() == 4 && v[3] == 1000);
+  CHECK(!lab::parse_queue_penalties("1001", v, err) && err == "queue penalty '1001' is not an integer between 0 and 1000 percent");
+  CHECK(!lab::parse_queue_penalties("-1", v, err) && !lab::parse_queue_penalties("5,x", v, err) && err.find("'x'") != std::string::npos);
+  CHECK(!lab::parse_queue_penalties("50,50", v, err) && err == "queue penalties must be strictly increasing ('50' follows 50)");
+  CHECK(!lab::parse_queue_penalties("1,2,3,4,5,6,7,8,9,10,11,12,13", v, err) && err == "at most 12 queue penalties");
+  CHECK(!lab::parse_queue_penalties("", v, err) && v.empty());
+  CHECK(!lab::parse_latencies("100001", v, err) && err == "latency '100001' is not an integer between 0 and 100000 microseconds");
+  CHECK(!lab::parse_latencies("5,5", v, err) && err == "latencies must be strictly increasing ('5' follows 5)");
+  {
+    BtConfig q;
+    q.md_ns = 11;
+    q.queue_penalty_pct = 3;
+    const BtConfig q2 = lab::with_queue_penalty(q, 250);
+    CHECK(q2.queue_penalty_pct == 250 && q2.md_ns == 11 && q.queue_penalty_pct == 3);
+    std::vector<lab::Variant> qv(1);
+    qv[0].name = "base";
+    const risk::RiskConfig qrc = lab::lab_risk(40);
+    std::vector<lab::Row> a0, a1;
+    std::uint64_t e0 = lab::kDigestSeed, e1 = lab::kDigestSeed;
+    int qbad = 0;
+    CHECK(lab::evaluate(qv, 900, 2, 8000, lab::with_queue_penalty(lat(), 0), qrc, bt::MarketConfig{}, 0.0, "", "", a0, e0, qbad) == 0);
+    CHECK(lab::evaluate(qv, 900, 2, 8000, lab::with_queue_penalty(lat(), 300), qrc, bt::MarketConfig{}, 0.0, "", "", a1, e1, qbad) == 0);
+    CHECK(e0 != e1 && a0[0].digest != a1[0].digest);
+    CHECK(lab::run_one(small_market(900, 8000), lab::with_queue_penalty(lat(), 300), qv[0].cfg, qrc, nullptr).rep.digest == a1[0].digest[0]);
+  }
+
   lab::LatencyAxis ax = lab::LatencyAxis::Md;
   CHECK(lab::parse_latency_axis("all", ax) && ax == lab::LatencyAxis::All);
   CHECK(lab::parse_latency_axis("md", ax) && ax == lab::LatencyAxis::Md);

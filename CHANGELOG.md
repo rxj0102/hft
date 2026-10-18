@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Phase 28
+- Queue penalty sweep (ADR 38). `hft_lab --queue-sweep pct1,pct2,...` runs the same variants and markets once per queue penalty (strictly increasing, 0 to 1000 percent, at most 12; `--queue-penalty-pct` is replaced by each value) with the latency sweep's output: a table per value, mean PnL by value with `kept`, and the difference from the base by value. `--json` gains `queue_penalties` (with `pct`); `--events` files carry `q<pct>pct_`. Not combinable with the other sweep, `--grid`, `--regimes` or `--latency-axis`. The sweep code is shared with the latency sweep, whose output is byte-identical to before. New helpers in `lab.hpp`: `parse_increasing`, `parse_queue_penalties`, `with_queue_penalty`.
+- Example (2026-10-17, 8 markets x 40,000 requests): base PnL +3.47 at 0 percent, +2.75 at 25, +1.57 at 400 (kept 45 percent, fills per market 108 to 51); the no-skew variant +6.08 to +3.79 and ahead of the base at every penalty (+1.91 to +2.75). Simulated fills, one generator.
+
+- Tests: parsing and its errors, the latency messages unchanged, `with_queue_penalty` sets only its field, a penalty changes the run and equals the single run (`tests/test_lab.cpp`); option checks and every conflict, tables per value, json, means, kept and differences recomputed from the json, event names, digest, a sweep point equals the plain run and ignores `--queue-penalty-pct`, fees apply, each sweep explains itself in its own terms (`scripts/test_lab.py`).
+- Verification: 25 mutants of the new code. First run: 2 survived (the two explanatory texts of the queue sweep) and 1 did not compile; after new tests all three were killed. `ci_local.sh` all steps passed; perf gate PASS (hot path untouched).
+- Caveats: a stress on one assumption of the simulator, not a measurement of a real queue; the same fraction is added for every order; 8 markets give means that differ by a few tenths.
+
 ### Phase 27
 - Latency sweep (ADR 37). `hft_lab --latency-sweep us1,us2,...` runs the same variants and markets at each delay (strictly increasing, 0 to 100,000 us, at most 12) and prints a table per delay, mean PnL by delay with `kept`, and each variant's difference from the base by delay (count of delays above zero, worst). `--latency-axis all|md|ingress|egress` picks the hop; the others keep their configured delays. `--json` gains `latency_axis` and `latencies`; `--events` files carry `lat<us>us_`. Not combinable with `--grid` or `--regimes`. New helpers in `lab.hpp`: `LatencyAxis`, `parse_latency_axis`, `with_latency`, `parse_latencies`.
 - Example (2026-10-17, 8 markets x 40,000 requests): base PnL +3.44 at 0 us, +3.27 at 20 us, +2.09 at 100 us (kept 61 percent); no-skew variant +6.34, +5.80, +2.19 (its lead over the base fell from +2.90 to +0.10). With the delay on one hop only, market data and order entry cost PnL and report return did not. Simulated fills, one generator.

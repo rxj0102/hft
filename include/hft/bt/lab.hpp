@@ -451,24 +451,24 @@ inline BtConfig with_latency(BtConfig bc, LatencyAxis axis, long long us) {
   return bc;
 }
 
-// "0,5,20" -> microseconds, strictly increasing, each 0..100000, at most 12 (err says what is wrong).
-inline bool parse_latencies(std::string_view spec, std::vector<long long>& out, std::string& err) {
+// "0,5,20" -> non-negative integers up to `hi`, strictly increasing, at most 12. `noun` and `unit` word the error.
+inline bool parse_increasing(std::string_view spec, long long hi, const char* noun, const char* plural, const char* unit, std::vector<long long>& out, std::string& err) {
   out.clear();
   std::size_t pos = 0;
   while (pos <= spec.size()) {
     const std::size_t comma = spec.find(',', pos);
     const std::string tok(spec.substr(pos, comma == std::string_view::npos ? std::string_view::npos : comma - pos));
     long long v = 0;
-    if (!parse_int(tok, v) || v < 0 || v > 100000) {
-      err = "latency '" + tok + "' is not an integer between 0 and 100000 microseconds";
+    if (!parse_int(tok, v) || v < 0 || v > hi) {
+      err = std::string(noun) + " '" + tok + "' is not an integer between 0 and " + std::to_string(hi) + " " + unit;
       return false;
     }
     if (!out.empty() && v <= out.back()) {
-      err = "latencies must be strictly increasing ('" + tok + "' follows " + std::to_string(out.back()) + ")";
+      err = std::string(plural) + " must be strictly increasing ('" + tok + "' follows " + std::to_string(out.back()) + ")";
       return false;
     }
     if (out.size() == 12) {
-      err = "at most 12 latencies";
+      err = std::string("at most 12 ") + plural;
       return false;
     }
     out.push_back(v);
@@ -476,6 +476,21 @@ inline bool parse_latencies(std::string_view spec, std::vector<long long>& out, 
     pos = comma + 1;
   }
   return true;
+}
+
+// Delays in microseconds, 0 to 100000.
+inline bool parse_latencies(std::string_view spec, std::vector<long long>& out, std::string& err) {
+  return parse_increasing(spec, 100000, "latency", "latencies", "microseconds", out, err);
+}
+
+// Queue penalties in percent, 0 to 1000 (the backtester's queue_penalty_pct: an extra p percent of the level's quantity ahead of us).
+inline bool parse_queue_penalties(std::string_view spec, std::vector<long long>& out, std::string& err) {
+  return parse_increasing(spec, 1000, "queue penalty", "queue penalties", "percent", out, err);
+}
+
+inline BtConfig with_queue_penalty(BtConfig bc, long long pct) {
+  bc.queue_penalty_pct = static_cast<std::uint32_t>(pct);
+  return bc;
 }
 
 // Fee in currency units for a run that traded `notional` currency units, at `bps` basis points of notional (negative is a

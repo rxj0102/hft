@@ -25,7 +25,7 @@ These exclude the NIC, kernel, TLS, JSON parsing and the exchange, and p99.9 and
 
 **The hot path** (`include/hft`, header-only): feed handler with A/B line arbitration, gap detection and snapshot recovery; order book with flat price levels and intrusive order lists; market maker with an imbalance signal and inventory skew; pre-trade risk with a latched kill switch; an eight-state OMS; a length-prefixed order-entry protocol. No heap, exceptions, RTTI, virtual calls, locks or syscalls on the path; this is checked by compiler flags, an allocation trap and a page-fault check in the benchmark.
 
-**Around it, offline:** a matching engine and exchange simulator, a queue-aware backtester, and a byte-exact replay oracle: a backtest is recorded and replayed through the production pipeline, and the wire bytes must be identical before the benchmark prints any latency. `hft_lab` runs strategy parameter variants over many generated markets and compares them with paired statistics, can search a parameter grid on training markets and check the winners on held-out ones, can repeat a comparison across seven named market regimes, and can sweep latency to show how fast a variant's simulated PnL decays (see [docs/STRATEGY_LAB.md](docs/STRATEGY_LAB.md)); its simulated fills go through the same PnL report that will judge real ones.
+**Around it, offline:** a matching engine and exchange simulator, a queue-aware backtester, and a byte-exact replay oracle: a backtest is recorded and replayed through the production pipeline, and the wire bytes must be identical before the benchmark prints any latency. `hft_lab` runs strategy parameter variants over many generated markets and compares them with paired statistics, can search a parameter grid on training markets and check the winners on held-out ones, can repeat a comparison across seven named market regimes, can sweep latency to show how fast a variant's simulated PnL decays, and can sweep the queue penalty to show how much it depends on the fill model (see [docs/STRATEGY_LAB.md](docs/STRATEGY_LAB.md)); its simulated fills go through the same PnL report that will judge real ones.
 
 **Live, paper:** `hft_live` runs the same pipeline on the live public Coinbase level-2 feed against a paper venue, with guards for a dropped connection, a price off the grid and a silent feed, and it checks its own book against an independent model while running.
 
@@ -39,7 +39,7 @@ These exclude the NIC, kernel, TLS, JSON parsing and the exchange, and p99.9 and
 - Nine libFuzzer targets, including one where the fuzz input plays the exchange.
 - Mutation checks at every phase: bugs injected on purpose, and a test had to fail. The first runs always had survivors, and each was either killed with a new test or removed as unobservable. Counts are in [docs/RESULTS.md](docs/RESULTS.md) and the changelog.
 - GitHub Actions with nine jobs (build and test cells, TSan, fuzz smoke, performance gate). It has found real faults that local runs missed, such as a missing Python package in five cells and a race in a test. See [docs/CI.md](docs/CI.md).
-- 37 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
+- 38 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Build and run
 

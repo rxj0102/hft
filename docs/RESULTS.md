@@ -36,6 +36,8 @@ Command: `./build/release/hft_lab --markets 16 --requests 200000 --variant noalp
 
 Latency sweep (`--latency-sweep`, ADR 37), 2026-10-17: 8 markets of 40,000 requests, delay on all three hops. The base kept 61 percent of its simulated PnL at 100 us against 0 us (under 5 percent lost up to 20 us); the no-skew variant's lead over the base shrank from +2.90 to +0.10. Table and reading in [STRATEGY_LAB.md](STRATEGY_LAB.md). Simulated fills, one generator; not a statement about a real venue.
 
+Queue penalty sweep (`--queue-sweep`, ADR 38), 2026-10-17: 8 markets of 40,000 requests. The base kept 45 percent of its simulated PnL at a penalty of 400 percent against 0 (about a fifth lost already at 25 percent); the no-skew variant stayed ahead of the base at every penalty. Table and reading in [STRATEGY_LAB.md](STRATEGY_LAB.md). A stress on one assumption of the simulator, not a measurement of a real queue.
+
 Parameter search with held-out markets (`--grid`, ADR 34), 2026-10-17: grids of 48 and 64 points on 8 training markets, the best 3 re-run on 8 fresh markets. The best points kept 90 to 104 percent of their training gain over the base on the held-out markets, so there was almost no winner's curse in these grids, and every chosen point sat at the edge of the grid (more imbalance lean, tighter quotes, more inventory). Details and the reading are in [STRATEGY_LAB.md](STRATEGY_LAB.md). Same caveats: simulated fills, one generator.
 
 ## What the checks add up to
