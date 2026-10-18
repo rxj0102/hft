@@ -337,17 +337,21 @@ constexpr std::uint64_t kDigestSeed = 1469598103934665603ULL;
 
 // One variant's results, one entry per market.
 struct Row {
-  std::vector<double> pnl, edge, inventory, fill_rate, adverse1ms, sharpe;
+  std::vector<double> pnl, edge, inventory, fees, fill_rate, adverse1ms, sharpe;   // pnl is after fees: pnl = edge + inventory - fees
   std::vector<std::uint64_t> fills, digest, risk_rejects;
   std::vector<std::int64_t> max_pos;
 };
 
-// Runs every variant on `markets` generated markets with seeds seed, seed+1, ... Appends to `rows` (one per variant,
-// created on the first call). Unhealthy runs are reported on stderr and counted. Returns 0, or 2 when an event file
+// Fee in currency units for a run that traded `notional` currency units, at `bps` basis points of notional (negative is a
+// rebate). Every fill in a lab run is a maker fill (the strategy only sends post-only orders), so one rate is enough.
+inline double fee_for(double notional, double bps) { return notional * bps / 1e4; }
+
+// Runs every variant on `markets` generated markets with seeds seed, seed+1, ... and fills `rows` (one per variant,
+// rebuilt on each call). PnL in the rows is after fees at `maker_fee_bps`. Unhealthy runs are reported on stderr and counted. Returns 0, or 2 when an event file
 // cannot be written or the backtester cannot be set up. `tag` prefixes event file names.
 inline int evaluate(const std::vector<Variant>& vars, long long seed, long long markets, long long requests, const BtConfig& bc,
-                    const risk::RiskConfig& rc, const std::string& events_dir, const std::string& tag, std::vector<Row>& rows,
-                    std::uint64_t& digest, int& unhealthy) {
+                    const risk::RiskConfig& rc, double maker_fee_bps, const std::string& events_dir, const std::string& tag,
+                    std::vector<Row>& rows, std::uint64_t& digest, int& unhealthy) {
   rows.assign(vars.size(), Row{});
   for (long long mi = 0; mi < markets; ++mi) {
     MarketConfig mc;
@@ -376,7 +380,9 @@ inline int evaluate(const std::vector<Variant>& vars, long long seed, long long 
         ++unhealthy;
       }
       Row& w = rows[vi];
-      w.pnl.push_back(r.rep.pnl);
+      const double fee = fee_for(r.rep.volume, maker_fee_bps);
+      w.fees.push_back(fee);
+      w.pnl.push_back(r.rep.pnl - fee);
       w.edge.push_back(r.rep.edge);
       w.inventory.push_back(r.rep.inventory);
       w.fill_rate.push_back(r.rep.fill_rate_quotes);

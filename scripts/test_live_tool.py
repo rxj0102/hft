@@ -283,6 +283,9 @@ check(rc == 1, "mirror: --orders-fd on a descriptor that is not open: exit 1")
 import threading
 
 
+NO_LIQ = False         # set to make the fake exchange leave the liq field out of its fill reports
+
+
 class ScriptedExchange:
     """reads order lines, answers each with a report line, optionally with a defect"""
     def __init__(self, orders_r, reports_w, mode="ok", base=1_000_000, acct="ok", stale_fill=False):
@@ -298,7 +301,13 @@ class ScriptedExchange:
     def reply(self, rec, rt, **kw):
         out = {"t": "rep", "seg": rec["seg"], "rt": rt, "id": rec["id"], "px": rec.get("px", 0), "qty": rec.get("qty", 5),
                "leaves": kw.pop("leaves", rec.get("qty", 5)), "reason": kw.pop("reason", "none"), "side": rec.get("side", "buy")}
+        if rt == "fill" and NO_LIQ == "weird":
+            out["liq"] = "both"
+        elif rt == "fill" and not NO_LIQ:
+            out["liq"] = "taker" if rec.get("type") == 2 else "maker"
         out.update(kw)
+        if out.get("liq") is None:
+            out.pop("liq", None)
         line = json.dumps(out) + "\n"
         self.sent.append(out)
         if rt == "fill":
@@ -511,6 +520,23 @@ want_cash = cash + sum(-(1 if r["side"] == "buy" else -1) * r["px"] * r["qty"] f
 check(int(open(pf).read().split()[1]) == want_cash, "posfile: the cash started from the file's (%d) and moved by the fills: file %s, expected %d" % (cash, open(pf).read().split()[1], want_cash))
 os.remove(pf); os.remove(lp)
 
+lp = tempfile.mktemp(suffix=".log")
+NO_LIQ = True
+rc, out, ex = run_external("close_ok", ext_feed(30), flatten_s="2", pace=0.03, extra=["--log", lp, "--close-position"])
+NO_LIQ = False
+fl = [json.loads(l) for l in open(lp)]
+fl = [r for r in fl if r["event"] == "fill"]
+check(rc == 0 and fl and all("liq" not in f for f in fl), "fills: a report with no liquidity mark gives an event with none (nothing guessed): %d fills (rc=%s)" % (len(fl), rc))
+os.remove(lp)
+
+lp = tempfile.mktemp(suffix=".log")
+NO_LIQ = "weird"
+rc, out, ex = run_external("close_ok", ext_feed(30), flatten_s="2", pace=0.03, extra=["--log", lp, "--close-position"])
+NO_LIQ = False
+fl = [r for r in (json.loads(l) for l in open(lp)) if r["event"] == "fill"]
+check(rc == 0 and fl and all("liq" not in f for f in fl), "fills: a mark that is neither maker nor taker is not copied: %d fills (rc=%s)" % (len(fl), rc))
+os.remove(lp)
+
 # ADR 31: the file is checked against the account before anything is traded
 def acct_case(content, base, acct="ok", feed=None, extra=()):
     open(pf, "w").write(content)
@@ -574,6 +600,7 @@ md = [r for r in rows if r["event"] == "mid"]
 sent_fills = [r for r in ex.sent if r["rt"] == "fill"]
 check(rc == 0 and len(fl) == len(sent_fills) and len(fl) >= 2, "fills: one event per fill report: %d events, %d reports (rc=%s)" % (len(fl), len(sent_fills), rc))
 check(all(f["applied"] == 1 for f in fl), "fills: all applied by the session")
+check([f.get("liq") for f in fl] == [r.get("liq") for r in sent_fills] and {f.get("liq") for f in fl} == {"maker", "taker"}, "fills: the liquidity mark is the report's own, the closing order is taker: %s" % [f.get("liq") for f in fl])
 check([(f["side"], f["px"], f["qty"]) for f in fl] == [(r["side"], r["px"], r["qty"]) for r in sent_fills], "fills: side, price and quantity are the report's own: %s" % [(f["side"], f["px"], f["qty"]) for f in fl][:2])
 want = 0
 okpos = True

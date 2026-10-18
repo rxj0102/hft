@@ -570,10 +570,13 @@ int main(int argc, char** argv) {
   auto log_fill = [&](std::uint64_t seg, const sim::Report& r, std::string_view line, long long m2, bool applied) {
     std::string_view sd;
     const char* side = field_str(line, "side", sd) && sd == "sell" ? "sell" : "buy";
+    // Liquidity as the bridge worked it out from the order type (ADR 35); left out when the report does not say.
+    std::string_view lq;
+    const std::string liq = field_str(line, "liq", lq) && (lq == "maker" || lq == "taker") ? ",\"liq\":\"" + std::string(lq) + "\"" : std::string();
     elog.emit("fill", secs(),
               num("seg", seg) + ",\"side\":\"" + side + "\"," + num("px", static_cast<unsigned long long>(r.price.raw())) + "," +
                   num("qty", static_cast<unsigned long long>(r.qty)) + ",\"mid_x2\":" + std::to_string(m2) +
-                  ",\"pos\":" + std::to_string(session.net_position()) + ",\"applied\":" + (applied ? "1" : "0"));
+                  ",\"pos\":" + std::to_string(session.net_position()) + ",\"applied\":" + (applied ? "1" : "0") + liq);
   };
   // Reads whatever reports are waiting and hands them to the session. A closed pipe means the bridge is gone.
   auto pump_reports = [&] {

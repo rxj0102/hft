@@ -457,7 +457,7 @@ void test_evaluate() {
   std::vector<lab::Row> rows;
   std::uint64_t dg = lab::kDigestSeed;
   int bad = 0;
-  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, "", "", rows, dg, bad) == 0 && bad == 0);
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, 0.0, "", "", rows, dg, bad) == 0 && bad == 0);
   CHECK(rows.size() == 2 && rows[0].pnl.size() == 2 && rows[1].digest.size() == 2 && rows[0].fills.size() == 2 && rows[0].max_pos.size() == 2);
   // each entry is the single run of that variant on that market, and the digest chains them market-major
   std::uint64_t want = lab::kDigestSeed;
@@ -475,15 +475,30 @@ void test_evaluate() {
   CHECK(rows[0].digest[0] != rows[0].digest[1]);
   // rows are rebuilt, not appended to
   std::uint64_t dg2 = lab::kDigestSeed;
-  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, "", "", rows, dg2, bad) == 0 && rows[0].pnl.size() == 2 && dg2 == dg);
+  CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, 0.0, "", "", rows, dg2, bad) == 0 && rows[0].pnl.size() == 2 && dg2 == dg);
+  // fees: pnl is the gross result less fee_for(volume), edge is untouched, a rebate is the negative, the digest does not move
+  CHECK(lab::fee_for(200000.0, 2.5) == 50.0 && lab::fee_for(200000.0, -2.5) == -50.0 && lab::fee_for(0.0, 9.0) == 0.0);
+  {
+    std::vector<lab::Row> fr, rr;
+    std::uint64_t dgf = lab::kDigestSeed, dgr = lab::kDigestSeed;
+    CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, 3.0, "", "", fr, dgf, bad) == 0 && lab::evaluate(vars, 900, 2, 8000, lat(), rc, -3.0, "", "", rr, dgr, bad) == 0);
+    CHECK(dgf == dg && dgr == dg);
+    for (std::size_t vi = 0; vi < 2; ++vi)
+      for (std::size_t mi = 0; mi < 2; ++mi) {
+        const lab::RunResult r = lab::run_one(small_market(static_cast<std::uint64_t>(900 + mi), 8000), lat(), vars[vi].cfg, rc, nullptr);
+        CHECK(fr[vi].fees[mi] == r.rep.volume * 3.0 / 1e4 && rr[vi].fees[mi] == -fr[vi].fees[mi] && fr[vi].fees[mi] > 0);
+        CHECK(fr[vi].pnl[mi] == r.rep.pnl - fr[vi].fees[mi] && rr[vi].pnl[mi] == r.rep.pnl + fr[vi].fees[mi]);
+        CHECK(fr[vi].edge[mi] == r.rep.edge && rows[vi].fees[mi] == 0.0);
+      }
+  }
   // an events directory that cannot be written is a setup failure
-  CHECK(lab::evaluate(vars, 900, 1, 8000, lat(), rc, "/nonexistent_dir_for_lab", "t_", rows, dg2, bad) == 2);
+  CHECK(lab::evaluate(vars, 900, 1, 8000, lat(), rc, 0.0, "/nonexistent_dir_for_lab", "t_", rows, dg2, bad) == 2);
   // with a directory, one file per variant and market, named with the tag
   char tmpl[] = "/tmp/lab_test_XXXXXX";
   const char* dir = mkdtemp(tmpl);
   CHECK(dir != nullptr);
   if (dir) {
-    CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, dir, "t_", rows, dg2, bad) == 0);
+    CHECK(lab::evaluate(vars, 900, 2, 8000, lat(), rc, 0.0, dir, "t_", rows, dg2, bad) == 0);
     for (const char* f : {"/t_base_m0.jsonl", "/t_base_m1.jsonl", "/t_noalpha_m0.jsonl", "/t_noalpha_m1.jsonl"}) {
       const std::string path = std::string(dir) + f;
       std::FILE* fp = std::fopen(path.c_str(), "r");

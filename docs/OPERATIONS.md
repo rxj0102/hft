@@ -78,10 +78,10 @@ Adds a second pipe, bridge to `hft_live` (`--exchange-fd`). New `hft_live` exit 
 `supervise.py --loop` logs every fill and, every 200 ms at most, the book's mid when it changes (`--mid-sample-ms`, 0 turns it off; about 40 MB a day on a busy book) into `events.jsonl`. After or during a run:
 
 ```
-python3 scripts/pnl_report.py /tmp/hft-sbx/events.jsonl [--fee-bps 0] [--horizons 1,5,30] [--json out.json]
+python3 scripts/pnl_report.py /tmp/hft-sbx/events.jsonl [--fee-bps 0] [--maker-fee-bps X] [--taker-fee-bps Y] [--horizons 1,5,30] [--json out.json]
 ```
 
-It prints PnL by average cost (with a cross-check from cash flows), edge against the mid, markouts (negative = adverse selection), inventory, and a warning if the engine's position disagrees with the sum of the fills. Read it with the caveats in ADR 32: the mid is the local book's, fees are one flat rate, and a sandbox book is thin and unlike a real one.
+It prints PnL by average cost (with a cross-check from cash flows), edge against the mid, markouts (negative = adverse selection), inventory, and a warning if the engine's position disagrees with the sum of the fills. Read it with the caveats in ADR 32: the mid is the local book's, fees are flat basis points of notional (separate maker and taker rates apply to fills the bridge marked; the mark comes from the order type we sent, not from the exchange), and a sandbox book is thin and unlike a real one.
 
 ### Closing the position at stop (`--close-position`)
 

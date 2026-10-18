@@ -88,7 +88,7 @@ What this says and does not say:
 - The fills are simulated. The queue model is exact for the tape it replays, but the tape does not react to the strategy's orders (no market impact), so a strategy that would move the market looks better than it is.
 - All markets come from one generator (`MarketGen`). A parameter tuned on it may be tuned to the generator.
 - Latency is a fixed hop time plus bounded jitter.
-- Fees are zero here (`BtConfig::fee_raw_per_unit` exists but the tool does not expose it).
+- Fees are zero unless `--maker-fee-bps X` is given (ADR 35). Every simulated fill is a maker fill because the strategy only sends post-only orders, so there is no taker rate. With a fee, PnL in the tables, the ranking and the json is after fees (`pnl = edge + inventory - fees`), and edge stays gross. Example (4 markets of 20,000 requests, `--sweep requote_ticks=1,2`): gross, requote_ticks=2 beat the base, +2.38 against +1.79; at 1 bp it traded 157 fills a market against 46 and paid 3.13 against 0.87, so it lost, -0.74 against +0.92. Flat basis points of notional only: no tiers or per-order fees.
 - Event logs have millisecond resolution and use the venue's mid, not a delayed strategy view.
 
 ## A finding: a requote loop

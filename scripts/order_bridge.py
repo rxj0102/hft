@@ -512,10 +512,18 @@ class LoopBridge(Bridge):
             self.log.emit("reports_pipe_closed")
 
     # ---- reports ------------------------------------------------------------------------------------------
-    def report(self, key, rt, px=0, qty=0, leaves=0, reason="none", side=None):
+    @staticmethod
+    def liq_of(v):
+        """Whether a fill of this order added or took liquidity. Worked out from the order type, not read from the exchange:
+        a post-only order cannot take, and the closing immediate-or-cancel order is priced to cross."""
+        return "taker" if v.get("ioc") else "maker"
+
+    def report(self, key, rt, px=0, qty=0, leaves=0, reason="none", side=None, liq=None):
         rec = {"t": "rep", "seg": key[0], "rt": rt, "id": key[1], "px": px, "qty": qty, "leaves": leaves, "reason": reason}
         if side:
             rec["side"] = side
+        if liq:
+            rec["liq"] = liq
         self.cnt["reports_" + rt] += 1
         if self.reports_dead:
             return
@@ -618,7 +626,7 @@ class LoopBridge(Bridge):
             if theirs > done:
                 self.cnt["fills_at_cancel"] += 1
                 self.filled[k] = theirs
-                self.report(k, "fill", px=v["px"], qty=theirs - done, leaves=v["qty"] - theirs, side=v["side"])
+                self.report(k, "fill", px=v["px"], qty=theirs - done, leaves=v["qty"] - theirs, side=v["side"], liq=self.liq_of(v))
                 done = theirs
         elif st != 404:  # 404: a cancelled order with no fills may no longer be on file; anything else we could not check
             self.cnt["cancel_unverified"] += 1
@@ -773,7 +781,7 @@ class LoopBridge(Bridge):
         if n > prev:
             self.cnt["ioc_fills"] += 1
             self.filled[k] = n
-            self.report(k, "fill", px=avg, qty=n - prev, leaves=lots - n, side=v["side"])
+            self.report(k, "fill", px=avg, qty=n - prev, leaves=lots - n, side=v["side"], liq=self.liq_of(v))
         if n < lots:
             self.report(k, "canceled", px=v["px"], qty=lots - n, leaves=0, reason="ioc", side=v["side"])
         return True
@@ -836,7 +844,7 @@ class LoopBridge(Bridge):
             return
         self.filled[k] = total
         self.cnt["ws_fills"] += 1
-        self.report(k, "fill", px=px, qty=delta, leaves=v["qty"] - total, side=v["side"])
+        self.report(k, "fill", px=px, qty=delta, leaves=v["qty"] - total, side=v["side"], liq=self.liq_of(v))
         if total >= v["qty"]:
             del self.live[k]
 
@@ -856,7 +864,7 @@ class LoopBridge(Bridge):
                 prev = self.filled.get(k, 0)
                 if done > prev:
                     self.filled[k] = done
-                    self.report(k, "fill", px=v["px"], qty=done - prev, leaves=v["qty"] - done, side=v["side"])
+                    self.report(k, "fill", px=v["px"], qty=done - prev, leaves=v["qty"] - done, side=v["side"], liq=self.liq_of(v))
                 continue
             # not open any more: ask how it ended
             st2, d = self.req("GET", "/orders/" + v["oid"])
@@ -877,7 +885,7 @@ class LoopBridge(Bridge):
                 continue
             if st2 == 200 and isinstance(d, dict) and d.get("done_reason") == "filled":
                 self.cnt["fills"] += 1
-                self.report(k, "fill", px=v["px"], qty=v["qty"] - prev, leaves=0, side=v["side"])
+                self.report(k, "fill", px=v["px"], qty=v["qty"] - prev, leaves=0, side=v["side"], liq=self.liq_of(v))
             elif st2 in (200, 404):
                 self.cnt["vanished"] += 1
                 self.log.emit("order_vanished", seg=k[0], id=k[1])

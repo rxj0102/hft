@@ -491,6 +491,7 @@ def test_loop_fills_and_vanished():
     check(until(lambda: b.reps("fill")), "partial fill is found by the sync")
     f = b.reps("fill")[0]
     check(f["id"] == 1 and f["qty"] == 4 and f["leaves"] == 6 and f["px"] == px(81000.00) and f["side"] == "buy", "fill: 4 lots, 6 left: %s" % f)
+    check(f.get("liq") == "maker", "a post-only order that rests and fills is marked maker: %s" % f)
     time.sleep(0.8)
     check(len(b.reps("fill")) == 1, "and reported once, not at every sync")
     ex.fill(by_side["81000.00"], 0.00003)                     # 3 more: the report carries the new part only
@@ -509,6 +510,7 @@ def test_loop_fills_and_vanished():
     check(until(lambda: len(b.reps("fill")) == 3), "an order filled in one go")
     f = b.reps("fill")[2]
     check(f["qty"] == 10 and f["leaves"] == 0, "10 lots, nothing left: %s" % f)
+    check(all(r.get("liq") == "maker" for r in b.reps("fill")), "every fill of these post-only orders is marked maker")
     b.send({"t": "can", "seg": 1, "id": 1})
     check(until(lambda: b.reps("cancel_rejected")), "cancelling a filled order is refused")
     ex.cancel_elsewhere(by_side["81020.00"])
@@ -631,6 +633,7 @@ def test_ws_fills():
     check(until(lambda: len(b.reps("fill")) == 2), "the rest")
     f = b.reps("fill")[1]
     check(f["qty"] == 6 and f["leaves"] == 0, "6 lots, nothing left: %s" % f)
+    check(all(r.get("liq") == "maker" for r in b.reps("fill")), "websocket fills are marked maker")
     b.send({"t": "can", "seg": 1, "id": 1})
     check(until(lambda: b.reps("cancel_rejected")), "a filled order cannot be cancelled")
     time.sleep(0.6)
@@ -868,6 +871,7 @@ def test_fill_around_cancel():
         check(kinds == want, "the 4 lots are reported before the %s: %s" % (final, kinds))
         f = b.reps("fill")[0]
         check(f["px"] == px(81000.00), "at the order's limit price")
+        check(f.get("liq") == "maker", "marked maker")
         time.sleep(0.5)
         check(prom_value(tmp, "hft_bridge_fills_at_cancel_total") == 1, "and counted")
         rc, _ = b.finish("eof")
@@ -888,6 +892,7 @@ def test_fill_around_cancel():
     check(until(lambda: b.reps("cancel_rejected")), "an order that the record says is filled completely: the cancel is refused")
     f = b.reps("fill")
     check(len(f) == 1 and f[0]["qty"] == 10 and f[0]["leaves"] == 0, "after a fill capped at the order's size: %s" % f)
+    check(f[0].get("liq") == "maker", "and marked maker")
     b.finish("eof")
     ex.stop()
 
@@ -925,6 +930,7 @@ def test_close_orders():
     check(kinds == [("accepted", 5, 5), ("fill", 5, 0)], "accepted, then filled in full: %s" % kinds)
     f = b.reps("fill")[0]
     check(f["px"] == px(81000.00) and f["side"] == "sell", "at the price it traded (the touch), not at the limit: %s" % f)
+    check(f.get("liq") == "taker", "an immediate-or-cancel fill is marked taker: %s" % f)
     body = ex.ioc_orders
     check(len(body) == 1 and body[0][0] == "sell" and body[0][3] > 0, "the exchange saw one immediate-or-cancel order: %s" % body)
     check(not ex.open_orders(), "and nothing rests")
@@ -935,6 +941,8 @@ def test_close_orders():
     kinds = [(r["id"], r["rt"], r["qty"], r["leaves"]) for r in b.reports if r["id"] == 2]
     check(kinds == [(2, "accepted", 5, 5), (2, "fill", 3, 2), (2, "canceled", 2, 0)], "3 filled, 2 cancelled: %s" % kinds)
     check(b.reps("fill")[1]["px"] == px(81000.10), "a buy trades at the ask")
+    check(b.reps("fill")[1].get("liq") == "taker", "the partial immediate-or-cancel fill is taker too")
+    check(all("liq" not in r for r in b.reports if r["rt"] != "fill"), "only fill reports carry a liquidity mark")
     # not marketable: nothing trades
     ex.ioc_fill_fraction = 1.0
     b.send(ioc_req(3, px(81000.50), qty=4, side="sell"))

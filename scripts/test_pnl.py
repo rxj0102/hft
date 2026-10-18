@@ -42,11 +42,11 @@ def write(rows, raw_lines=()):
     return p
 
 
-def report(rows, raw=(), fee=0.0, horizons=(1, 5, 30)):
+def report(rows, raw=(), fee=0.0, horizons=(1, 5, 30), maker=None, taker=None):
     p = write(rows, raw)
     fills, mids, last, bad = pnl_report.load([p])
     os.remove(p)
-    r = pnl_report.analyse(fills, mids, last, 10000, 100000, fee, list(horizons))
+    r = pnl_report.analyse(fills, mids, last, 10000, 100000, fee, list(horizons), maker, taker)
     r["bad"] = bad
     return r
 
@@ -116,12 +116,49 @@ check(r == {"fills": 0, "bad": 0}, "no fills: nothing to report")
 r = report([fill(1000, "buy", 1_000_000, 100_000, -1, 100_000), mid(2000, 2_000_000)])
 check(r["edge_fills"] == 0 and r["edge_bps_notional_weighted"] is None, "a fill without a mid has no edge")
 
+print("maker and taker rates")
+mk = lambda f, liq: dict(f, liq=liq) if liq else f
+two = lambda: [mk(fill(1000, "buy", 1_000_000, 100_000, 2_000_000, 100_000), "maker"), mk(fill(2000, "sell", 1_000_000, 100_000, 2_000_000, 0), "taker"), mid(3000, 2_000_000)]
+r = report(two(), maker=0.0, taker=10.0)
+check(near(r["fees_quote"], 0.1) and near(r["total_quote"], -0.1), "maker 0, taker 10 bps on 100 of notional each: fee 0.10 (%.4f)" % r["fees_quote"])
+f = r["fees_by_liquidity"]
+check(f["maker"]["n"] == 1 and near(f["maker"]["fees"], 0.0) and f["taker"]["n"] == 1 and near(f["taker"]["fees"], 0.1) and near(f["taker"]["volume"], 100.0), "the breakdown splits the fills: %s" % f)
+check(near(f["maker"]["bps"], 0.0) and near(f["taker"]["bps"], 10.0) and f["unmarked"]["n"] == 0 and f["unmarked"]["bps"] is None, "and records the rate each kind was charged: %s" % f)
+r = report(two(), fee=3.0, maker=0.0, taker=10.0)
+check(near(r["fees_by_liquidity"]["maker"]["bps"], 0.0), "an explicit zero maker rate is used, not replaced by --fee-bps")
+r = report(two(), maker=-5.0, taker=10.0)
+check(near(r["fees_quote"], 0.1 - 0.05) and near(r["total_quote"], -0.05), "a negative maker rate is a rebate: fee 0.10 - 0.05 = 0.05 (%.4f)" % r["fees_quote"])
+check(near(r["total_from_cash_quote"], r["total_quote"]), "and the cash cross-check still agrees")
+r = report(two(), fee=4.0)
+check(near(r["fees_quote"], 0.08), "no per-liquidity rates: --fee-bps applies to both (%.4f)" % r["fees_quote"])
+r = report(two(), fee=4.0, taker=10.0)
+check(near(r["fees_quote"], 0.04 + 0.1), "only a taker rate: the maker fill falls back to --fee-bps (%.4f)" % r["fees_quote"])
+r = report(two(), fee=4.0, maker=0.0)
+check(near(r["fees_quote"], 0.04), "only a maker rate: the taker fill falls back to --fee-bps (%.4f)" % r["fees_quote"])
+rows3 = [fill(1000, "buy", 1_000_000, 100_000, 2_000_000, 100_000), mid(3000, 2_000_000)]
+r = report(rows3, fee=4.0, maker=0.0, taker=10.0)
+check(near(r["fees_quote"], 0.04), "a fill with no liquidity mark uses --fee-bps, not a guess (%.4f)" % r["fees_quote"])
+r = report([mk(fill(1000, "buy", 1_000_000, 100_000, 2_000_000, 100_000), "weird"), mid(3000, 2_000_000)], fee=4.0, maker=0.0, taker=10.0)
+check(near(r["fees_quote"], 0.04), "an unknown mark counts as unmarked")
+r = report(two(), maker=0.0, taker=0.0)
+check(near(r["fees_quote"], 0.0), "explicit zero rates charge nothing")
+
 print("the command line")
 p = write(rows)
 out = tempfile.mktemp(suffix=".json")
 x = subprocess.run([sys.executable, os.path.join(HERE, "pnl_report.py"), p, "--json", out, "--horizons", "1"], capture_output=True, text=True)
 check(x.returncode == 0 and "PnL and fill quality" in x.stdout and "markout 1s" in x.stdout, "text report: %s" % x.stdout[:80].replace("\n", " | "))
 check(json.load(open(out))["fills"] == 1, "json report")
+p2 = write(two())
+x = subprocess.run([sys.executable, os.path.join(HERE, "pnl_report.py"), p2, "--maker-fee-bps", "-5", "--taker-fee-bps", "10"], capture_output=True, text=True)
+check(x.returncode == 0 and "fees by liquidity: maker 1 fills, 100.00 volume, -0.0500 at -5 bps; taker 1 fills, 100.00 volume, +0.1000 at 10 bps" in x.stdout, "flags reach the report, with the breakdown: %s" % x.stdout[-250:].replace("\n", " | "))
+check("fees 0.0500 (2.50 bps)" in x.stdout, "and the effective rate over all volume (0.05 on 200 is 2.5 bps)")
+x = subprocess.run([sys.executable, os.path.join(HERE, "pnl_report.py"), p2, "--json", out, "--maker-fee-bps", "-5", "--taker-fee-bps", "10"], capture_output=True, text=True)
+j = json.load(open(out))["fees_by_liquidity"]
+check(j["maker"]["bps"] == -5 and j["taker"]["bps"] == 10, "the maker and taker flags are not swapped")
+x = subprocess.run([sys.executable, os.path.join(HERE, "pnl_report.py"), p2, "--fee-bps", "4"], capture_output=True, text=True)
+check("fees 0.0800 (4.00 bps)" in x.stdout, "with only --fee-bps both kinds pay it (fee 0.08)")
+os.remove(p2)
 x = subprocess.run([sys.executable, os.path.join(HERE, "pnl_report.py"), write([])], capture_output=True, text=True)
 check(x.returncode == 0 and "no fills" in x.stdout, "an empty log says so")
 os.remove(p); os.remove(out)

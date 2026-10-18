@@ -2,7 +2,7 @@
 //
 //   hft_lab [--requests N] [--markets M] [--seed S] [--variant name:k=v,k=v]... [--sweep key=v1,v2,...]...
 //           [--md-us U] [--ingress-us U] [--egress-us U] [--jitter-us U] [--queue-penalty-pct P]
-//           [--json FILE] [--events DIR]
+//           [--maker-fee-bps X] [--json FILE] [--events DIR]
 //   hft_lab --grid "key=v1,v2;key2=w1,w2" [--top K] [--risk-penalty X] [--test-markets N] [--test-seed T] [same options]
 //
 // Variant 0 is always "base" (the default strategy configuration). Every variant runs on every market, so the
@@ -10,6 +10,8 @@
 // --grid chooses parameters on the training markets (seeds S..S+M-1): it keeps the best K by mean PnL minus X times
 // the mean largest position, then runs only those and the base on held-out markets (seeds T..T+N-1, T defaults to
 // S+100000) and reports how much of the gain over the base survived.
+// --maker-fee-bps X charges X basis points of notional on every fill (negative is a rebate); every fill in a lab run is a
+// maker fill because the strategy only sends post-only orders, so there is no taker rate. PnL is then after fees.
 // Exit: 0 ok, 1 usage, 2 setup failed, 3 a run failed its health checks (results are not to be trusted).
 #include <cmath>
 #include <cstdio>
@@ -31,7 +33,7 @@ int usage(const char* msg) {
   std::fprintf(stderr,
                "usage: hft_lab [--requests N] [--markets M] [--seed S] [--variant name:k=v,...]... [--sweep key=v1,v2,...]...\n"
                "               [--md-us U] [--ingress-us U] [--egress-us U] [--jitter-us U] [--queue-penalty-pct P]\n"
-               "               [--json FILE] [--events DIR]\n"
+               "               [--maker-fee-bps X] [--json FILE] [--events DIR]\n"
                "       hft_lab --grid \"key=v1,v2;key2=w1,w2\" [--top K] [--risk-penalty X] [--test-markets N] [--test-seed T] [...]\n");
   return 1;
 }
@@ -55,6 +57,7 @@ void json_variants(std::FILE* f, const std::vector<lab::Variant>& vars, const st
     json_vec(f, "pnl", w.pnl);
     json_vec(f, "edge", w.edge);
     json_vec(f, "inventory", w.inventory);
+    json_vec(f, "fees", w.fees);
     std::fprintf(f, "      \"fills\": [");
     for (std::size_t k = 0; k < w.fills.size(); ++k) std::fprintf(f, "%s%llu", k ? ", " : "", static_cast<unsigned long long>(w.fills[k]));
     std::fprintf(f, "],\n      \"max_pos\": [");
@@ -72,8 +75,8 @@ void json_variants(std::FILE* f, const std::vector<lab::Variant>& vars, const st
   std::fprintf(f, "  ]");
 }
 
-void print_table(const std::vector<lab::Variant>& vars, const std::vector<Row>& rows) {
-  std::printf("%-26s %12s %9s %12s %11s %10s %7s %9s\n", "variant", "PnL mean", "+- se", "edge mean", "inventory", "fills/mkt", "fill%", "max|pos|");
+void print_table(const std::vector<lab::Variant>& vars, const std::vector<Row>& rows, bool show_fees) {
+  std::printf("%-26s %12s %9s %12s %11s %10s %7s %9s%s\n", "variant", "PnL mean", "+- se", "edge mean", "inventory", "fills/mkt", "fill%", "max|pos|", show_fees ? "   fees mean" : "");
   for (std::size_t vi = 0; vi < vars.size(); ++vi) {
     const Row& w = rows[vi];
     const lab::Summary p = lab::summarize(w.pnl), e = lab::summarize(w.edge), iv = lab::summarize(w.inventory), fr = lab::summarize(w.fill_rate);
@@ -82,8 +85,10 @@ void print_table(const std::vector<lab::Variant>& vars, const std::vector<Row>& 
       fl += static_cast<double>(w.fills[k]);
       mp = static_cast<double>(w.max_pos[k]) > mp ? static_cast<double>(w.max_pos[k]) : mp;
     }
-    std::printf("%-26s %+12.2f %9.2f %+12.2f %+11.2f %10.0f %6.1f%% %9.0f\n", vars[vi].name.c_str(), p.mean, p.se, e.mean, iv.mean,
+    std::printf("%-26s %+12.2f %9.2f %+12.2f %+11.2f %10.0f %6.1f%% %9.0f", vars[vi].name.c_str(), p.mean, p.se, e.mean, iv.mean,
                 fl / static_cast<double>(w.fills.size()), 100 * fr.mean, mp);
+    if (show_fees) std::printf("  %+11.2f", lab::summarize(w.fees).mean);
+    std::printf("\n");
   }
 }
 
@@ -111,7 +116,7 @@ int main(int argc, char** argv) {
   long long test_markets = 0, test_seed = -1, top_k = 3;
   bool top_set = false, have_grid = false;
   std::vector<lab::GridAxis> axes;
-  double risk_penalty = 0;
+  double risk_penalty = 0, maker_fee_bps = 0;
   std::string json_path, events_dir, grid_spec;
   std::vector<lab::Variant> vars;
   lab::Variant base;
@@ -147,6 +152,11 @@ int main(int argc, char** argv) {
     else if (a == "--test-markets") { if (!numeric("--test-markets", 1, 1000, test_markets)) return 1; }
     else if (a == "--test-seed") { if (!numeric("--test-seed", 0, 1'000'000'000, test_seed)) return 1; }
     else if (a == "--top") { if (!numeric("--top", 1, 20, top_k)) return 1; top_set = true; }
+    else if (a == "--maker-fee-bps") {
+      const char* v = next("--maker-fee-bps");
+      if (!v) return 1;
+      if (!lab::parse_double(v, maker_fee_bps) || maker_fee_bps < -100 || maker_fee_bps > 1000) return usage("--maker-fee-bps wants a number between -100 and 1000");
+    }
     else if (a == "--json") { const char* v = next("--json"); if (!v) return 1; json_path = v; }
     else if (a == "--events") { const char* v = next("--events"); if (!v) return 1; events_dir = v; }
     else if (a == "--risk-penalty") {
@@ -222,18 +232,20 @@ int main(int argc, char** argv) {
   std::vector<Row> rows;
   std::uint64_t all = lab::kDigestSeed;
   int unhealthy = 0;
-  if (const int st = lab::evaluate(vars, seed, markets, requests, bc, rc, events_dir, "", rows, all, unhealthy)) return st;
+  if (const int st = lab::evaluate(vars, seed, markets, requests, bc, rc, maker_fee_bps, events_dir, "", rows, all, unhealthy)) return st;
 
   std::printf("hft_lab: %lld markets (seeds %lld..%lld) x %lld requests, %zu variants; md %lld us, ingress %lld us, egress %lld us, jitter %lld us, queue penalty %lld%%\n",
               markets, seed, seed + markets - 1, requests, vars.size(), md, ing, egr, jit, qpen);
-  std::printf("risk limits derived from the variants: max order qty %lld, max position %lld (the strategy cap should bind first)\n\n",
+  std::printf("risk limits derived from the variants: max order qty %lld, max position %lld (the strategy cap should bind first)\n",
               static_cast<long long>(rc.max_order_qty), static_cast<long long>(rc.max_position));
+  if (maker_fee_bps != 0) std::printf("fees: %g bps of notional on every fill (all fills are maker fills here); PnL is after fees, edge is not\n", maker_fee_bps);
+  std::printf("\n");
 
   std::vector<lab::Variant> tvars;
   std::vector<Row> trows;
   std::vector<std::size_t> picked;
   if (!have_grid) {
-    print_table(vars, rows);
+    print_table(vars, rows, maker_fee_bps != 0);
     if (vars.size() > 1) {
       std::printf("\npaired against base, same markets (variant minus base)\n");
       print_paired(vars, rows);
@@ -259,12 +271,12 @@ int main(int argc, char** argv) {
       shown.push_back(vars[ix]);
       shown_rows.push_back(rows[ix]);
     }
-    print_table(shown, shown_rows);
+    print_table(shown, shown_rows, maker_fee_bps != 0);
     // Held-out: only the chosen ones and the base.
     tvars = shown;
-    if (const int st = lab::evaluate(tvars, test_seed, test_markets, requests, bc, rc, events_dir, "test_", trows, all, unhealthy)) return st;
+    if (const int st = lab::evaluate(tvars, test_seed, test_markets, requests, bc, rc, maker_fee_bps, events_dir, "test_", trows, all, unhealthy)) return st;
     std::printf("\nheld-out markets (seeds %lld..%lld), chosen variants and base:\n", test_seed, test_seed + test_markets - 1);
-    print_table(tvars, trows);
+    print_table(tvars, trows, maker_fee_bps != 0);
     std::printf("\npaired against base on the held-out markets (variant minus base)\n");
     print_paired(tvars, trows);
     const double base_tr = lab::score(rows[0], risk_penalty), base_te = lab::score(trows[0], risk_penalty);
@@ -301,7 +313,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "hft_lab: cannot write %s\n", json_path.c_str());
       return 2;
     }
-    std::fprintf(f, "{\n  \"markets\": %lld, \"requests\": %lld, \"seed\": %lld, \"digest\": \"%016llx\",\n  \"variants\": ", markets, requests, seed,
+    std::fprintf(f, "{\n  \"markets\": %lld, \"requests\": %lld, \"seed\": %lld, \"maker_fee_bps\": %g, \"digest\": \"%016llx\",\n  \"variants\": ", markets, requests, seed, maker_fee_bps,
                  static_cast<unsigned long long>(all));
     json_variants(f, vars, rows);
     if (have_grid) {

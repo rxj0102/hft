@@ -2,10 +2,12 @@
 """PnL and fill-quality report from hft_live's event log (ADR 32).
 
     hft_live ... --log events.jsonl --mid-sample-ms 100 ...        (scripts/supervise.py --loop does this by default)
-    python3 scripts/pnl_report.py events.jsonl [more.jsonl ...] [--fee-bps 0] [--horizons 1,5,30] [--json out.json]
+    python3 scripts/pnl_report.py events.jsonl [more.jsonl ...] [--fee-bps 0] [--maker-fee-bps X] [--taker-fee-bps Y]
+                                  [--horizons 1,5,30] [--json out.json]
 
 Reads two kinds of events:
-  fill  {"ts_ms", "side", "px", "qty", "mid_x2", "pos", "applied"}   one per fill the exchange reported
+  fill  {"ts_ms", "side", "px", "qty", "mid_x2", "pos", "applied", "liq"}   one per fill the exchange reported; liq is "maker" or
+        "taker" when the bridge could tell (from the order type: post-only quotes add liquidity, the closing IOC takes it)
   mid   {"ts_ms", "mid_x2"}                                          the local book's mid, sampled when it changes
 
 Prices are raw (1e-4 quote units), quantities raw (1e-5 base units), mid_x2 is bid + ask (twice the mid, no rounding).
@@ -18,8 +20,10 @@ What it computes, and what it does not:
     way; negative: adverse selection). Needs mid samples that reach past the horizon.
   * Inventory: largest and time-weighted mean absolute position.
   * Consistency: the position after each fill, as the engine reported it, against the sum of the fills.
-Not included: fees unless --fee-bps says so (one rate for every fill: maker and taker are not told apart), funding,
-anything the engine did not log. A mid from the local book is not the exchange's mid when the feed lags.
+Fees: none unless a rate is given. --maker-fee-bps and --taker-fee-bps apply to fills marked maker or taker (a negative maker rate is
+a rebate); --fee-bps applies to every fill that is not marked, and to marked fills whose own rate was not given. Rates are in basis
+points of notional. The report says how many fills and how much volume each rate was applied to.
+Not included: funding, anything the engine did not log. A mid from the local book is not the exchange's mid when the feed lags.
 """
 import argparse
 import bisect
@@ -45,8 +49,9 @@ def load(paths):
                         side = e["side"]
                         if side not in ("buy", "sell"):
                             raise ValueError
+                        liq = e.get("liq") if e.get("liq") in ("maker", "taker") else None
                         fills.append({"ts": ts, "sign": 1 if side == "buy" else -1, "px": int(e["px"]), "qty": int(e["qty"]),
-                                      "mid_x2": int(e.get("mid_x2", -1)), "pos": int(e["pos"])})
+                                      "mid_x2": int(e.get("mid_x2", -1)), "pos": int(e["pos"]), "liq": liq})
                         if fills[-1]["mid_x2"] > 0:    # in file order, so that of two samples in one millisecond the later line wins
                             mids.append((ts, fills[-1]["mid_x2"]))
                     elif ev == "mid" and int(e["mid_x2"]) > 0:
@@ -58,7 +63,7 @@ def load(paths):
     return fills, mids, last_ts, bad
 
 
-def analyse(fills, mids, last_ts, px_scale, qty_scale, fee_bps, horizons):
+def analyse(fills, mids, last_ts, px_scale, qty_scale, fee_bps, horizons, maker_bps=None, taker_bps=None):
     r = {"fills": len(fills)}
     if not fills:
         return r
@@ -78,6 +83,8 @@ def analyse(fills, mids, last_ts, px_scale, qty_scale, fee_bps, horizons):
     cash = 0.0
     volume = 0.0
     fees = 0.0
+    by_liq = {k: {"n": 0, "volume": 0.0, "fees": 0.0, "bps": None} for k in ("maker", "taker", "unmarked")}
+    rate = {"maker": fee_bps if maker_bps is None else maker_bps, "taker": fee_bps if taker_bps is None else taker_bps, "unmarked": fee_bps}
     edge_sum = 0.0            # quote units
     edge_bps_w = 0.0          # notional-weighted
     edge_n = 0
@@ -93,7 +100,13 @@ def analyse(fills, mids, last_ts, px_scale, qty_scale, fee_bps, horizons):
         s = f["sign"]
         notional = px * q
         volume += notional
-        fees += notional * fee_bps / 1e4
+        kind = f["liq"] or "unmarked"
+        fee = notional * rate[kind] / 1e4
+        fees += fee
+        by_liq[kind]["n"] += 1
+        by_liq[kind]["volume"] += notional
+        by_liq[kind]["fees"] += fee
+        by_liq[kind]["bps"] = rate[kind]
         cash -= s * notional
         buys += s > 0
         sells += s < 0
@@ -148,7 +161,7 @@ def analyse(fills, mids, last_ts, px_scale, qty_scale, fee_bps, horizons):
     total_cash = cash + pos * m_last - (pos0_lots / qty_scale) * first_mid - fees
     r.update({
         "buys": buys, "sells": sells, "volume_quote": volume, "start_position_base": pos0_lots / qty_scale, "end_position_base": pos,
-        "realised_quote": realised, "unrealised_quote": unreal, "fees_quote": fees, "total_quote": total, "total_from_cash_quote": total_cash,
+        "realised_quote": realised, "unrealised_quote": unreal, "fees_quote": fees, "fees_by_liquidity": by_liq, "total_quote": total, "total_from_cash_quote": total_cash,
         "cash_check_diff": total - total_cash, "last_mid": m_last,
         "edge_total_quote": edge_sum, "edge_fills": edge_n,
         "edge_bps_notional_weighted": (edge_bps_w / volume) if edge_n and volume else None,
@@ -162,7 +175,7 @@ def analyse(fills, mids, last_ts, px_scale, qty_scale, fee_bps, horizons):
     return r
 
 
-def text(r, fee_bps):
+def text(r):
     if r["fills"] == 0:
         return "no fills in the log: nothing to report"
     L = []
@@ -171,7 +184,14 @@ def text(r, fee_bps):
     L.append("  position: started %+.5f, ended %+.5f, largest %.5f, time-weighted mean %.5f (base units)" % (
         r["start_position_base"], r["end_position_base"], r["max_abs_position_base"], r["mean_abs_position_base"]))
     L.append("  PnL (average cost, last mid %.2f): realised %+.4f, unrealised %+.4f, fees %.4f (%.2f bps), total %+.4f" % (
-        r["last_mid"], r["realised_quote"], r["unrealised_quote"], r["fees_quote"], fee_bps, r["total_quote"]))
+        r["last_mid"], r["realised_quote"], r["unrealised_quote"], r["fees_quote"], (1e4 * r["fees_quote"] / r["volume_quote"]) if r["volume_quote"] else 0.0, r["total_quote"]))
+    parts = []
+    for kind in ("maker", "taker", "unmarked"):
+        d = r["fees_by_liquidity"][kind]
+        if d["n"]:
+            parts.append("%s %d fills, %.2f volume, %+.4f at %g bps" % (kind, d["n"], d["volume"], d["fees"], d["bps"]))
+    if parts:
+        L.append("  fees by liquidity: " + "; ".join(parts))
     L.append("  cross-check from cash flows: %+.4f (difference %.2e)" % (r["total_from_cash_quote"], r["cash_check_diff"]))
     if r["edge_fills"]:
         L.append("  edge against the mid at the fill: %+.4f in total, %+.2f bps notional-weighted (%d fills had a mid)" % (
@@ -198,7 +218,9 @@ def main(argv=None):
     ap.add_argument("logs", nargs="+")
     ap.add_argument("--px-scale", type=int, default=10000)
     ap.add_argument("--qty-scale", type=int, default=100000)
-    ap.add_argument("--fee-bps", type=float, default=0.0, help="one rate on every fill's notional (default 0: not modelled)")
+    ap.add_argument("--fee-bps", type=float, default=0.0, help="rate on fills not marked maker or taker, and the fallback for a marked kind without its own rate (default 0: not modelled)")
+    ap.add_argument("--maker-fee-bps", type=float, default=None, help="rate on fills marked maker; negative is a rebate")
+    ap.add_argument("--taker-fee-bps", type=float, default=None, help="rate on fills marked taker")
     ap.add_argument("--horizons", default="1,5,30", help="markout horizons in seconds")
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
@@ -207,9 +229,9 @@ def main(argv=None):
     except ValueError:
         ap.error("--horizons wants numbers")
     fills, mids, last_ts, bad = load(a.logs)
-    r = analyse(fills, mids, last_ts, a.px_scale, a.qty_scale, a.fee_bps, horizons)
+    r = analyse(fills, mids, last_ts, a.px_scale, a.qty_scale, a.fee_bps, horizons, a.maker_fee_bps, a.taker_fee_bps)
     r["unreadable_lines"] = bad
-    print(text(r, a.fee_bps))
+    print(text(r))
     if bad:
         print("  (%d lines could not be read and were skipped)" % bad)
     if a.json:

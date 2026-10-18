@@ -36,3 +36,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 32. [PnL and fill quality come from the event log, computed offline](adr/0032-pnl-and-fill-quality-from-the-event-log.md) (Accepted)
 33. [Compare strategy variants with paired runs in the backtester](adr/0033-compare-strategy-variants-with-paired-runs.md) (Accepted)
 34. [Choose parameters on training markets, judge them on held-out markets](adr/0034-choose-on-training-markets-judge-on-held-out-markets.md) (Accepted)
+35. [Count fees by liquidity and compare variants after costs](adr/0035-count-fees-by-liquidity-and-compare-after-costs.md) (Accepted)

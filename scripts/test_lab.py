@@ -51,9 +51,49 @@ for args, why in [
     (["--sweep", "=5"], "sweep with empty key"),
     (["--sweep", "skew16=1,,2"], "sweep with an empty value"),
     (["--sweep", "skew16=1,x"], "sweep with a bad value"),
+    (["--maker-fee-bps"], "fee without a value"),
+    (["--maker-fee-bps", "abc"], "non-numeric fee"),
+    (["--maker-fee-bps", "1001"], "fee above the range"),
+    (["--maker-fee-bps", "-101"], "rebate below the range"),
 ]:
     rc, out, err = lab(*args)
     check(rc == 1 and "usage" in err and out == "", "exit 1 and usage for " + why)
+
+print("fees")
+with tempfile.TemporaryDirectory() as d:
+    j0, j1, j2 = (os.path.join(d, n) for n in ("a.json", "b.json", "c.json"))
+    rc0, out0, _ = lab(*SMALL, "--sweep", "requote_ticks=1,2", "--json", j0)
+    rc1, out1, _ = lab(*SMALL, "--sweep", "requote_ticks=1,2", "--maker-fee-bps", "1", "--json", j1)
+    rc2, out2, _ = lab(*SMALL, "--sweep", "requote_ticks=1,2", "--maker-fee-bps", "-1", "--json", j2)
+    check(rc0 == rc1 == rc2 == 0, "fee runs finish")
+    check("fees" not in out0.split("paired")[0] and "fees mean" not in out0, "with no fee the table has no fee column")
+    check("fees mean" in out1 and "PnL is after fees" in out1, "with a fee the table says so")
+    a, b, c = (json.load(open(x)) for x in (j0, j1, j2))
+    check(a["maker_fee_bps"] == 0 and b["maker_fee_bps"] == 1 and c["maker_fee_bps"] == -1, "the json records the rate")
+    check(a["digest"] == b["digest"], "the run digest is about the simulation, so a fee does not change it")
+    ok = True
+    for va, vb, vc in zip(a["variants"], b["variants"], c["variants"]):
+        ok = ok and all(abs(f) < 1e-12 for f in va["fees"])
+        ok = ok and all(f > 0 for f in vb["fees"]) and all(f < 0 for f in vc["fees"])
+        ok = ok and all(abs(vb["fees"][i] + vc["fees"][i]) < 1e-9 for i in range(len(vb["fees"])))
+        ok = ok and all(abs(vb["pnl"][i] - (vb["edge"][i] + vb["inventory"][i] - vb["fees"][i])) < 1e-9 for i in range(len(vb["pnl"])))
+        ok = ok and all(abs(vc["pnl"][i] - (vc["edge"][i] + vc["inventory"][i] - vc["fees"][i])) < 1e-9 for i in range(len(vc["pnl"])))
+        ok = ok and all(abs(va["pnl"][i] - vb["pnl"][i] - vb["fees"][i]) < 1e-9 for i in range(len(va["pnl"])))
+        ok = ok and va["edge"] == vb["edge"] == vc["edge"]
+    check(ok, "pnl = edge + inventory - fees in every run; a rebate is the negative of the fee; edge is gross")
+    rowfields = [l.split() for l in out1.splitlines() if l.startswith("base ")]
+    check(rowfields and len(rowfields[0]) == 9 and abs(float(rowfields[0][-1]) - sum(b["variants"][0]["fees"]) / len(b["variants"][0]["fees"])) < 0.006,
+          "the fee column holds the mean fee of the row: %s" % (rowfields[:1],))
+    check("PnL is after fees" in out2 and "-1 bps" in out2, "a rebate gets the header note too")
+    for edge_fee in ("-100", "1000"):
+        rc, out, err = lab(*SMALL, "--maker-fee-bps", edge_fee)
+        check(rc == 0, "a fee of %s bps is inside the range" % edge_fee)
+    j3 = os.path.join(d, "g.json")
+    rc, out, err = lab(*SMALL, "--grid", "skew16=1,2;qty=1,2", "--top", "2", "--maker-fee-bps", "2", "--json", j3)
+    g = json.load(open(j3))
+    check(rc == 0 and out.count("fees mean") == 2, "a grid run shows the fee column for the training table and the held-out table")
+    check(all(abs(v["pnl"][i] - (v["edge"][i] + v["inventory"][i] - v["fees"][i])) < 1e-9 and v["fees"][i] > 0
+              for v in g["test_variants"] for i in range(len(v["pnl"]))), "held-out rows are after fees too")
 
 print("a run, twice")
 with tempfile.TemporaryDirectory() as d:
