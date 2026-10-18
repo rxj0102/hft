@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.2.0
+
+What this release adds over 0.1.0, in one place. The per-phase entries below have the detail, the mutation counts and the caveats. Nothing here was run against the real sandbox: no API key was available, so everything that talks to an exchange has only met a local fake written from the public documentation.
+
+- Real data and live paper (Phases 9 to 10): offline replay of Coinbase level-2 captures through the same pipeline with the book checked against an independent model; `hft_live` on the live public feed against a paper venue, with guards for a dropped connection, a price off the grid and a silent feed.
+- Operations (Phase 11): an event log and metrics file, a supervisor that restarts on loss and never on an integrity verdict, and fault drills (28 now).
+- Sandbox order entry and the closed loop (Phases 12 to 20): `scripts/order_bridge.py` carries post-only quotes to the Coinbase Exchange sandbox (sandbox URL only, keys from environment variables only); exchange acks, fills and cancels go back into the OMS; fills arrive over the websocket with the REST sync as the authority; a cancel asks the exchange what had traded; a stop can close the position with one reduce-only immediate-or-cancel order; the position carries across reconnects and restarts and is checked against the account balance before trading; a smoke test for the first real run.
+- CI (Phase 18): nine jobs on GitHub Actions; it found faults that local runs missed.
+- PnL report (Phase 21): PnL by average cost cross-checked against cash flows, edge against the mid, markouts and inventory from the event log.
+- Project write-up (Phase 22): README, RESULTS with the command, machine and caveats of every number, and the architecture diagram.
+- Strategy lab (Phases 23 to 28), all offline on simulated fills: paired comparison of strategy variants over generated markets; parameter search with held-out markets; fees by liquidity and a maker fee; seven named market regimes; latency sweep; queue penalty sweep. ADRs 33 to 38.
+- Version metadata: the CMake project version is now 0.2.0 (it had stayed at 0.0.1). The README test-suite count now matches CTest (19).
+
+Not in this release: any run on the real sandbox, any claim about profitability, and a taker rate in the lab (its strategy only sends post-only orders). The `v0.2.0` tag is created locally; the proxy used here blocks pushing tags, so it has to be pushed from another machine.
+
 ### Phase 28
 - Queue penalty sweep (ADR 38). `hft_lab --queue-sweep pct1,pct2,...` runs the same variants and markets once per queue penalty (strictly increasing, 0 to 1000 percent, at most 12; `--queue-penalty-pct` is replaced by each value) with the latency sweep's output: a table per value, mean PnL by value with `kept`, and the difference from the base by value. `--json` gains `queue_penalties` (with `pct`); `--events` files carry `q<pct>pct_`. Not combinable with the other sweep, `--grid`, `--regimes` or `--latency-axis`. The sweep code is shared with the latency sweep, whose output is byte-identical to before. New helpers in `lab.hpp`: `parse_increasing`, `parse_queue_penalties`, `with_queue_penalty`.
 - Example (2026-10-17, 8 markets x 40,000 requests): base PnL +3.47 at 0 percent, +2.75 at 25, +1.57 at 400 (kept 45 percent, fills per market 108 to 51); the no-skew variant +6.08 to +3.79 and ahead of the base at every penalty (+1.91 to +2.75). Simulated fills, one generator.

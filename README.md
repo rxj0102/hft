@@ -35,7 +35,7 @@ These exclude the NIC, kernel, TLS, JSON parsing and the exchange, and p99.9 and
 
 ## How it was checked
 
-- Sanitizers (ASan, UBSan, TSan), gcc and clang, 18 CTest suites, Python test suites for the scripts (capture, live tool, bridge, smoke test, PnL report, strategy lab) plus the drills.
+- Sanitizers (ASan, UBSan, TSan), gcc and clang, 19 CTest suites, Python test suites for the scripts (capture, live tool, bridge, smoke test, PnL report, strategy lab) plus the drills.
 - Nine libFuzzer targets, including one where the fuzz input plays the exchange.
 - Mutation checks at every phase: bugs injected on purpose, and a test had to fail. The first runs always had survivors, and each was either killed with a new test or removed as unobservable. Counts are in [docs/RESULTS.md](docs/RESULTS.md) and the changelog.
 - GitHub Actions with nine jobs (build and test cells, TSan, fuzz smoke, performance gate). It has found real faults that local runs missed, such as a missing Python package in five cells and a race in a test. See [docs/CI.md](docs/CI.md).

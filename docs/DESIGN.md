@@ -433,3 +433,19 @@ See SANDBOX.md and ADR 25. The tick-to-trade path gains one nullable function-po
 ## 19. Phase 13: closing the loop
 
 See CLOSED_LOOP.md and ADR 26. The session gains an external-venue mode in which the flatten of ADR 22 is a state finished by exchange reports or a deadline. The paper path and the pipeline are untouched. Cost: quotes follow exchange latency, and runs are no longer reproducible.
+
+## 20. Phases 14 to 28: since 0.1.0
+
+This log stops here on purpose: from Phase 14 on, each phase has its own decision record and a changelog entry with the tests, the mutation counts and the caveats, and repeating them here would give two places to go stale. Where to look:
+
+| Phases | What | Decision records |
+|---|---|---|
+| 14 to 16 | sandbox smoke test, websocket fills, a fill around a cancel is never lost | 27, 28 |
+| 17 | closing the position with one reduce-only immediate-or-cancel order | 29 |
+| 18 | CI follow-ups after the first runs on GitHub | none |
+| 19 to 20 | the position carried across segments and restarts, checked against the account | 30, 31 |
+| 21 | PnL and fill quality from the event log | 32 |
+| 22 | project write-up | none |
+| 23 to 28 | strategy lab: paired variants, held-out search, fees, regimes, latency and queue sweeps | 33 to 38 |
+
+See [CHANGELOG.md](../CHANGELOG.md) (section 0.2.0 summarises them), [DECISIONS.md](DECISIONS.md) and [STRATEGY_LAB.md](STRATEGY_LAB.md).
