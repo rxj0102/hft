@@ -4,6 +4,7 @@
 
 ### Phase 33: the first real contact, and what it changed
 
+- Exchange-side check on the real sandbox: 6 of 20 levels identical, 0 differing, 14 "absent"; by hand all 14 are outside the replay's 655 USD window and all 6 inside matched. The tool should not count out-of-window levels as absent (to do). Details in docs/SANDBOX.md.
 - A 60-second capture of the real sandbox feed (403 messages, no errors) replays cleanly through the pipeline: no desync, model agreement, identical second replay. The exchange-side `--verify` comparison is still to do. Details in docs/SANDBOX.md.
 - Second keyless run, after the fix: all five public steps passed against the real sandbox (details in docs/SANDBOX.md). The public `level2_batch` channel needs no credentials, and its snapshot matched the REST ticker.
 
