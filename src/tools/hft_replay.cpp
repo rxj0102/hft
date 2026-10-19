@@ -161,6 +161,9 @@ int main(int argc, char** argv) {
                         "    %llu of %llu levels identical, %llu differ in size, %llu absent from the replayed book\n",
                         static_cast<unsigned long long>(vr.equal), static_cast<unsigned long long>(vr.compared),
                         static_cast<unsigned long long>(vr.size_differs), static_cast<unsigned long long>(vr.missing_in_model));
+            if (vr.outside_window)
+              std::printf("    (%llu more of the nearest levels are outside the price window, which drops them by design: not compared)\n",
+                          static_cast<unsigned long long>(vr.outside_window));
           }
         }
       }

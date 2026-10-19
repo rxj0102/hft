@@ -13,6 +13,7 @@ step "pnl report tests" python3 scripts/test_pnl.py
 step "strategy lab tests" python3 scripts/test_lab.py
 step "capture script tests" scripts/ci_retry.sh test_capture python3 scripts/test_capture.py
 step "live tool tests" scripts/ci_retry.sh test_live_tool python3 scripts/test_live_tool.py "$LIVE"
+step "replay tool tests" python3 scripts/test_replay_cli.py "${LIVE%hft_live}hft_replay"
 step "order bridge tests" scripts/ci_retry.sh test_bridge python3 scripts/test_bridge.py "$LIVE"
 step "sandbox smoke test (local fake exchange)" scripts/ci_retry.sh test_smoke python3 scripts/test_smoke.py
 step "fault drills" scripts/ci_retry.sh drill python3 scripts/drill.py --live "$LIVE"

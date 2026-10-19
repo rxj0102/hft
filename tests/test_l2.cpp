@@ -361,6 +361,43 @@ void test_verify_against_snapshot() {
   v = verify_against_snapshot(seg, same, 2);  // only the two nearest per side
   CHECK(v.compared == 4);
   CHECK(!verify_against_snapshot(seg, parse_l2("{\"type\":\"heartbeat\"}"), 10).usable);
+  CHECK(v.outside_window == 0);
+}
+
+// Levels beyond the segment's price window are dropped by the converter, so the comparison counts them apart.
+void test_verify_outside_window() {
+  L2Config cfg;
+  cfg.num_levels = 64;  // a narrow window, so that its edges can be reached with ordinary prices
+  CaptureLoader l(cfg);
+  l.feed_line("5\t{\"type\":\"snapshot\",\"bids\":[[\"100.00\",\"1\"]],\"asks\":[[\"100.02\",\"1\"]]}");
+  l.feed_line("#6\tstop");
+  CHECK(l.segments().size() == 1);
+  const Segment& seg = l.segments()[0];
+  const std::int64_t lo = seg.base_raw / cfg.tick_raw;  // the first index inside, in ticks of 0.01
+  const std::int64_t hi = lo + 64;                       // the first index outside
+  auto px = [](std::int64_t idx) {
+    char b[48];
+    std::snprintf(b, sizeof b, "%lld.%02lld", static_cast<long long>(idx / 100), static_cast<long long>(idx % 100));
+    return std::string(b);
+  };
+  CHECK(lo > 0 && lo < 10000 && hi > 10002);
+  // bids at the first index inside and just below it; asks at the last index inside and the first outside
+  const std::string snap = "{\"type\":\"snapshot\",\"bids\":[[\"" + px(lo) + "\",\"1\"],[\"" + px(lo - 1) + "\",\"1\"]],\"asks\":[[\"" +
+                           px(hi - 1) + "\",\"1\"],[\"" + px(hi) + "\",\"1\"]]}";
+  VerifyResult v = verify_against_snapshot(seg, parse_l2(snap), 10);
+  CHECK(v.usable && v.compared == 2 && v.missing_in_model == 2 && v.equal == 0 && v.size_differs == 0 && v.outside_window == 2);
+  // the nearest-N rule counts a level outside the window as one of the N
+  v = verify_against_snapshot(seg, parse_l2(snap), 1);
+  CHECK(v.compared == 2 && v.outside_window == 0);  // the nearest bid and the nearest ask are the inside ones
+  const std::string far = "{\"type\":\"snapshot\",\"bids\":[[\"" + px(lo - 5) + "\",\"1\"],[\"100.00\",\"1\"]],\"asks\":[[\"100.02\",\"1\"],[\"" + px(hi + 7) + "\",\"1\"]]}";
+  v = verify_against_snapshot(seg, parse_l2(far), 10);
+  CHECK(v.compared == 2 && v.equal == 2 && v.outside_window == 2 && v.missing_in_model == 0);
+  v = verify_against_snapshot(seg, parse_l2(far), 2);  // two nearest per side: all four are taken, two are outside
+  CHECK(v.compared == 2 && v.outside_window == 2);
+  // when the nearest level is itself outside the window it uses up one of the N
+  const std::string odd = "{\"type\":\"snapshot\",\"bids\":[[\"" + px(hi + 3) + "\",\"1\"],[\"" + px(lo) + "\",\"1\"]],\"asks\":[[\"100.02\",\"1\"]]}";
+  v = verify_against_snapshot(seg, parse_l2(odd), 1);
+  CHECK(v.outside_window == 1 && v.compared == 1);  // the bid beyond the window, and the ask
 }
 
 // ---- the checker must be able to fail ---------------------------------------------------------------------------
@@ -522,6 +559,7 @@ int main() {
   test_converter();
   test_loader_edges();
   test_verify_against_snapshot();
+  test_verify_outside_window();
   test_ack_venue();
   test_checker_detects_differences();
   test_random_captures();

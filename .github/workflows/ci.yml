@@ -61,6 +61,9 @@ jobs:
       - name: Live tool tests (process, pipe, signals, real-time silence)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: scripts/ci_retry.sh test_live_tool python3 scripts/test_live_tool.py build/release/hft_live
+      - name: Replay tool tests (exchange snapshot comparison)
+        if: matrix.preset == 'release' && matrix.compiler == 'gcc'
+        run: python3 scripts/test_replay_cli.py build/release/hft_replay
       - name: Order bridge tests (local fake exchange)
         if: matrix.preset == 'release' && matrix.compiler == 'gcc'
         run: scripts/ci_retry.sh test_bridge python3 scripts/test_bridge.py build/release/hft_live

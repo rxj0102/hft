@@ -561,6 +561,7 @@ inline ReplayResult replay_segment(const Segment& seg, const ReplayOptions& opt,
 struct VerifyResult {
   bool usable = false;
   std::uint64_t compared = 0, equal = 0, size_differs = 0, missing_in_model = 0;
+  std::uint64_t outside_window = 0;  // among the nearest levels, but beyond the grid: the replay drops them, so they are not compared
 };
 
 // Compares the n levels nearest the touch on each side of a fresh exchange
@@ -568,6 +569,12 @@ struct VerifyResult {
 // is taken a moment after the last replayed message, so a few levels can have
 // legitimately moved; a wrong reading of the update messages would show as a
 // large mismatch instead.
+//
+// A level beyond the segment's price window is dropped by the converter by
+// design, so it can never be in the reconstructed book; it is counted in
+// `outside_window` and left out of `compared`. (A sparse book such as the
+// Coinbase sandbox's has most of its nearest levels far from the touch, and
+// counting them as missing hid the result.)
 inline VerifyResult verify_against_snapshot(const Segment& seg, const L2Message& snap, int top_n) {
   VerifyResult v;
   if (snap.kind != L2Message::Kind::Snapshot) return v;
@@ -580,13 +587,18 @@ inline VerifyResult verify_against_snapshot(const Segment& seg, const L2Message&
       theirs[c.price_raw / seg.cfg.tick_raw] = c.lots;
     }
     int taken = 0;
+    const std::int64_t base_idx = seg.base_raw / seg.cfg.tick_raw;
     auto visit = [&](std::int64_t idx, std::int64_t lots) {
+      ++taken;
+      if (idx < base_idx || idx >= base_idx + static_cast<std::int64_t>(seg.cfg.num_levels)) {
+        ++v.outside_window;
+        return;
+      }
       ++v.compared;
       const auto it = seg.final_levels[s].find(idx);
       if (it == seg.final_levels[s].end()) ++v.missing_in_model;
       else if (it->second == lots) ++v.equal;
       else ++v.size_differs;
-      ++taken;
     };
     if (side == core::Side::Buy) {
       for (auto it = theirs.rbegin(); it != theirs.rend() && taken < top_n; ++it) visit(it->first, it->second);

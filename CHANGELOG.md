@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 34: the exchange-snapshot check compares only what the window can hold
+
+- `hft_replay --verify` counts exchange levels beyond the replay's price window as "outside the window, not compared" and no longer as absent (ADR 41). On the real sandbox capture it now reads 6 of 6 identical, 14 outside. New C++ unit cases (both window edges, the nearest-N rule) and `scripts/test_replay_cli.py` (the process output; added to CI and ci_local). Mutation checks: 16 mutants, all killed on the first run.
+
 ### Phase 33: the first real contact, and what it changed
 
 - Exchange-side check on the real sandbox: 6 of 20 levels identical, 0 differing, 14 "absent"; by hand all 14 are outside the replay's 655 USD window and all 6 inside matched. The tool should not count out-of-window levels as absent (to do). Details in docs/SANDBOX.md.

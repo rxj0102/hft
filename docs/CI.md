@@ -7,7 +7,7 @@
 | Job | What it does | Fails when |
 |---|---|---|
 | `build-test` (6 cells: gcc-13 and clang-18, each with `release`, `asan`, `ubsan`) | Builds with warnings as errors and runs `ctest`. The long "gate" tests (millions of events) run only in the `release` cells | a warning, a test, a sanitizer report |
-| `build-test`, gcc `release` cell only | Python half: syntax check of `scripts/*.py`, then `test_pnl.py`, `test_lab.py`, `test_capture.py`, `test_live_tool.py`, `test_bridge.py`, `test_smoke.py` and `drill.py` against local fakes (no network, no key). Python 3.13 and `websockets` from `scripts/requirements.txt`, the versions they were written with | a failed check; the timing-dependent ones get one retry |
+| `build-test`, gcc `release` cell only | Python half: syntax check of `scripts/*.py`, then `test_pnl.py`, `test_lab.py`, `test_capture.py`, `test_live_tool.py`, `test_replay_cli.py`, `test_bridge.py`, `test_smoke.py` and `drill.py` against local fakes (no network, no key). Python 3.13 and `websockets` from `scripts/requirements.txt`, the versions they were written with | a failed check; the timing-dependent ones get one retry |
 | `tsan` | `ctest` under ThreadSanitizer | a data race |
 | `fuzz-smoke` | 45 seconds on each of the 9 fuzz targets, starting from the seeds in `fuzz/seeds` | a crash, a sanitizer report, a determinism or oracle trap |
 | `perf` | The instruction-count gate against the baseline (`perf_gate.py --strict`, valgrind: deterministic), then informational latency, flame graph and cache reports as an artifact | the gate: more than the allowed growth in instructions per input |
