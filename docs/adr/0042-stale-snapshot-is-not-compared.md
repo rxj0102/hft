@@ -3,7 +3,7 @@
 Status: Accepted
 
 ## Context
-`hft_replay --verify` rebuilds the book at the exchange snapshot's time (ADR 18, 41). A segment ends when the best price comes within 10% of the window edge, and nothing re-centres it (ADR 17). On the 10-minute capture of the real sandbox (2026-10-19, Phase 35) the first segment ended 11.1 s in, when the best ask jumped about 450 USD on a thin book. The exchange snapshot was taken at 594.5 s. The tool compared the book at 11.1 s with the exchange book at 594.5 s and printed "0 of 14 levels identical, 14 absent". That is a true count of a meaningless comparison, and the sandbox's own price had moved by hundreds of USD in between.
+`hft_replay --verify` rebuilds the book at the exchange snapshot's time (ADR 18, 41). A segment ends when the best price comes within 10% of the window edge, and nothing re-centres it (ADR 17). On the 10-minute capture of the real sandbox (2026-10-19, Phase 35) the first segment ended 11.5 s into the capture (11.1 s after its own first snapshot), when the best ask jumped about 450 USD on a thin book. The exchange snapshot was taken at 594.5 s. The tool compared the book at 11.1 s with the exchange book at 594.5 s and printed "0 of 14 levels identical, 14 absent". That is a true count of a meaningless comparison, and the sandbox's own price had moved by hundreds of USD in between.
 
 ## Decision
 - `verify_against_snapshot` takes the snapshot time. If the segment ended by leaving the window and the snapshot was taken more than `kVerifyMaxGapNs` (2 s) after the segment's last packet, it returns `stale` with the gap and compares nothing.

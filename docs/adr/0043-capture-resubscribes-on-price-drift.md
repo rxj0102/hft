@@ -19,3 +19,6 @@ The Python book is a second implementation of the best-price rule; it is checked
 - Reading the replay window from the C++ side into the capture: couples a recording script to a replay setting.
 - A periodic resubscribe (every N seconds): resubscribes when nothing is wrong, and misses a jump between ticks.
 - Resubscribing at the replay's exit line (262 USD): a limit below it costs nothing extra on a jump and covers slow drift earlier.
+
+## Measured (addendum, same day)
+The first real run (SANDBOX.md) showed the rule is wrong for this book. 135 resubscribes in 600 s, 106 of them from a snapshot whose own half-spread was above the 200 USD limit: the watch measures drift from the snapshot's mid, so a snapshot with a wide touch fires on its first update, and the same wide snapshot returns. The watch works as designed on the unit tests and fake server; it does not suit a snapshot that is wider than its limit. Candidate changes, not made here: measure drift from the snapshot's own best bid and ask instead of its mid; skip or delay a resubscribe when the snapshot is already wider than the limit; a minimum interval between resubscribes. The replay has the same weakness (78 of 136 snapshots are wider than its exit line).
