@@ -41,3 +41,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 37. [Sweep latency to see how fast a variant decays](adr/0037-sweep-latency-to-see-how-fast-a-variant-decays.md) (Accepted)
 38. [Sweep the queue penalty to stress the fill model](adr/0038-sweep-the-queue-penalty-to-stress-the-fill-model.md) (Accepted)
 39. [A position-dependent quote size was tried, judged by the lab, and not adopted](adr/0039-position-taper-tried-and-not-adopted.md) (Accepted)
+40. [A keyless public mode for the smoke test](adr/0040-keyless-public-checks-in-the-smoke-test.md) (Accepted)

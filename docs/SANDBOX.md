@@ -31,6 +31,7 @@ capture_l2.py --out - | hft_live --orders-fd 3 3>| order_bridge.py        (scrip
 
 Create an API key in the Coinbase Exchange sandbox with trade permission on a profile used only for this. Put the three values into environment variables in your shell. Do not paste them into a chat, a file in the repository, or a command line.
 
+0. No key yet? Run the public checks first (ADR 40): `python3 scripts/smoke_sandbox.py --public-only --report public_report.json`. It reads no environment variable, signs nothing and places no order: the clock, the product's sizes against the bridge's scaling, the ticker, and the first level-2 snapshot on the public feed (`--channel`, default `level2_batch`) compared side by side with the ticker. `FAIL 4 public feed ... without credentials` means the exchange wants authentication even for that channel. It says at the end what it did not test. The report is safe to share.
 1. Smoke test (`scripts/smoke_sandbox.py`, 14 steps, minimum-size orders worth under 5 USD):
 ```
 python3 scripts/smoke_sandbox.py --report smoke_report.json

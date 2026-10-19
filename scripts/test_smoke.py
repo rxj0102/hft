@@ -181,6 +181,93 @@ def main():
     r = run(ex, ["--skip-bridge"])
     check(r.returncode == 0 and "skipped" in r.stdout, "--skip-bridge")
     ex.stop()
+
+    print("public-only mode: no key, no signed request, no order")
+    nokey = {"HFT_CB_KEY": None, "HFT_CB_SECRET": None, "HFT_CB_PASSPHRASE": None}
+    ex = fake_exchange.FakeExchange(KEY, SECRET, PASS).start().start_ws()
+    rep = os.path.join(tempfile.mkdtemp(prefix="smk"), "pub.json")
+    r = run(ex, ["--public-only", "--report", rep], env=nokey)
+    out = r.stdout
+    check(r.returncode == 0, "exit 0 with no environment variables at all (%s)" % out[-200:].replace("\n", " | "))
+    check(out.count("PASS") == 5 and "FAIL" not in out, "environment, clock, product, ticker and public feed all pass (%d PASS)" % out.count("PASS"))
+    check("public feed" in out and "snapshot of 3 bids and 3 asks" in out, "the public snapshot was read and compared with the ticker")
+    check(ex.signed_seen == 0 and not ex.requests("POST") and not ex.requests("DELETE"), "no signed request, no POST, no DELETE reached the exchange")
+    check(ex.ws_public_subs == 1 and ex.ws_subscriptions == 0, "one public subscription, no user-channel subscription")
+    check("NOT tested" in out, "it says what it did not test")
+    rj = json.load(open(rep))
+    check(rj["extra"]["mode"] == "public-only" and rj["summary"]["failed"] == 0, "the report says public-only")
+    check("public_snapshot" in rj["response_shapes"] and "bids" in rj["response_shapes"]["public_snapshot"], "the report holds the shape of the snapshot")
+    check(KEY not in open(rep).read() and PASS not in open(rep).read(), "no credential in the report")
+    n = len(ex.log)
+    r = run(ex, ["--public-only", "--cancel-existing"], env=nokey)
+    check(r.returncode == 2 and len(ex.log) == n, "--cancel-existing with --public-only: exit 2, nothing sent")
+    r = run(ex, ["--public-only", "--skip-bridge"], env=nokey)
+    check(r.returncode == 2, "--skip-bridge with --public-only: exit 2")
+    r = run(ex, ["--public-only", "--skip-ws"], env=nokey)
+    check(r.returncode == 0 and "PASS  4 public feed  SKIPPED on request" in r.stdout and "FAIL" not in r.stdout, "--skip-ws leaves the feed out, and that is a pass")
+    # junk in the environment is not read and not needed
+    r = run(ex, ["--public-only"], env={"HFT_CB_SECRET": "not base64 !!"})
+    check(r.returncode == 0, "a bad secret in the environment does not matter: it is not read")
+    for mode, what in (("auth_only", "without credentials"), ("bad", "not in the"), ("far", "more than 1 percent"), ("silent", "no snapshot"),
+                       ("crossed", "not a valid book"), ("locked", "not a valid book"), ("zero", "not a valid book"),
+                       ("badside", "more than 1 percent"), ("badbid", "more than 1 percent"), ("noasks", "not in the")):
+        ex.ws_public_mode = mode
+        extra = ["--public-only", "--timeout", "3"]
+        r = run(ex, extra, env=nokey, timeout=60)
+        check(r.returncode == 1 and "FAIL  4 public feed" in r.stdout and what in r.stdout, "public feed %s: step 4 fails (%s)" % (mode, what))
+    ex.ws_public_mode = "near"
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 0 and "PASS  4 public feed" in r.stdout, "a snapshot 0.2 percent from the ticker passes (the tolerance is not zero)")
+    ex.ws_public_mode = "ok"
+    check(set(map(tuple, ex.ws_public_channels)) == {("level2_batch",)}, "it subscribed to the level2_batch channel and nothing else, without a key")
+    r = run(ex, ["--public-only", "--channel", "ticker"], env=nokey)
+    check(r.returncode == 0 and ["ticker"] in ex.ws_public_channels, "--channel picks another public channel")
+    sys.path.insert(0, HERE)
+    import smoke_sandbox  # noqa: E402
+    import order_bridge  # noqa: E402
+    before = ex.signed_seen
+    a = smoke_sandbox.Api(order_bridge.Client(ex.url, KEY, SECRET, PASS, 5, True), public=True)
+    st, js = a.call("t", "GET", "/orders?product_id=BTC-USD&status=open")
+    check(st is None and "refused" in js and ex.signed_seen == before, "the Api guard refuses a signed call in public mode, before it is sent")
+    st, js = smoke_sandbox.Api(order_bridge.Client(ex.url, KEY, SECRET, PASS, 5, True)).call("t", "GET", "/orders?product_id=BTC-USD&status=open")
+    check(st == 200 and ex.signed_seen == before + 1, "and the same call goes out in the normal mode")
+    ex.product_status = "offline"
+    subs = ex.ws_public_subs
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "FAIL  3 product" in r.stdout and ex.ws_public_subs == subs, "a product that is not online stops a public run at step 3")
+    ex.product_status = "online"
+    ex.ticker_bad = True
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "FAIL  4 ticker" in r.stdout and ex.ws_public_subs == subs, "a ticker of zeros stops a public run at step 4, before the feed")
+    ex.ticker_bad = False
+    r = run(ex, ["--public-only", "--ws-url", "ws://127.0.0.1:1", "--timeout", "3"], env=nokey)
+    check(r.returncode == 1 and "FAIL  4 public feed" in r.stdout and "connection failed" in r.stdout, "a feed that cannot be reached fails step 4")
+    proxy = {"HTTP_PROXY": "http://127.0.0.1:9", "http_proxy": "http://127.0.0.1:9", "ALL_PROXY": "http://127.0.0.1:9", "all_proxy": "http://127.0.0.1:9",
+             "HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9", "NO_PROXY": "", "no_proxy": ""}
+    r = run(ex, ["--public-only"], env=dict(nokey, **proxy))
+    check(r.returncode == 0, "against the local fake an environment proxy is not used (REST and websocket)")
+    # the Api that public_only builds refuses a signed call; reach it through a patched check
+    import types
+    seen = []
+    orig = smoke_sandbox.check_clock
+    smoke_sandbox.check_clock = lambda api: (seen.append(api.call("x", "GET", "/orders?product_id=BTC-USD&status=open")), False)[1]
+    n_signed = ex.signed_seen
+    ns = types.SimpleNamespace(test_exchange=True, timeout=5.0, product="BTC-USD", skip_ws=True, channel="level2_batch", report=None)
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        smoke_sandbox.public_only(ns, ex.url, None)
+    smoke_sandbox.check_clock = orig
+    check(len(seen) == 1 and seen[0][0] is None and "refused" in seen[0][1] and ex.signed_seen == n_signed,
+          "the Api that public_only builds refuses a signed call")
+    ex.skew = 60.0
+    subs = ex.ws_public_subs
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "FAIL  2 clock" in r.stdout and ex.ws_public_subs == subs, "a clock 60 s off stops a public run at step 2, before the feed")
+    ex.skew = 0.0
+    ex.stop()
+    r = subprocess.run([sys.executable, SMOKE, "--public-only", "--base-url", "https://api.exchange.coinbase.com"], capture_output=True, text=True, env=dict(os.environ, **{k: "" for k in nokey}))
+    check(r.returncode == 2 and "refusing" in r.stderr, "the production URL is still refused in public-only mode")
     print("test_smoke: all checks passed" if not fails else "test_smoke: %d FAILED" % fails)
     return 1 if fails else 0
 

@@ -39,7 +39,7 @@ These exclude the NIC, kernel, TLS, JSON parsing and the exchange, and p99.9 and
 - Nine libFuzzer targets, including one where the fuzz input plays the exchange.
 - Mutation checks at every phase: bugs injected on purpose, and a test had to fail. The first runs always had survivors, and each was either killed with a new test or removed as unobservable. Counts are in [docs/RESULTS.md](docs/RESULTS.md) and the changelog.
 - GitHub Actions with nine jobs (build and test cells, TSan, fuzz smoke, performance gate). It has found real faults that local runs missed, such as a missing Python package in five cells and a race in a test. See [docs/CI.md](docs/CI.md).
-- 39 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
+- 40 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Build and run
 
@@ -64,6 +64,8 @@ Running against the real sandbox (your own key, on a profile used only for this;
 export HFT_CB_KEY=... HFT_CB_SECRET=... HFT_CB_PASSPHRASE=...
 python3 scripts/smoke_sandbox.py --report smoke_report.json
 ```
+
+Without a key, the public part alone can be run: `python3 scripts/smoke_sandbox.py --public-only --report public_report.json` (clock, product, ticker, public level-2 snapshot; no orders, no signed request).
 
 The smoke test places a few minimum-size orders worth under 5 USD and writes a report with no credentials in it. Read [docs/SANDBOX.md](docs/SANDBOX.md) before running the bridge: its cancel-all cancels every open order for the product on the profile.
 

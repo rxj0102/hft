@@ -74,10 +74,13 @@ def shape(js):
 
 
 class Api:
-    def __init__(self, client):
+    def __init__(self, client, public=False):
         self.c = client
+        self.public = public  # public-only mode: a signed request is refused here, before it is built
 
     def call(self, label, method, path, body=None, signed=True):
+        if self.public and signed:
+            return None, {"refused": "signed request in public-only mode"}
         t = time.monotonic()
         try:
             st, js, _ = self.c.call(method, path, body, signed)
@@ -113,6 +116,134 @@ def finish(code, args, extra=None):
     return code
 
 
+def check_clock(api):
+    st, js = api.call("time", "GET", "/time", signed=False)
+    if not (st == 200 and isinstance(js, dict) and "epoch" in js):
+        step(2, "clock", False, "GET /time gave %s %s" % (st, shape(js)))
+        return False
+    shapes["time"] = shape(js)
+    skew = float(js["epoch"]) - time.time()
+    return step(2, "clock", abs(skew) < 5, "local clock is %.2f s from the exchange's (bridge stops at 20 s, exchange refuses at 30 s)" % skew)
+
+
+def check_product(api, P):
+    """Returns (ok, minimum size)."""
+    st, js = api.call("product", "GET", "/products/" + P, signed=False)
+    shapes["product"] = shape(js)
+    try:
+        minsz, binc, qinc = float(js["base_min_size"]), float(js["base_increment"]), float(js["quote_increment"])
+        online = js.get("status") == "online" and not js.get("trading_disabled", False)
+        # the bridge sends sizes in 1e-5 steps and prices in cents
+        fits = minsz <= 0.0001 and abs(0.00001 / binc - round(0.00001 / binc)) < 1e-9 and abs(0.01 / qinc - round(0.01 / qinc)) < 1e-9
+        ok = st == 200 and online and fits
+        detail = "min size %s, size step %s, price step %s, status %s; the bridge's 1e-5 sizes and cent prices %s" % (
+            js["base_min_size"], js["base_increment"], js["quote_increment"], js.get("status"), "fit" if fits else "DO NOT FIT")
+    except (KeyError, TypeError, ValueError):
+        ok, detail, minsz = False, "unexpected reply %s %s" % (st, shape(js)), 0.0
+    return step(3, "product", ok, detail), minsz
+
+
+def check_ticker(api, P):
+    """Returns (ok, bid, ask)."""
+    st, js = api.call("ticker", "GET", "/products/%s/ticker" % P, signed=False)
+    shapes["ticker"] = shape(js)
+    try:
+        bid, ask = float(js["bid"]), float(js["ask"])
+        ok = st == 200 and 0 < bid <= ask
+        detail = "bid %.2f ask %.2f" % (bid, ask)
+    except (KeyError, TypeError, ValueError):
+        ok, detail, bid, ask = False, "unexpected reply %s %s" % (st, shape(js)), 0.0, 0.0
+    return step(4, "ticker", ok, detail), bid, ask
+
+
+def check_public_feed(ws_url, P, channel, bid, ask, test, seconds=10.0):
+    """Subscribe to the public level-2 channel without credentials and read the first snapshot.
+    Returns (ok, detail). The snapshot must have both sides in [price, size] form and sit near the REST ticker."""
+    import asyncio
+
+    import websockets
+
+    async def go():
+        kw = {"proxy": None} if test else {}
+        got = {"errors": [], "types": []}
+        async with websockets.connect(ws_url, open_timeout=10, max_size=1 << 24, **kw) as ws:
+            await ws.send(json.dumps({"type": "subscribe", "product_ids": [P], "channels": [channel]}))
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=max(end - time.monotonic(), 0.01))
+                except asyncio.TimeoutError:
+                    break
+                try:
+                    m = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(m, dict):
+                    continue
+                got["types"].append(str(m.get("type")))
+                if m.get("type") == "error":
+                    got["errors"].append("%s / %s" % (str(m.get("message"))[:100], str(m.get("reason"))[:100]))
+                    return got
+                if m.get("type") == "snapshot":
+                    got["snapshot"] = m
+                    return got
+        return got
+
+    try:
+        got = asyncio.run(go())
+    except Exception as e:  # noqa: BLE001  any failure is a result to report
+        return False, "connection failed: %s %s" % (type(e).__name__, str(e)[:100])
+    if got["errors"]:
+        return False, "the exchange refused the subscription to %s without credentials: %s" % (channel, got["errors"][0])
+    snap = got.get("snapshot")
+    if snap is None:
+        return False, "no snapshot within %.0f s on %s; message types seen %s" % (seconds, channel, sorted(set(got["types"])))
+    shapes["public_snapshot"] = shape(snap)
+    try:
+        bids = [(float(p), float(q)) for p, q in snap["bids"]]
+        asks = [(float(p), float(q)) for p, q in snap["asks"]]
+        bb, ba = max(bids)[0], min(asks)[0]
+        ok = 0 < bb < ba and all(p > 0 and q > 0 for p, q in bids + asks)  # max/min above raise on an empty side
+    except (KeyError, TypeError, ValueError):
+        return False, "the snapshot is not in the [price, size] shape the capture reads: fields %s" % shape(snap)
+    if not ok:
+        return False, "snapshot best bid %s, best ask %s: not a valid book" % (bb, ba)
+    mid_rest = (bid + ask) / 2.0
+    near = abs(bb - bid) <= 0.01 * mid_rest and abs(ba - ask) <= 0.01 * mid_rest  # each side, so a book too wide around the right mid fails
+    return near, "snapshot of %d bids and %d asks, best %.2f / %.2f, REST ticker %.2f / %.2f%s" % (
+        len(bids), len(asks), bb, ba, bid, ask, "" if near else " (more than 1 percent apart)")
+
+
+def public_only(args, base, ws_url):
+    """Everything that needs no key: no environment variables are read, no signed request is made, no order is placed."""
+    api = Api(ob.Client(base, "", "", "", args.timeout, args.test_exchange), public=True)
+    step(1, "environment", True, "public-only: no credentials read, no signed request, no order; target %s" % ("local fake" if args.test_exchange else "the sandbox"))
+    if not check_clock(api):
+        return finish(1, args, {"mode": "public-only"})
+    ok, _ = check_product(api, args.product)
+    if not ok:
+        return finish(1, args, {"mode": "public-only"})
+    ok, bid, ask = check_ticker(api, args.product)
+    if not ok:
+        return finish(1, args, {"mode": "public-only"})
+    if args.skip_ws:
+        step(4, "public feed", True, "SKIPPED on request")
+        results[-1]["skipped"] = True
+    else:
+        try:
+            import websockets  # noqa: F401
+        except ImportError:
+            step(4, "public feed", True, "SKIPPED: the websockets package is not installed (pip install websockets)")
+            results[-1]["skipped"] = True
+        else:
+            ok, detail = check_public_feed(ws_url, args.product, args.channel, bid, ask, args.test_exchange, seconds=args.timeout)
+            if not step(4, "public feed", ok, detail):
+                return finish(1, args, {"mode": "public-only", "channel": args.channel})
+    print("\npublic checks done. Orders, the signature, the account and the user channel were NOT tested: they need a key.")
+    return finish(0, args, {"mode": "public-only", "channel": args.channel})
+
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default=ob.SANDBOX_URL)
@@ -124,6 +255,8 @@ def main(argv=None):
     ap.add_argument("--skip-ws", action="store_true", help="skip the websocket steps")
     ap.add_argument("--skip-bridge", action="store_true", help="skip step 12")
     ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--public-only", action="store_true", help="no key needed: clock, product, ticker and the public level-2 snapshot; no signed request, no order")
+    ap.add_argument("--channel", default="level2_batch", help="public channel for --public-only")
     ap.add_argument("--report", default=None)
     args = ap.parse_args(argv)
     if not (0 < args.max_notional <= 50):
@@ -143,6 +276,11 @@ def main(argv=None):
         except ob.Fatal as e:
             print("smoke: " + str(e), file=sys.stderr)
             return 2
+    if args.public_only:
+        if args.cancel_existing or args.skip_bridge:
+            print("smoke: --public-only places nothing, so --cancel-existing and --skip-bridge do not apply", file=sys.stderr)
+            return 2
+        return public_only(args, base, ws_url)
     missing = [k for k in ob.ENV_KEYS if not os.environ.get(k)]
     if missing:
         print("smoke: missing environment variables: " + ", ".join(missing), file=sys.stderr)
@@ -158,43 +296,19 @@ def main(argv=None):
     P = args.product
 
     # 2 ---------------------------------------------------------------------------------------------------------------
-    st, js = api.call("time", "GET", "/time", signed=False)
-    if not (st == 200 and isinstance(js, dict) and "epoch" in js):
-        step(2, "clock", False, "GET /time gave %s %s" % (st, shape(js)))
-        return finish(1, args)
-    shapes["time"] = shape(js)
-    skew = float(js["epoch"]) - time.time()
-    if not step(2, "clock", abs(skew) < 5, "local clock is %.2f s from the exchange's (bridge stops at 20 s, exchange refuses at 30 s)" % skew):
+    if not check_clock(api):
         return finish(1, args)
 
     # 3 ---------------------------------------------------------------------------------------------------------------
-    st, js = api.call("product", "GET", "/products/" + P, signed=False)
-    shapes["product"] = shape(js)
-    try:
-        minsz, binc, qinc = float(js["base_min_size"]), float(js["base_increment"]), float(js["quote_increment"])
-        online = js.get("status") == "online" and not js.get("trading_disabled", False)
-        # the bridge sends sizes in 1e-5 steps and prices in cents
-        fits = minsz <= 0.0001 and abs(0.00001 / binc - round(0.00001 / binc)) < 1e-9 and abs(0.01 / qinc - round(0.01 / qinc)) < 1e-9
-        ok = st == 200 and online and fits
-        detail = "min size %s, size step %s, price step %s, status %s; the bridge's 1e-5 sizes and cent prices %s" % (
-            js["base_min_size"], js["base_increment"], js["quote_increment"], js.get("status"), "fit" if fits else "DO NOT FIT")
-    except (KeyError, TypeError, ValueError):
-        ok, detail, minsz = False, "unexpected reply %s %s" % (st, shape(js)), 0.0
-    if not step(3, "product", ok, detail):
+    ok, minsz = check_product(api, P)
+    if not ok:
         return finish(1, args)
     size = max(minsz, 0.00001)
     size_s = "%.5f" % (round(size / 0.00001 + 0.4999) * 0.00001)
 
     # 4 ---------------------------------------------------------------------------------------------------------------
-    st, js = api.call("ticker", "GET", "/products/%s/ticker" % P, signed=False)
-    shapes["ticker"] = shape(js)
-    try:
-        bid, ask = float(js["bid"]), float(js["ask"])
-        ok = st == 200 and 0 < bid <= ask
-        detail = "bid %.2f ask %.2f" % (bid, ask)
-    except (KeyError, TypeError, ValueError):
-        ok, detail, bid, ask = False, "unexpected reply %s %s" % (st, shape(js)), 0.0, 0.0
-    if not step(4, "ticker", ok, detail):
+    ok, bid, ask = check_ticker(api, P)
+    if not ok:
         return finish(1, args)
     far = int(bid * 0.5 * 100) / 100.0
     notional = far * float(size_s)

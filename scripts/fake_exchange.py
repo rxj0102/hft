@@ -36,6 +36,8 @@ class FakeExchange:
         self.log = []           # (t, method, path, status)
         self.mode, self.delay, self.skew = "ok", 0.0, 0.0
         self.best_bid, self.best_ask = 81000.00, 81000.10
+        self.product_status = "online"  # what GET /products/{id} says
+        self.ticker_bad = False         # the ticker answers with zeros
         self.rate, self.burst, self.tokens, self.t_tok = rate, burst, burst, time.monotonic()
         self.enforce_rate = True
         # faults for the smoke test's tests
@@ -54,6 +56,10 @@ class FakeExchange:
         self.ws_cancel_reason = "canceled"
         self.ws_silent = False         # subscribes fine, then never sends an event
         self.ws_subscriptions, self.ws_rejected = 0, 0
+        self.ws_public_mode = "ok"     # public level-2 feed (no key): ok | silent | error | far | bad | auth_only | crossed | locked | zero | badside | badbid | near | noasks
+        self.ws_public_subs = 0
+        self.ws_public_channels = []
+        self.signed_seen = 0           # REST requests that carried a CB-ACCESS-KEY header
         self.before_cancel = None
         self.trade_id = 0
         self.honour_post_only = True   # False: a crossing "post-only" order is accepted (a broken exchange, for the smoke test's tests)
@@ -122,6 +128,44 @@ class FakeExchange:
             try:
                 sub = json.loads(await conn.recv())
             except Exception:  # noqa: BLE001
+                return
+            if sub.get("key") is None and sub.get("type") == "subscribe":  # the public feed: no credentials
+                ex.ws_public_subs += 1
+                mode = ex.ws_public_mode
+                if mode == "auth_only" or mode == "error":
+                    await conn.send(json.dumps({"type": "error", "message": "Failed to subscribe", "reason": "authentication required"}))
+                    await conn.close()
+                    return
+                chans = sub.get("channels") or []
+                ex.ws_public_channels.append(list(chans))
+                await conn.send(json.dumps({"type": "subscriptions", "channels": [{"name": c, "product_ids": sub.get("product_ids", [])} for c in chans]}))
+                if mode == "silent":
+                    await asyncio.sleep(30)
+                    return
+                off = 2000.0 if mode == "far" else 0.0
+                if mode == "crossed":
+                    snap = {"type": "snapshot", "product_id": "BTC-USD", "bids": [["%.2f" % (ex.best_ask + 0.05), "0.5"]], "asks": [["%.2f" % ex.best_ask, "0.4"]]}
+                elif mode == "locked":
+                    snap = {"type": "snapshot", "product_id": "BTC-USD", "bids": [["%.2f" % ex.best_ask, "0.5"]], "asks": [["%.2f" % ex.best_ask, "0.4"]]}
+                elif mode == "zero":
+                    snap = {"type": "snapshot", "product_id": "BTC-USD", "bids": [["%.2f" % ex.best_bid, "0"]], "asks": [["%.2f" % ex.best_ask, "0.4"]]}
+                elif mode == "badside":
+                    snap = {"type": "snapshot", "product_id": "BTC-USD", "bids": [["%.2f" % ex.best_bid, "0.5"]], "asks": [["%.2f" % (ex.best_ask + 2000.0), "0.4"]]}
+                elif mode == "badbid":
+                    snap = {"type": "snapshot", "product_id": "BTC-USD", "bids": [["%.2f" % (ex.best_bid - 2000.0), "0.5"]], "asks": [["%.2f" % ex.best_ask, "0.4"]]}
+                elif mode == "near":  # 0.2 percent away on each side: inside the 1 percent allowed
+                    d = round(ex.best_bid * 0.002, 2)
+                    snap = {"type": "snapshot", "product_id": "BTC-USD", "bids": [["%.2f" % (ex.best_bid - d), "0.5"]], "asks": [["%.2f" % (ex.best_ask + d), "0.4"]]}
+                elif mode == "noasks":
+                    snap = {"type": "snapshot", "product_id": "BTC-USD", "bids": [["%.2f" % ex.best_bid, "0.5"]], "asks": []}
+                elif mode == "bad":
+                    snap = {"type": "snapshot", "product_id": "BTC-USD", "bids": [["x", "y"]], "asks": []}
+                else:
+                    snap = {"type": "snapshot", "product_id": "BTC-USD",
+                            "bids": [["%.2f" % (ex.best_bid - off), "0.5"], ["%.2f" % (ex.best_bid - off - 0.01), "1.0"], ["%.2f" % (ex.best_bid - off - 2000.0), "3.0"]],
+                            "asks": [["%.2f" % (ex.best_ask + off), "0.4"], ["%.2f" % (ex.best_ask + off + 0.01), "2.0"], ["%.2f" % (ex.best_ask + off + 2000.0), "3.0"]]}
+                await conn.send(json.dumps(snap))
+                await asyncio.sleep(2)
                 return
             ts = str(sub.get("timestamp", ""))
             want = base64.b64encode(hmac.new(ex.secret, (ts + "GET/users/self/verify").encode(), hashlib.sha256).digest()).decode()
@@ -251,13 +295,17 @@ class FakeExchange:
 
     # ---- the API ----
     def dispatch(self, method, rawpath, u, body, h):
+        if h.get("CB-ACCESS-KEY") is not None:
+            self.signed_seen += 1
         if u.path == "/time":
             return 200, {"iso": "", "epoch": time.time() + self.skew}, False
         if u.path.startswith("/products/"):  # public market data, no signature needed
             parts = u.path.split("/")
             if len(parts) == 3:
                 return 200, {"id": parts[2], "base_min_size": "0.00001", "base_increment": "0.00000001", "quote_increment": "0.01",
-                             "status": "online", "post_only": False, "trading_disabled": False}, False
+                             "status": self.product_status, "post_only": False, "trading_disabled": False}, False
+            if len(parts) == 4 and parts[3] == "ticker" and self.ticker_bad:
+                return 200, {"bid": "0", "ask": "0", "price": "0"}, False
             if len(parts) == 4 and parts[3] == "ticker":
                 return 200, {"bid": "%.2f" % self.best_bid, "ask": "%.2f" % self.best_ask, "price": "%.2f" % self.best_bid}, False
         if self.mode == "down":
