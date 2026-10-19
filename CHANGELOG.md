@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 35: a 10-minute sandbox capture, and a stale-snapshot guard
+
+- Analysis of a 10-minute keyless capture of the real sandbox (3,870 messages): the first segment ended at 11.1 s because the best ask jumped about 450 USD on a thin book (not drift). 3,203 messages were unusable afterwards because the capture has no re-subscribe on a window exit. The true mid ranged 81,256.52 to 82,637.40 USD; the spread was 7.77 USD at least, 30 at the median and 1,591 at most; 55 messages moved a best price by more than 100 USD.
+- `hft_replay --verify` printed "0 of 14 identical" by comparing an 11.1 s book with a 594.5 s snapshot. It now says "not comparable" when the segment ended by the window more than 2 s before the snapshot (ADR 42). New unit and process tests; 9 mutants, 2 survived the first run (a redundant condition, removed; limit not probed, tests added).
+
 ### Phase 34: the exchange-snapshot check compares only what the window can hold
 
 - `hft_replay --verify` counts exchange levels beyond the replay's price window as "outside the window, not compared" and no longer as absent (ADR 41). On the real sandbox capture it now reads 6 of 6 identical, 14 outside. New C++ unit cases (both window edges, the nearest-N rule) and `scripts/test_replay_cli.py` (the process output; added to CI and ci_local). Mutation checks: 16 mutants, all killed on the first run.

@@ -400,6 +400,44 @@ void test_verify_outside_window() {
   CHECK(v.outside_window == 1 && v.compared == 1);  // the bid beyond the window, and the ask
 }
 
+// A segment that ended (price left the window) long before the exchange snapshot says nothing about that snapshot.
+void test_verify_stale_snapshot() {
+  L2Config cfg;
+  cfg.num_levels = 64;  // margin 6 ticks: a best ask at 100.30 is inside the grid but past the exit line
+  CaptureLoader l(cfg);
+  l.feed_line("1000000000\t{\"type\":\"snapshot\",\"bids\":[[\"100.00\",\"1\"]],\"asks\":[[\"100.02\",\"1\"]]}");
+  l.feed_line("2000000000\t{\"type\":\"l2update\",\"changes\":[[\"sell\",\"100.02\",\"0\"],[\"sell\",\"100.30\",\"1\"]]}");
+  l.feed_line("#9000000000\tstop");
+  CHECK(l.segments().size() == 1 && l.segments()[0].ended_by_window);
+  const Segment& seg = l.segments()[0];
+  const L2Message snap = parse_l2("{\"type\":\"snapshot\",\"bids\":[[\"100.00\",\"1\"]],\"asks\":[[\"100.30\",\"1\"]]}");
+  const std::uint64_t last = seg.pkts.back().t;
+  CHECK(last == 2000000000ULL);
+  VerifyResult v = verify_against_snapshot(seg, snap, 10, last + 1'000'000'000ULL);  // one second after the end: the same moment
+  CHECK(v.usable && !v.stale && v.compared == 2 && v.equal == 2);
+  v = verify_against_snapshot(seg, snap, 10, last + 1'500'000'000ULL);  // 1.5 s: still the same moment
+  CHECK(v.usable && !v.stale);
+  v = verify_against_snapshot(seg, snap, 10, last + 2'500'000'000ULL);  // 2.5 s: too late
+  CHECK(!v.usable && v.stale);
+  v = verify_against_snapshot(seg, snap, 10, last + kVerifyMaxGapNs);  // exactly at the limit: still comparable
+  CHECK(v.usable && !v.stale);
+  v = verify_against_snapshot(seg, snap, 10, last + kVerifyMaxGapNs + 1);  // one nanosecond past it
+  CHECK(!v.usable && v.stale && v.compared == 0 && v.stale_gap_ns == kVerifyMaxGapNs + 1);
+  v = verify_against_snapshot(seg, snap, 10, 7'000'000'000ULL);  // five seconds later
+  CHECK(!v.usable && v.stale && v.stale_gap_ns == 5'000'000'000ULL);
+  v = verify_against_snapshot(seg, snap, 10);  // no time given: the old behaviour
+  CHECK(v.usable && !v.stale);
+  v = verify_against_snapshot(seg, snap, 10, last - 1);  // a snapshot from before the end is never stale
+  CHECK(v.usable && !v.stale);
+  // a segment that did not end by the window is never stale, however late the snapshot
+  CaptureLoader k(cfg);
+  k.feed_line("1000000000\t{\"type\":\"snapshot\",\"bids\":[[\"100.00\",\"1\"]],\"asks\":[[\"100.02\",\"1\"]]}");
+  k.feed_line("#9000000000\tstop");
+  CHECK(k.segments().size() == 1 && !k.segments()[0].ended_by_window);
+  v = verify_against_snapshot(k.segments()[0], parse_l2("{\"type\":\"snapshot\",\"bids\":[[\"100.00\",\"1\"]],\"asks\":[[\"100.02\",\"1\"]]}"), 10, 50'000'000'000ULL);
+  CHECK(v.usable && !v.stale && v.equal == 2);
+}
+
 // ---- the checker must be able to fail ---------------------------------------------------------------------------
 
 // The comparison of the pipeline's book with the model is only worth something
@@ -560,6 +598,7 @@ int main() {
   test_loader_edges();
   test_verify_against_snapshot();
   test_verify_outside_window();
+  test_verify_stale_snapshot();
   test_ack_venue();
   test_checker_detects_differences();
   test_random_captures();

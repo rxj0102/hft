@@ -43,3 +43,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 39. [A position-dependent quote size was tried, judged by the lab, and not adopted](adr/0039-position-taper-tried-and-not-adopted.md) (Accepted)
 40. [A keyless public mode for the smoke test](adr/0040-keyless-public-checks-in-the-smoke-test.md) (Accepted)
 41. [The exchange-snapshot check compares only levels inside the price window](adr/0041-verify-compares-only-levels-inside-the-window.md) (Accepted)
+42. [A snapshot taken long after the segment ended is not compared](adr/0042-stale-snapshot-is-not-compared.md) (Accepted)

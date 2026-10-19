@@ -26,7 +26,7 @@ def book(bid_sizes, ask_sizes, extra_bids=(), extra_asks=()):
     return '{"type":"snapshot","product_id":"X","bids":[%s],"asks":[%s]}' % (",".join(bids), ",".join(asks))
 
 
-def run(verify_json, capture_book=None):
+def run(verify_json, capture_book=None, exit_at=None, verify_at=None):
     d = tempfile.mkdtemp(prefix="rcli")
     cap, ver = os.path.join(d, "c.l2"), os.path.join(d, "c.l2.verify")
     sizes = [2 + i for i in range(8)]
@@ -35,10 +35,14 @@ def run(verify_json, capture_book=None):
     for i in range(6):  # a few updates that change nothing near the verify moment
         t += 100000000
         lines.append('%d\t{"type":"l2update","product_id":"X","changes":[["buy","%s","%d"]]}' % (t, px(9990 - i), 3 + i))
+    if exit_at is not None:  # every ask removed and one placed far above: the best ask leaves the window's safe zone
+        t = exit_at
+        gone = ",".join('["sell","%s","0"]' % px(10010 + i) for i in range(8))
+        lines.append('%d\t{"type":"l2update","product_id":"X","changes":[%s,["sell","640.00","1"]]}' % (t, gone))
     lines.append("#%d\tstop" % (t + 1))
     open(cap, "w").write("\n".join(lines) + "\n")
     if verify_json is not None:
-        open(ver, "w").write("%d\t%s\n" % (t + 50000000, verify_json))
+        open(ver, "w").write("%d\t%s\n" % (verify_at if verify_at is not None else t + 50000000, verify_json))
     args = [BIN] + (["--verify", ver] if verify_json is not None else []) + [cap]
     return subprocess.run(args, capture_output=True, text=True, timeout=60)
 
@@ -71,6 +75,19 @@ check(c == (16, 17, 0, 1) and o is None, "a missing level inside the window is c
 r = run(book([7] + sizes[1:], sizes, extra_bids=[("99.50", "1")], extra_asks=[("5000.00", "1")]))
 c, o = counts(r.stdout)
 check(c == (15, 17, 1, 1) and o == 1, "differing, absent and outside together (%s %s)" % (c, o))
+# the segment ended long before the exchange snapshot: nothing is compared, and the output says why
+fin = book(sizes, [], extra_asks=[("640.00", "1")])
+r = run(fin, exit_at=2000000000, verify_at=9000000000)
+c, o = counts(r.stdout)
+check(r.returncode == 0 and c is None and "not comparable" in r.stdout and "7.0 s before the exchange snapshot" in r.stdout, "a snapshot 7 s after the segment ended is not comparable (%s)" % r.stdout[-300:].replace("\n", " | "))
+# the same capture with the snapshot one second after the end is compared as usual
+r = run(fin, exit_at=2000000000, verify_at=3000000000)
+c, o = counts(r.stdout)
+check(r.returncode == 0 and c is not None and "not comparable" not in r.stdout, "a snapshot one second after the end is compared (%s)" % (c,))
+# a segment that did not end: a late snapshot is still compared
+r = run(book(sizes, sizes), verify_at=900000000000)
+c, o = counts(r.stdout)
+check(c == (16, 16, 0, 0) and "not comparable" not in r.stdout, "a segment that did not end is compared however late the snapshot (%s)" % (c,))
 # no verify file given: no check printed
 r = run(None)
 check(r.returncode == 0 and "exchange snapshot check" not in r.stdout, "without --verify nothing is compared")

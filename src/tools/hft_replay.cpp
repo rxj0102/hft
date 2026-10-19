@@ -152,8 +152,12 @@ int main(int argc, char** argv) {
           upto.load(path);
           const feed::VerifyResult vr = upto.segments().empty()
               ? feed::VerifyResult{}
-              : feed::verify_against_snapshot(upto.segments().back(), feed::parse_l2(std::string_view(vl).substr(vtab + 1)), 10);
-          if (!vr.usable) {
+              : feed::verify_against_snapshot(upto.segments().back(), feed::parse_l2(std::string_view(vl).substr(vtab + 1)), 10, vt);
+          if (vr.stale) {
+            std::printf("  exchange snapshot check: not comparable. The replay segment ended %.1f s before the exchange snapshot was taken\n"
+                        "  (the price left the window), so the replayed book is the book of an earlier moment.\n",
+                        static_cast<double>(vr.stale_gap_ns) / 1e9);
+          } else if (!vr.usable) {
             std::printf("  exchange snapshot check: no usable snapshot or no book at that time\n");
           } else {
             std::printf("  exchange snapshot check (10 nearest levels per side; exchange snapshot from a second\n"

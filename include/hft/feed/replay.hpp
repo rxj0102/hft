@@ -562,7 +562,15 @@ struct VerifyResult {
   bool usable = false;
   std::uint64_t compared = 0, equal = 0, size_differs = 0, missing_in_model = 0;
   std::uint64_t outside_window = 0;  // among the nearest levels, but beyond the grid: the replay drops them, so they are not compared
+  // The segment ended (price left the window) well before the exchange snapshot was taken: the replayed book is the book of
+  // that earlier moment, so comparing the two would say nothing. Nothing is compared; `usable` stays false.
+  bool stale = false;
+  std::uint64_t stale_gap_ns = 0;  // snapshot time minus the segment's last packet
 };
+
+// How long after the end of its segment an exchange snapshot may be and still count as the same moment (the two connections
+// already differ by a second or two).
+constexpr std::uint64_t kVerifyMaxGapNs = 2'000'000'000ULL;
 
 // Compares the n levels nearest the touch on each side of a fresh exchange
 // snapshot with the reconstructed book at the end of the segment. The snapshot
@@ -575,9 +583,15 @@ struct VerifyResult {
 // `outside_window` and left out of `compared`. (A sparse book such as the
 // Coinbase sandbox's has most of its nearest levels far from the touch, and
 // counting them as missing hid the result.)
-inline VerifyResult verify_against_snapshot(const Segment& seg, const L2Message& snap, int top_n) {
+inline VerifyResult verify_against_snapshot(const Segment& seg, const L2Message& snap, int top_n, std::uint64_t snap_t_ns = 0) {
   VerifyResult v;
   if (snap.kind != L2Message::Kind::Snapshot) return v;
+  if (seg.ended_by_window && !seg.pkts.empty() && snap_t_ns > seg.pkts.back().t &&
+      snap_t_ns - seg.pkts.back().t > kVerifyMaxGapNs) {
+    v.stale = true;
+    v.stale_gap_ns = snap_t_ns - seg.pkts.back().t;
+    return v;
+  }
   v.usable = true;
   for (int s = 0; s < 2; ++s) {
     const core::Side side = s == 0 ? core::Side::Buy : core::Side::Sell;
