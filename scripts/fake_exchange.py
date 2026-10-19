@@ -37,6 +37,11 @@ class FakeExchange:
         self.mode, self.delay, self.skew = "ok", 0.0, 0.0
         self.best_bid, self.best_ask = 81000.00, 81000.10
         self.product_status = "online"  # what GET /products/{id} says
+        self.product_min_size = None    # None: no base_min_size field, as in the real sandbox; or a string such as "0.0001"
+        self.product_flags = {}         # overrides for cancel_only, limit_only, auction_mode, trading_disabled
+        self.product_broken = False     # drop base_increment
+        self.product_base_increment, self.product_quote_increment = "0.00000001", "0.01"
+        self.product_http = 200
         self.ticker_bad = False         # the ticker answers with zeros
         self.rate, self.burst, self.tokens, self.t_tok = rate, burst, burst, time.monotonic()
         self.enforce_rate = True
@@ -302,8 +307,16 @@ class FakeExchange:
         if u.path.startswith("/products/"):  # public market data, no signature needed
             parts = u.path.split("/")
             if len(parts) == 3:
-                return 200, {"id": parts[2], "base_min_size": "0.00001", "base_increment": "0.00000001", "quote_increment": "0.01",
-                             "status": self.product_status, "post_only": False, "trading_disabled": False}, False
+                p = {"id": parts[2], "base_currency": "BTC", "quote_currency": "USD", "base_increment": self.product_base_increment, "quote_increment": self.product_quote_increment,
+                     "display_name": "BTC-USD", "min_market_funds": "1", "margin_enabled": False, "post_only": False, "limit_only": False,
+                     "cancel_only": False, "status": self.product_status, "status_message": "", "trading_disabled": False,
+                     "fx_stablecoin": False, "max_slippage_percentage": "0.03", "auction_mode": False, "high_bid_limit_percentage": ""}
+                if self.product_min_size is not None:
+                    p["base_min_size"] = self.product_min_size
+                p.update(self.product_flags)
+                if self.product_broken:
+                    del p["base_increment"]
+                return self.product_http, p, False
             if len(parts) == 4 and parts[3] == "ticker" and self.ticker_bad:
                 return 200, {"bid": "0", "ask": "0", "price": "0"}, False
             if len(parts) == 4 and parts[3] == "ticker":

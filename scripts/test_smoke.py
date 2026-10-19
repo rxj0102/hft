@@ -268,6 +268,53 @@ def main():
     ex.stop()
     r = subprocess.run([sys.executable, SMOKE, "--public-only", "--base-url", "https://api.exchange.coinbase.com"], capture_output=True, text=True, env=dict(os.environ, **{k: "" for k in nokey}))
     check(r.returncode == 2 and "refusing" in r.stderr, "the production URL is still refused in public-only mode")
+    print("the product reply as the real sandbox sends it (no base_min_size)")
+    ex = fake_exchange.FakeExchange(KEY, SECRET, PASS).start().start_ws()
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 0 and "no base_min_size in the reply" in r.stdout and "base_increment=0.00000001" in r.stdout
+          and "quote_increment=0.01" in r.stdout and "tradable" in r.stdout, "a reply without base_min_size passes, shows the real values, and says the minimum is unknown")
+    ex.product_min_size = "0.00001"
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 0 and "base_min_size=0.00001" in r.stdout and "no base_min_size" not in r.stdout, "with base_min_size present it is shown and used")
+    ex.product_min_size = "0.001"
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "FAIL  3 product" in r.stdout and "DO NOT FIT" in r.stdout, "a minimum size above the bridge's 1e-5 lots: DO NOT FIT")
+    ex.product_min_size = "0.0001"
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 0, "a minimum size of exactly 0.0001 fits (the limit)")
+    ex.product_min_size = "0.00011"
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "DO NOT FIT" in r.stdout, "a minimum size just above 0.0001 does not fit")
+    ex.product_min_size = None
+    ex.product_base_increment = "0.00003"
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "DO NOT FIT" in r.stdout, "a size step that 1e-5 is not a multiple of: DO NOT FIT")
+    ex.product_base_increment = "0.00000001"
+    ex.product_quote_increment = "0.05"
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "DO NOT FIT" in r.stdout, "a price step that a cent is not a multiple of: DO NOT FIT")
+    ex.product_quote_increment = "0.01"
+    ex.product_http = 503
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "FAIL  3 product" in r.stdout, "HTTP 503 with a well-formed body still fails step 3")
+    ex.product_http = 200
+    for flag in ("cancel_only", "auction_mode", "trading_disabled"):
+        ex.product_flags = {flag: True}
+        r = run(ex, ["--public-only"], env=nokey)
+        check(r.returncode == 1 and "FAIL  3 product" in r.stdout and "NOT TRADABLE" in r.stdout and ("%s=True" % flag) in r.stdout,
+              "%s: step 3 fails as not tradable, and the flag is shown" % flag)
+    ex.product_flags = {"limit_only": True}
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 0 and "limit_only=True" in r.stdout, "limit_only is fine (the bridge sends limit orders), and it is shown")
+    ex.product_flags = {}
+    ex.product_broken = True
+    r = run(ex, ["--public-only"], env=nokey)
+    check(r.returncode == 1 and "unexpected reply" in r.stdout and "quote_increment=0.01" in r.stdout and "FAIL  3 product" in r.stdout,
+          "a reply without base_increment fails and still shows the values it has")
+    ex.product_broken = False
+    r = run(ex)  # the full run (with keys) on the same reply shape
+    check(r.returncode == 0, "the full run works with a reply that has no base_min_size")
+    ex.stop()
     print("test_smoke: all checks passed" if not fails else "test_smoke: %d FAILED" % fails)
     return 1 if fails else 0
 

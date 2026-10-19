@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 33: the first real contact, and what it changed
+
+- The keyless run against the real sandbox found that the product reply has no `base_min_size`. The smoke test's product step now treats it as optional, prints the increments and flags it sees, and also refuses a product that is `cancel_only` or in `auction_mode`. The fake exchange's product reply now has the real field set. Nothing in the bridge changed: it never read that field. Mutation checks on the rewritten step: 20 mutants, 7 survived (an equivalent one, simplified away, and six untested cases: the boundary of the minimum size, a size step and a price step that do not fit, a non-200 reply with a good body, the flags not shown, the size floor); the six were killed after fixtures and tests, and the rerun's one survivor is a comment-only edit.
+
 ### Phase 32: keyless public checks
 
 - `scripts/smoke_sandbox.py --public-only`: clock, product, ticker and the public level-2 snapshot, with no key, no signed request and no order (ADR 40). The fake exchange got a public feed with nine bad-feed modes. Mutation checks: 31 mutants of the new code; 20 were killed at first and 11 survived. Each survivor was an untested case (the Api guard on the Api that `public_only` builds, a failing product or ticker, `--skip-ws` marked failed, one side or the tolerance of the snapshot comparison, the wrong end of the book, the proxy bypass, an unreachable feed, the recorded shape), and each got a fixture and a test; a rerun killed all 11. One redundant check (an empty-side test that `max` and `min` make unreachable) was removed.

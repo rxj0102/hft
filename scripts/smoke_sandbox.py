@@ -126,20 +126,36 @@ def check_clock(api):
     return step(2, "clock", abs(skew) < 5, "local clock is %.2f s from the exchange's (bridge stops at 20 s, exchange refuses at 30 s)" % skew)
 
 
+PRODUCT_SHOW = ("status", "status_message", "base_increment", "quote_increment", "base_min_size", "min_market_funds",
+                "trading_disabled", "cancel_only", "limit_only", "post_only", "auction_mode")
+
+
+def product_values(js):
+    """The public, non-identifying parameters of a product, as text: they are what the bridge's assumptions are checked against."""
+    if not isinstance(js, dict):
+        return "no fields"
+    return ", ".join("%s=%s" % (k, str(js[k])[:40]) for k in PRODUCT_SHOW if k in js)
+
+
 def check_product(api, P):
-    """Returns (ok, minimum size)."""
+    """Returns (ok, minimum size, 0.0 when the reply does not say). The real sandbox's reply has no base_min_size (found in the
+    first real run), so it is optional: the size step is still checked, and the first order will show the real minimum."""
     st, js = api.call("product", "GET", "/products/" + P, signed=False)
     shapes["product"] = shape(js)
     try:
-        minsz, binc, qinc = float(js["base_min_size"]), float(js["base_increment"]), float(js["quote_increment"])
-        online = js.get("status") == "online" and not js.get("trading_disabled", False)
+        binc, qinc = float(js["base_increment"]), float(js["quote_increment"])
+        has_min = "base_min_size" in js
+        minsz = float(js["base_min_size"]) if has_min else 0.0  # unknown; the size step is checked below, so 0 is safe
+        online = (js.get("status") == "online" and not js.get("trading_disabled", False) and not js.get("cancel_only", False)
+                  and not js.get("auction_mode", False))
         # the bridge sends sizes in 1e-5 steps and prices in cents
         fits = minsz <= 0.0001 and abs(0.00001 / binc - round(0.00001 / binc)) < 1e-9 and abs(0.01 / qinc - round(0.01 / qinc)) < 1e-9
         ok = st == 200 and online and fits
-        detail = "min size %s, size step %s, price step %s, status %s; the bridge's 1e-5 sizes and cent prices %s" % (
-            js["base_min_size"], js["base_increment"], js["quote_increment"], js.get("status"), "fit" if fits else "DO NOT FIT")
+        detail = "%s; %s; the bridge's 1e-5 sizes and cent prices %s%s" % (
+            product_values(js), "tradable" if online else "NOT TRADABLE", "fit" if fits else "DO NOT FIT",
+            "" if has_min else " (no base_min_size in the reply: the smallest order size is not known until an order is placed)")
     except (KeyError, TypeError, ValueError):
-        ok, detail, minsz = False, "unexpected reply %s %s" % (st, shape(js)), 0.0
+        ok, detail, minsz = False, "unexpected reply %s %s; values: %s" % (st, shape(js), product_values(js)), 0.0
     return step(3, "product", ok, detail), minsz
 
 
