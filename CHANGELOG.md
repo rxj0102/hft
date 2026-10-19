@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Phase 37: the drift rule, fixed with the data from the first real run
+
+- Offline on the 136 segments of the 600 s sandbox capture: the replay's own exit fires in 103 segments, the 200 USD rule in 135 (so it cut at least 32 usable ones), a rule measured from the snapshot's touch in only 28 (it misses 78 of the replay's exits, the wide snapshots). The touch rule is rejected; the recommended limit is now 262 USD (ADR 44).
+- New `--resnap-min-s` (default 1): at most one drift resubscribe per second. Tests: throttle with a feed of only wide snapshots, the first request not held back, the command line defaults. Mutation checks: 7 mutants, 1 survived the first run (the function's own default, now tested), all killed after.
+- Not yet run against the sandbox with the new settings.
+
 ### Phase 36: the capture resubscribes on price drift
 
 - `capture_l2.py --resnap-drift-usd N` asks for a fresh snapshot when the best price has moved N USD from the last snapshot's mid, so a capture run alone stays usable after the price leaves the replay window (ADR 43). Off by default. New unit and fake-server tests in `scripts/test_capture.py`. Mutation checks: 17 mutants, 4 survived the first run (an unobservable pre-filter, removed; three untested cases, tests added), all killed after.

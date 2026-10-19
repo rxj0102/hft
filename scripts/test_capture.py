@@ -236,6 +236,66 @@ async def drift_test():
         check(st["resnaps"] == 0 and conns["n"] == 1, "without the option there is no resubscribe")
 
 
+async def drift_throttle_test():
+    """Every snapshot is wider than the limit, so every first update asks for another one. The interval caps the rate."""
+    conns = {"t": []}
+
+    async def serve(ws):
+        conns["t"].append(time.monotonic())
+        try:
+            await ws.recv()
+            await ws.send(snap_msg(1000, 1500))  # half-spread 250: above a limit of 200 at once
+            i = 0
+            while True:
+                await ws.send(chg(("buy", "999.00", "%d" % (i + 1)), ("sell", "1500.00", "%d" % (i + 1))))
+                i += 1
+                await asyncio.sleep(0.03)
+        except Exception:
+            pass
+    for gap, lo, hi in ((0.5, 2, 5), (0.0, 7, 10 ** 6), (None, 2, 3)):  # None: the function's own default (1 s)
+        conns["t"] = []
+        async with websockets.serve(serve, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            out = tempfile.mktemp(suffix=".l2")
+            kw = {} if gap is None else {"drift_min_s": gap}
+            st = await capture_l2.capture("ws://127.0.0.1:%d" % port, "BTC-USD", "level2_batch", 2.2, out, 5.0, 0,
+                                          poll_step=0.05, drift_usd=200, **kw)
+            check(lo <= st["drift_resnaps"] <= hi, "interval %s s: %d drift resubscribes in 2.2 s (expected %d to %d)" % (gap, st["drift_resnaps"], lo, hi))
+            if gap:
+                check(len(conns["t"]) >= 2 and conns["t"][1] - conns["t"][0] < 0.3, "the first request is not held back by the interval")
+                spacing = [b - a for a, b in zip(conns["t"], conns["t"][1:])][1:]  # the first request is not held back
+                check(len(spacing) >= 2 and min(spacing) >= gap - 0.05, "resubscribes at least %.1f s apart (%s)" % (gap, ["%.2f" % x for x in spacing]))
+
+
+async def drift_cli_test():
+    """The command line: the flags reach the capture, and the default interval is one second."""
+    async def serve(ws):
+        try:
+            await ws.recv()
+            await ws.send(snap_msg(1000, 1500))
+            i = 0
+            while True:
+                await ws.send(chg(("buy", "999.00", "%d" % (i + 1)), ("sell", "1500.00", "%d" % (i + 1))))
+                i += 1
+                await asyncio.sleep(0.03)
+        except Exception:
+            pass
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        env = dict(os.environ, NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+        for extra, lo, hi in (([], 2, 3), (["--resnap-min-s", "0.5"], 4, 5), ([], 2, 3)):
+            out = tempfile.mktemp(suffix=".l2")
+            cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture_l2.py"), "--url",
+                   "ws://127.0.0.1:%d" % port, "--out", out, "--seconds", "2.2", "--resnap-drift-usd", "200"] + extra
+            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+            o, e = await asyncio.wait_for(p.communicate(), 30)
+            text = o.decode()
+            import re
+            m = re.search(r"\((\d+) for price drift\)", text)
+            n = int(m.group(1)) if m else -1
+            check(m is not None and lo <= n <= hi, "command line %s: %d drift resubscribes (expected %d to %d): %s" % (extra, n, lo, hi, text.strip()[-120:]))
+
+
 async def stdout_test():
     """`--out -` streams line by line and stops quietly when the reader goes away."""
     import subprocess
@@ -277,6 +337,8 @@ asyncio.run(verify_test())
 asyncio.run(resnap_test())
 drift_unit_test()
 asyncio.run(drift_test())
+asyncio.run(drift_throttle_test())
+asyncio.run(drift_cli_test())
 asyncio.run(stdout_test())
 if failures:
     sys.exit("%d capture test failures" % failures)
