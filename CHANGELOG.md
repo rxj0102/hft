@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 36: the capture resubscribes on price drift
+
+- `capture_l2.py --resnap-drift-usd N` asks for a fresh snapshot when the best price has moved N USD from the last snapshot's mid, so a capture run alone stays usable after the price leaves the replay window (ADR 43). Off by default. New unit and fake-server tests in `scripts/test_capture.py`. Mutation checks: 17 mutants, 4 survived the first run (an unobservable pre-filter, removed; three untested cases, tests added), all killed after.
+- Offline on the real 10-minute capture: the watch fires on the same message that ends the replay segment (a single jump of about 320 USD from the mid at 11.5 s), so it cannot pre-empt a jump; it shortens the dead time after it. Not yet run against the sandbox.
+
 ### Phase 35: a 10-minute sandbox capture, and a stale-snapshot guard
 
 - Analysis of a 10-minute keyless capture of the real sandbox (3,870 messages): the first segment ended at 11.1 s because the best ask jumped about 450 USD on a thin book (not drift). 3,203 messages were unusable afterwards because the capture has no re-subscribe on a window exit. The true mid ranged 81,256.52 to 82,637.40 USD; the spread was 7.77 USD at least, 30 at the median and 1,591 at most; 55 messages moved a best price by more than 100 USD.

@@ -21,7 +21,8 @@ Live use: `--out -` writes the same lines to stdout, flushed one by one, for
 `hft_live` to read from a pipe (status goes to stderr). `--resnap-file PATH`
 makes the capture drop its connection and subscribe again, to get a fresh
 snapshot, whenever PATH appears (hft_live creates it when the price has left
-its grid window). If the reader goes away the capture stops quietly.
+its grid window). Without hft_live, `--resnap-drift-usd N` does the same when the best price
+has moved N USD from the last snapshot's mid. If the reader goes away the capture stops quietly.
 """
 import argparse
 import asyncio
@@ -33,18 +34,67 @@ import time
 DEFAULT_URL = "wss://ws-feed.exchange.coinbase.com"
 
 
+class DriftWatch:
+    """Follows the best bid and ask in the stream and says when either has moved more than
+    `drift_usd` from the mid of the last snapshot. The replay grid is centred on that mid and
+    its segment ends at about 262 USD (10% of 65,536 ticks of 0.01 from each edge, hft::feed
+    L2Config), so a drift limit below that asks for a fresh snapshot before the segment ends.
+    The limit is a number the caller chooses; this class does not know the replay's settings."""
+
+    def __init__(self, drift_usd):
+        self.limit = float(drift_usd)
+        self.book = ({}, {})  # bids, asks: price -> size
+        self.mid = None
+
+    def _best(self):
+        bids, asks = self.book
+        if not bids or not asks:
+            return None
+        return max(bids), min(asks)
+
+    def feed(self, msg):
+        """True when the stream has drifted past the limit. Anything unparseable is ignored."""
+        try:
+            m = json.loads(msg)
+            if m.get("type") == "snapshot":
+                self.book = ({}, {})
+                for k, side in (("bids", 0), ("asks", 1)):
+                    for px, sz in m.get(k, []):
+                        if float(sz) > 0:
+                            self.book[side][float(px)] = float(sz)
+                b = self._best()
+                self.mid = (b[0] + b[1]) / 2 if b else None
+                return False
+            if m.get("type") != "l2update" or self.mid is None:
+                return False
+            for side_name, px, sz in m.get("changes", []):
+                side = 0 if side_name == "buy" else 1
+                if float(sz) > 0:
+                    self.book[side][float(px)] = float(sz)
+                else:
+                    self.book[side].pop(float(px), None)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return False
+        b = self._best()
+        if b is None:
+            return False
+        return b[0] < self.mid - self.limit or b[1] > self.mid + self.limit
+
+
 async def capture(url, product, channel, seconds, out_path, idle_timeout, max_reconnects, connect_fn=None,
-                  verify_path=None, resnap_file=None, poll_step=0.25):
+                  verify_path=None, resnap_file=None, poll_step=0.25, drift_usd=None):
     """Returns a dict of counters. `connect_fn` lets tests substitute a local server.
     `out_path` "-" streams to stdout. `resnap_file`: when this file exists, remove it and
-    resubscribe (a new snapshot) on a fresh connection."""
+    resubscribe (a new snapshot) on a fresh connection. `drift_usd`: do the same when the best
+    bid or ask has moved more than that from the mid of the last snapshot (see DriftWatch)."""
     import websockets
 
     connect = connect_fn or (lambda u: websockets.connect(u, open_timeout=15, max_size=None))
     t0 = time.monotonic_ns()
     now = lambda: time.monotonic_ns() - t0
     deadline = t0 + int(seconds * 1e9)
-    stats = {"messages": 0, "reconnects": 0, "errors": 0, "resnaps": 0}
+    stats = {"messages": 0, "reconnects": 0, "errors": 0, "resnaps": 0, "drift_resnaps": 0}
+    watch = DriftWatch(drift_usd) if drift_usd else None
     streaming = out_path == "-"
     backoff = 0.5
     vtask = None
@@ -92,6 +142,12 @@ async def capture(url, product, channel, seconds, out_path, idle_timeout, max_re
                         if streaming:
                             f.flush()
                         stats["messages"] += 1
+                        if watch and watch.feed(msg):
+                            stats["resnaps"] += 1
+                            stats["drift_resnaps"] += 1
+                            f.write("#%d\tresnap\n" % now())
+                            resnapped = True
+                            break
             except BrokenPipeError:
                 stats["reader_gone"] = True
                 break
@@ -167,6 +223,10 @@ def main(argv=None):
     ap.add_argument("--max-reconnects", type=int, default=20)
     ap.add_argument("--resnap-file", default=None,
                     help="when this file appears, drop the connection and subscribe again for a fresh snapshot")
+    ap.add_argument("--resnap-drift-usd", type=float, default=None,
+                    help="subscribe again for a fresh snapshot when the best bid or ask has moved more than this many USD "
+                         "from the last snapshot's mid. The replay's window ends a segment at about 262 USD for the "
+                         "default grid, so a smaller value (200 is reasonable) keeps the capture usable. Off by default")
     ap.add_argument("--verify", action="store_true",
                     help="near the end of the capture, fetch the exchange's own snapshot on a second connection into "
                          "<out>.verify, to check the replayed book against")
@@ -178,9 +238,10 @@ def main(argv=None):
     if a.verify and a.out == "-":
         sys.exit("--verify needs a file, not stdout")
     st = asyncio.run(capture(a.url, a.product, a.channel, a.seconds, a.out, a.idle_timeout, a.max_reconnects,
-                             verify_path=(a.out + ".verify") if a.verify else None, resnap_file=a.resnap_file))
+                             verify_path=(a.out + ".verify") if a.verify else None, resnap_file=a.resnap_file, drift_usd=a.resnap_drift_usd))
     out = sys.stderr if a.out == "-" else sys.stdout
-    print("captured %(messages)d messages, %(reconnects)d reconnects, %(errors)d errors, %(resnaps)d resubscribes" % st,
+    print("captured %(messages)d messages, %(reconnects)d reconnects, %(errors)d errors, %(resnaps)d resubscribes "
+          "(%(drift_resnaps)d for price drift)" % st,
           file=out)
     if a.verify:
         print("verify snapshot: %s" % ("written to " + a.out + ".verify" if st.get("verify") else "FAILED"))

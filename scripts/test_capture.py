@@ -2,7 +2,7 @@
 """Tests capture_l2.py against a local fake server: normal flow, an abrupt
 disconnect, a silent connection (idle timeout), and give-up after too many
 reconnects. No network access needed."""
-import asyncio, json, os, sys, tempfile
+import asyncio, json, os, sys, tempfile, time
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 os.environ["no_proxy"] = "127.0.0.1,localhost"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -144,6 +144,98 @@ async def resnap_test():
         check("s" in order[i + 1:i + 6] and "u" not in order[i + 1:i + 1 + order[i + 1:].index("s")], "snapshot follows the marker directly")
 
 
+def snap_msg(bid, ask):
+    return json.dumps({"type": "snapshot", "product_id": "BTC-USD", "bids": [["%.2f" % bid, "1"], ["%.2f" % (bid - 5), "2"]],
+                       "asks": [["%.2f" % ask, "1"], ["%.2f" % (ask + 5), "2"]]})
+
+def chg(*c):
+    return json.dumps({"type": "l2update", "product_id": "BTC-USD", "changes": [list(x) for x in c]})
+
+def drift_unit_test():
+    """DriftWatch: the limit is measured from the snapshot's mid, on either side, and nothing odd crashes it."""
+    def fresh():
+        w = capture_l2.DriftWatch(200)
+        check(not w.feed(snap_msg(1000, 1010)), "a snapshot never triggers")  # mid 1005; bids 1000, 995; asks 1010, 1015
+        return w
+    w = fresh()
+    check(not w.feed(chg(("sell", "1010.00", "0"), ("sell", "1015.00", "0"))), "no ask left: no best, no trigger")
+    check(not w.feed(chg(("sell", "1205.00", "1"))), "best ask exactly mid + 200: not past the limit")
+    check(w.feed(chg(("sell", "1205.00", "0"), ("sell", "1205.01", "1"))), "best ask 1205.01 is 200.01 above the mid: triggers")
+    w = fresh()
+    check(not w.feed(chg(("buy", "1000.00", "0"), ("buy", "995.00", "0"), ("buy", "805.00", "1"))), "best bid exactly mid - 200: not past the limit")
+    check(w.feed(chg(("buy", "805.00", "0"), ("buy", "804.99", "1"))), "best bid 804.99 is 200.01 below the mid: triggers")
+    check(not w.feed(snap_msg(805, 815)), "a new snapshot resets the anchor, and does not trigger")
+    check(not w.feed(chg(("buy", "805.00", "2"))), "after it the anchor is the new mid (810)")
+    # the best moving back inside the limit clears the condition; removing a worse level does not change the best
+    w = fresh()
+    check(not w.feed(chg(("sell", "1015.00", "0"))), "removing a level behind the best changes nothing")
+    check(w.feed(chg(("sell", "1010.00", "0"), ("sell", "1300.00", "1"))), "the asks gone but one at 1300: triggers")
+    check(not w.feed(chg(("sell", "1100.00", "1"))), "a new ask at 1100 is the best again, inside the limit")
+    for junk in ["not json {", '{"type":"snapshot"', '{"type":"l2update","changes":5}', '{"type":"l2update","changes":[["buy"]]}',
+                 '{"type":"heartbeat"}', '{"type":"l2update","changes":[["buy","x","1"]]}', "", json.dumps([1, 2])]:
+        check(w.feed(junk) is False, "ignored without raising: %r" % junk)
+    w = fresh()
+    w.feed(json.dumps({"type": "snapshot", "bids": [["3000.00", "1"]], "asks": []}))
+    check(w.mid is None, "a one-sided snapshot after a full one does not keep the old levels: no anchor")
+    check(not w.feed(json.dumps({"type": "error", "message": "l2update failed",
+                                                                  "changes": [["sell", "1010.00", "0"], ["sell", "1015.00", "0"], ["sell", "9999.00", "1"]]})),
+          "only snapshot and l2update messages are read")
+    w = fresh()
+    check(not w.feed(json.dumps({"type": "error", "message": "l2update failed",
+                                                                  "changes": [["sell", "1010.00", "0"], ["sell", "1015.00", "0"], ["sell", "9999.00", "1"]]})),
+          "a message of another type with changes in it is not applied")
+    w = capture_l2.DriftWatch(200)
+    check(not w.feed(chg(("sell", "9999.00", "1"))), "an update before any snapshot is ignored")
+    w.feed(json.dumps({"type": "snapshot", "bids": [["1000.00", "1"]], "asks": []}))
+    check(not w.feed(chg(("sell", "5000.00", "1"))), "a one-sided snapshot gives no anchor, so no trigger")
+    w = capture_l2.DriftWatch(200)
+    w.feed(json.dumps({"type": "snapshot", "bids": [["1000.00", "0"], ["990.00", "1"]], "asks": [["1010.00", "1"]]}))  # mid 1000
+    check(w.feed(chg(("sell", "1010.00", "0"), ("sell", "1201.00", "1"))), "a zero-size snapshot level is not a level: the mid is 1000")
+
+
+async def drift_test():
+    """A price jump on the feed makes the capture reconnect for a fresh snapshot, with the same marker."""
+    conns = {"n": 0}
+
+    async def serve(ws):
+        conns["n"] += 1
+        n = conns["n"]
+        conns.setdefault("t", []).append(time.monotonic())
+        await ws.recv()
+        base = 1000 if n == 1 else 1600  # the second snapshot is centred on the new price
+        await ws.send(snap_msg(base, base + 10))
+        try:
+            for i in range(4):
+                await ws.send(chg(("buy", "%.2f" % (base - 1), "%d" % (i + 1))))
+                await asyncio.sleep(0.02)
+            if n == 1:
+                await ws.send(chg(("sell", "%.2f" % (base + 10), "0"), ("sell", "%.2f" % (base + 15), "0"),
+                                      ("sell", "1500.00", "1")))  # the best ask is now 495 above the mid
+            await asyncio.sleep(3)
+        except Exception:
+            pass
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        out = tempfile.mktemp(suffix=".l2")
+        st = await capture_l2.capture("ws://127.0.0.1:%d" % port, "BTC-USD", "level2_batch", 1.5, out, 5.0, 0,
+                                      poll_step=0.05, drift_usd=200)
+        rows = read(out)
+        marks = [r.split("\t")[1] for r in rows if r.startswith("#")]
+        check(st["resnaps"] == 1 and st["drift_resnaps"] == 1 and marks.count("resnap") == 1, "one drift resubscribe: %s %s" % (st, marks))
+        check(conns["n"] == 2 and sum(1 for r in rows if not r.startswith("#") and '"snapshot"' in r) == 2, "a second connection, a second snapshot")
+        check("give_up" not in marks and marks[-1] == "stop", "a drift resubscribe does not count towards giving up (max_reconnects=0)")
+        check(len(conns["t"]) == 2 and 0.0 < conns["t"][1] - conns["t"][0] < 0.4, "the second connection comes at once, without the 0.5 s back-off (%s)" % conns["t"])
+        i = [k for k, r in enumerate(rows) if r.startswith("#") and "resnap" in r][0]
+        check("\"snapshot\"" in "".join(rows[i + 1:i + 4]) and "\"snapshot\"" not in "".join(rows[i - 1:i]), "the marker comes right after the jump and before the new snapshot")
+    # off by default: the same feed without the option never resubscribes
+    conns["n"] = 0
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        out = tempfile.mktemp(suffix=".l2")
+        st = await capture_l2.capture("ws://127.0.0.1:%d" % port, "BTC-USD", "level2_batch", 1.0, out, 5.0, 0, poll_step=0.05)
+        check(st["resnaps"] == 0 and conns["n"] == 1, "without the option there is no resubscribe")
+
+
 async def stdout_test():
     """`--out -` streams line by line and stops quietly when the reader goes away."""
     import subprocess
@@ -183,6 +275,8 @@ async def stdout_test():
 asyncio.run(main())
 asyncio.run(verify_test())
 asyncio.run(resnap_test())
+drift_unit_test()
+asyncio.run(drift_test())
 asyncio.run(stdout_test())
 if failures:
     sys.exit("%d capture test failures" % failures)
