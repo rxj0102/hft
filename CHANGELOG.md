@@ -4,6 +4,8 @@
 
 ### Phase 33: the first real contact, and what it changed
 
+- Second keyless run, after the fix: all five public steps passed against the real sandbox (details in docs/SANDBOX.md). The public `level2_batch` channel needs no credentials, and its snapshot matched the REST ticker.
+
 - The keyless run against the real sandbox found that the product reply has no `base_min_size`. The smoke test's product step now treats it as optional, prints the increments and flags it sees, and also refuses a product that is `cancel_only` or in `auction_mode`. The fake exchange's product reply now has the real field set. Nothing in the bridge changed: it never read that field. Mutation checks on the rewritten step: 20 mutants, 7 survived (an equivalent one, simplified away, and six untested cases: the boundary of the minimum size, a size step and a price step that do not fit, a non-200 reply with a good body, the flags not shown, the size floor); the six were killed after fixtures and tests, and the rerun's one survivor is a comment-only edit.
 
 ### Phase 32: keyless public checks
