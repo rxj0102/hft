@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 51: a 30-minute real-time soak with the compact clock
+
+- `supervise.py --record-dir` on the sandbox feed (URL explicit), 300 s runs, 6 runs in 1,800 s, a hand-injected SIGKILL of `hft_live` at 900 s, SIGTERM at the end (exit 0). The 5 runs that printed a summary replay from stream and clock to the same wire hash and orders line (5 of 5; 18 segments, 673 replaces, 0 desyncs, 0 model-check failures in 29 comparisons, 0 risk rejects, 0 stale pulls); the SIGKILLed run's clock ends on an `L` record and replays to the end of what was recorded (4 new, 147 replaces). Clocks 159 KB against 1.5 MB of stream (10,238 line records and 553 polls that could act), where Phase 49's old format was 14 times the stream. No code changed. Small and short; one session.
+
 ### Phase 50: the clock file records only polls that can act
 
 - `LiveSession::poll_idle(now)` says a timer poll would change nothing; `--clock-out` writes only the other polls (ADR 52). Format unchanged; older files still replay. Tests: a property test (4,000 random steps, one session polling always against one polling only when not idle: counters, segment hashes, frame counts and reasons equal; idle polls change nothing; a poll from the past is not idle), and a tool test of 1.5 s of silence past a 1 s stale limit (about 1,500 idle polls, 1 to 5 recorded, quotes pulled, same hash on replay). Mutation: 11 mutants; one survives by design (not making the idle polls at all is equivalent, which is the claim); one survivor killed by a new case (time regression).
