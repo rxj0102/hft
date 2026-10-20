@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests the hft_live program as a process: files, pipes, signals, real time.
 Usage: test_live_tool.py path/to/hft_live. All data is invented; no network."""
-import os, re, signal, subprocess, sys, tempfile, time
+import difflib, os, re, signal, subprocess, sys, tempfile, time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "build/release/hft_live"
 failures = 0
@@ -692,7 +692,7 @@ for how, seed in (("eof", 1), ("eof", 2), ("eof", 3), ("term", 4)):
 rfd, wfd = os.pipe()
 for args, what, word in ((["--clock-in", "/dev/null"], "--clock-in without --from", "--clock-in needs --from"),
                          (["--clock-out", "/tmp/x.clk", "--from", "/dev/null"], "--clock-out with --from", "--clock-out records"),
-                         (["--clock-out", "/tmp/x.clk", "--exchange-fd", str(rfd)], "--clock-out with --exchange-fd", "--clock-out records"),
+                         (["--clock-out", "/tmp/x.clk", "--position-file", "/tmp/x.pos"], "--clock-out with --position-file", "--clock-out records"),
                          (["--clock-out", "/nonexistent-dir/x.clk"], "unwritable --clock-out", "cannot write")):
     p_ = subprocess.run([BIN] + args, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL, pass_fds=(rfd,))
     check(p_.returncode == 1 and word in p_.stderr, "clock: %s: exit 1 with the reason (rc=%d) %s" % (what, p_.returncode, p_.stderr[:80]))
@@ -704,12 +704,48 @@ open(clk, "w").write("".join(full[:-1]))
 rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
 check(rep.returncode == 0 and wire_hash(out) == wire_hash(rep.stdout), "clock: no final line: replay still gives the same hash (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
 os.remove(stream); os.remove(clk)
+# a clock file without the "H" line (written before there was one) is a run without an exchange
+rc, out, stream, clk = live_with_clock(text_ck, "eof", 11)
+lines_ = open(clk).read().splitlines(True)
+check(lines_[0] == "H 0\n", "clock: a plain live run starts with H 0 (%r)" % lines_[0])
+open(clk, "w").write("".join(lines_[1:]))
+rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
+check(rep.returncode == 0 and wire_hash(out) == wire_hash(rep.stdout), "clock: a file without the H line still replays (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
+os.remove(stream); os.remove(clk)
 # a clock file with more lines than the stream
 sp = tempfile.mktemp(suffix=".l2"); cp = tempfile.mktemp(suffix=".clk")
 open(sp, "w").write(snap(1_000_000)); open(cp, "w").write("L 1000000\nL 1000100\nS 1000200\n")
 p_ = subprocess.run([BIN, "--from", sp, "--clock-in", cp], capture_output=True, text=True, timeout=20)
 check(p_.returncode == 1 and "more lines" in p_.stderr, "clock: a clock file longer than the stream is refused (rc=%d)" % p_.returncode)
 os.remove(sp); os.remove(cp)
+
+# the exchange's reports are in the clock file too: a run with an exchange behind it replays exactly (ADR 50)
+def ext_clock_case(mode, flatten_s, extra=(), feed=None, pace=0.03):
+    clk = tempfile.mktemp(suffix=".clk")
+    feed = feed or ext_feed(30)
+    rc, out, ex = run_external(mode, feed, flatten_s=flatten_s, pace=pace, extra=["--clock-out", clk] + list(extra))
+    stream = tempfile.mktemp(suffix=".l2"); open(stream, "w").write("".join(feed))
+    rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000", "--stale-ms", "5000", "--flatten-timeout-s", flatten_s] + list(extra),
+                         capture_output=True, text=True, timeout=60)
+    rows = open(clk).read().splitlines()
+    os.remove(stream); os.remove(clk)
+    return rc, out, ex, rep, rows
+
+# report lines that do not parse are counted but change nothing, so they are not recorded: that count is the one difference
+summ = lambda o: [re.sub(r"\d+ unparsable;", "N unparsable;", l) for l in o.splitlines() if "wall-clock" not in l and "per update" not in l and "segment start" not in l and "per message" not in l]
+for mode, flat, extra, want_rc in (("ok", "2", [], 0), ("close_ok", "3", ["--close-position"], 0), ("close_none", "3", ["--close-position"], 4),
+                                   ("silent", "0.5", [], 4), ("garbage", "2", [], 0), ("wrongseg", "0.5", [], 4)):
+    rc, out, ex, rep, rows = ext_clock_case(mode, flat, extra)
+    tag = "clock exchange/%s" % mode
+    check(rc == want_rc, tag + ": live exit %d (rc=%s)" % (want_rc, rc))
+    check(rep.returncode == rc, tag + ": the replay exits the same way (%s vs %s)\n%s" % (rep.returncode, rc, rep.stderr[-300:]))
+    check(wire_hash(out) and wire_hash(out) == wire_hash(rep.stdout), tag + ": same wire hash (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
+    check(summ(out) == summ(rep.stdout), tag + ": and the same summary\n" + "\n".join(a for a in difflib.unified_diff(summ(out), summ(rep.stdout), lineterm="", n=0)))
+    check(rows[0] == "H 1", tag + ": the clock file says there was an exchange (%s)" % rows[0])
+    if mode not in ("silent",):
+        check(any(r.startswith("R ") for r in rows), tag + ": reports are recorded")
+    else:
+        check(not any(r.startswith("R ") for r in rows), tag + ": a silent exchange leaves no reports in the file")
 
 if failures:
     sys.exit("%d live tool test failures" % failures)

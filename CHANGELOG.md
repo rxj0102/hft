@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Phase 46: the exchange's reports are in the clock file
+
+- The clock file starts with `H 1` or `H 0` (exchange or not) and records each exchange report as `R <ns> <line>`; `--clock-in` replays a closed-loop run with an external venue and carries on after the end record for the flatten (ADR 50). `--clock-out` is refused with `--position-file` (the account check is not recorded). `supervise.py --record-dir` now writes the clock in bridge and closed-loop modes too.
+- Tests: six closed-loop cases against the scripted exchange (normal, close in full, close that fails, silent exchange, garbage reports, wrong segment) replay to the same hash, whole summary (except wall-clock cost and the unparsable count) and exit code; a clock file without the `H` line still replays. Drill `record_modes` covers bridge, loop and loop with a position file. Mutation: 15 mutants; survivors were an unobservable guard (removed) and one that failed to compile (redone, killed); sources equal backups.
+- Real market data: 3 of the Phase 44 recordings (4,100 to 4,250 lines) driven through a closed loop against the scripted exchange, with and without `--close-position`: 6 of 6 reproduce exactly (hash, summary, exit code; 645 to 725 reports each, one fill in the close cases, exit 4 in both live and replay). Scripted exchange only; no real or sandbox exchange has been involved.
+
 ### Phase 45: record the live clock, replay a live run exactly
 
 - `hft_live --clock-out FILE` records every time value given to the session (line, idle poll, end); `--from STREAM --clock-in FILE` replays them (ADR 49). `supervise.py --record-dir` passes it (not with `--loop`). Tests: 4 live runs fed in random bursts (3 to end of input, 1 SIGTERM) each replay to their own live hash and orders line; refusals; a clock without final line. New drill `record_modes` (31 drills: bridge records the clock and replays to the live hash, loop mode does not request one). Mutation: 25 mutants in the first pass, survivors fixed by tests (K handling, refusal reasons, bridge and loop wiring) or removed (`fclose`, status calls in the clock replay); 3 survive as unobservable by output (the time given to the final shutdown or kill). 

@@ -445,11 +445,29 @@ int main(int argc, char** argv) {
   }
   OrderOut* oo = orders_fd >= 0 ? &oout : nullptr;
   ReportIn rin;
-  if ((!clock_out.empty() && (exchange_fd >= 0 || !from.empty())) || (!clock_in.empty() && from.empty())) {
-    std::fprintf(stderr, "--clock-out records a live run without --exchange-fd (the exchange's reports are not recorded); --clock-in needs --from\n");
+  if ((!clock_out.empty() && (!from.empty() || !position_file.empty())) || (!clock_in.empty() && from.empty())) {
+    std::fprintf(stderr, "--clock-out records a live run (not with --from, and not with --position-file: the account check is not recorded); --clock-in needs --from\n");
     return 1;
   }
-  if (lc.close_position && exchange_fd < 0) {
+  // The clock file starts with "H 0" or "H 1": whether the run had an exchange behind it. A file without that line is "H 0".
+  std::ifstream ck;
+  if (!clock_in.empty()) {
+    ck.open(clock_in, std::ios::binary);
+    if (!ck) {
+      std::fprintf(stderr, "cannot read %s\n", clock_in.c_str());
+      return 1;
+    }
+    char hk = 0;
+    int hv = 0;
+    const std::streampos at = ck.tellg();
+    if (ck >> hk >> hv && hk == 'H') {
+      lc.external_venue = hv == 1;
+    } else {
+      ck.clear();
+      ck.seekg(at);
+    }
+  }
+  if (lc.close_position && exchange_fd < 0 && !(lc.external_venue && !clock_in.empty())) {
     std::fprintf(stderr, "--close-position needs --exchange-fd (closing needs the exchange's reports)\n");
     return 1;
   }
@@ -520,6 +538,23 @@ int main(int argc, char** argv) {
   const std::uint64_t t_start = mono_ns();
   auto now_ns = [&] { return mono_ns() - t_start; };
   auto secs = [&] { return static_cast<double>(now_ns()) / 1e9; };
+  // --clock-out: every time value handed to the session, in order (L line, P poll, K or S the end). With --from and
+  // --clock-in the same values are replayed, so a live run can be reproduced exactly (ADR 48, 49).
+  std::FILE* clock_f = nullptr;
+  if (!clock_out.empty()) {
+    clock_f = std::fopen(clock_out.c_str(), "w");
+    if (!clock_f) {
+      std::fprintf(stderr, "cannot write %s\n", clock_out.c_str());
+      return 1;
+    }
+  }
+  if (clock_f) std::fprintf(clock_f, "H %d\n", exchange_fd >= 0 ? 1 : 0);
+  auto stamp = [&](char kind, std::string_view text = {}) {
+    const std::uint64_t t = now_ns();
+    if (clock_f) std::fprintf(clock_f, "%c %llu%s%.*s\n", kind, static_cast<unsigned long long>(t), text.empty() ? "" : " ", static_cast<int>(text.size()), text.data());
+    return t;
+  };
+
   double next_report = report_s, next_metrics = 0.0;
   std::uint64_t last_now = 0;
   EventLog elog;
@@ -607,7 +642,7 @@ int main(int argc, char** argv) {
           } else if (parse_report(std::string_view(rin.carry).substr(pos, nl - pos), seg, r)) {
             const std::uint64_t before = session.stats().exchange_reports;
             const long long m2 = r.type == sim::ReportType::Fill && elog.ok() ? mid_x2() : -1;   // before: the fill can end the segment (a close)
-            session.on_exchange_report(seg, r, now_ns());
+            session.on_exchange_report(seg, r, stamp('R', ln));
             if (r.type == sim::ReportType::Fill && elog.ok()) log_fill(seg, r, ln, m2, session.stats().exchange_reports > before);
           } else {
             ++rin.bad;
@@ -649,32 +684,17 @@ int main(int argc, char** argv) {
     }
   };
 
-  // --clock-out: every time value handed to the session, in order (L line, P poll, K or S the end). With --from and
-  // --clock-in the same values are replayed, so a live run can be reproduced exactly (ADR 48, 49).
-  std::FILE* clock_f = nullptr;
-  if (!clock_out.empty()) {
-    clock_f = std::fopen(clock_out.c_str(), "w");
-    if (!clock_f) {
-      std::fprintf(stderr, "cannot write %s\n", clock_out.c_str());
-      return 1;
-    }
-  }
-  auto stamp = [&](char kind) {
-    const std::uint64_t t = now_ns();
-    if (clock_f) std::fprintf(clock_f, "%c %llu\n", kind, static_cast<unsigned long long>(t));
-    return t;
-  };
-
   if (!from.empty() && !clock_in.empty()) {
-    std::ifstream in(from, std::ios::binary), ck(clock_in);
-    if (!in || !ck) {
-      std::fprintf(stderr, "cannot read %s\n", in ? clock_in.c_str() : from.c_str());
+    std::ifstream in(from, std::ios::binary);
+    if (!in) {
+      std::fprintf(stderr, "cannot read %s\n", from.c_str());
       return 1;
     }
-    std::string line;
-    char kind = 0, end_kind = 0;
-    unsigned long long t = 0;
-    while (!g_stop && ck >> kind >> t) {
+    std::string line, cl;
+    bool ended = false;
+    while (!g_stop && std::getline(ck, cl)) {
+      const char kind = cl.empty() ? 0 : cl[0];
+      const std::uint64_t t = cl.size() > 2 ? std::strtoull(cl.c_str() + 2, nullptr, 10) : 0;
       if (kind == 'L') {
         if (!std::getline(in, line)) {
           std::fprintf(stderr, "clock file has more lines than %s\n", from.c_str());
@@ -683,15 +703,22 @@ int main(int argc, char** argv) {
         session.on_line(line, t);
       } else if (kind == 'P') {
         session.poll(t);
-      } else {
-        end_kind = kind;
-        last_now = t;
-        break;
+      } else if (kind == 'R') {  // an exchange report: "R <ns> <the report line>"
+        const std::size_t sp = cl.find(' ', 2);
+        std::uint64_t seg = 0;
+        sim::Report r;
+        if (parse_report(std::string_view(cl).substr(sp + 1), seg, r)) session.on_exchange_report(seg, r, t);
+      } else if (kind == 'K' || kind == 'S') {  // the end; what follows (a flatten waiting for the exchange) is still replayed
+        if (kind == 'K') session.kill(t);
+        else session.shutdown(t);
+        ended = true;
       }
       last_now = t;
     }
-    if (g_stop || end_kind == 'K') session.kill(last_now);
-    else session.shutdown(last_now);
+    if (!ended) {
+      if (g_stop) session.kill(last_now);
+      else session.shutdown(last_now);
+    }
   } else if (!from.empty()) {
     std::ifstream in(from, std::ios::binary);
     if (!in) {

@@ -768,28 +768,39 @@ async def drill_record_term(feed, port):
 
 
 async def drill_record_modes(feed, port):
-    """--record-dir with a bridge keeps the clock too; in a closed loop the exchange's reports are inputs that are not
-    recorded, so there is a stream but no clock, and the run is unharmed."""
+    """--record-dir with a bridge, or in a closed loop, keeps the clock too (in a loop that includes the exchange's reports);
+    with a position file it does not (the account check is not recorded). The recorded run replays to its live hash."""
     import re
-    for mode in ("bridge", "loop"):
+    hre = r"flatten excluded\): ([0-9a-f]+)"
+    for mode in ("bridge", "loop", "loop+position"):
         base = tempfile.mkdtemp(prefix="drill-recmode-")
         ex = new_exchange()
-        r = (bridge_run if mode == "bridge" else loop_run)(feed, port, ex, extra=["--record-dir", base])
+        extra = ["--record-dir", base]
+        if mode == "loop+position":
+            extra += ["--position-file", os.path.join(base, "pos")]
+        r = (bridge_run if mode == "bridge" else loop_run)(feed, port, ex, extra=extra)
         check(await until(lambda: ex.open_orders(), 20), mode + ": the quotes reach the exchange with recording on")
+        if mode.startswith("loop"):
+            check(await until(lambda: (live_metric(r, "hft_live_exchange_reports_total") or 0) >= 2, 15), mode + ": and the exchange's reports reach hft_live")
         st = r.sup("pair_start")[0]
         check(st.get("record") == os.path.join(base, "stream.1.txt"), mode + ": the stream is recorded")
-        if mode == "bridge":
-            check(st.get("clock") == os.path.join(base, "clock.1.txt"), "bridge: the clock is recorded: %s" % st.get("clock"))
+        if mode == "loop+position":
+            check(st.get("clock") is None, mode + ": no clock file is requested: %s" % st.get("clock"))
         else:
-            check(st.get("clock") is None, "loop: no clock file is requested: %s" % st.get("clock"))
+            check(st.get("clock") == os.path.join(base, "clock.1.txt"), mode + ": the clock is recorded: %s" % st.get("clock"))
         check(await r.stop() == 0, mode + ": supervisor exits 0")
-        if mode == "bridge":
+        if mode != "loop+position":
             out = open(os.path.join(r.dir, "live.out")).read()
-            h = re.search(r"flatten excluded\): ([0-9a-f]+)", out)
-            rep = subprocess.run([LIVE, "--from", os.path.join(base, "stream.1.txt"), "--clock-in", os.path.join(base, "clock.1.txt")],
+            h = re.search(hre, out)
+            rep = subprocess.run([LIVE, "--from", os.path.join(base, "stream.1.txt"), "--clock-in", os.path.join(base, "clock.1.txt"), "--stale-ms", "5000"],
                                  capture_output=True, text=True, timeout=60)
-            m2 = re.search(r"flatten excluded\): ([0-9a-f]+)", rep.stdout)
-            check(h and m2 and h.group(1) == m2.group(1), "bridge: replay with the clock gives the live hash (%s vs %s)" % (h and h.group(1), m2 and m2.group(1)))
+            m2 = re.search(hre, rep.stdout)
+            check(h and m2 and h.group(1) == m2.group(1), mode + ": replay with the clock gives the live hash (%s vs %s)" % (h and h.group(1), m2 and m2.group(1)))
+            orders = lambda o: re.findall(r"^  orders: .*$", o, re.M)
+            check(orders(out) and orders(out) == orders(rep.stdout), mode + ": and the same orders line: %s vs %s" % (orders(out), orders(rep.stdout)))
+            if mode == "loop":
+                ex_line = lambda o: re.findall(r"^  exchange: .*$", o, re.M)
+                check(ex_line(out) and ex_line(out) == ex_line(rep.stdout), "loop: and the same exchange line: %s vs %s" % (ex_line(out), ex_line(rep.stdout)))
         ex.stop()
         r.cleanup()
         shutil.rmtree(base, ignore_errors=True)

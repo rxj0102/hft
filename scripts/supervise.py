@@ -180,7 +180,7 @@ def main(argv=None):
             os.makedirs(a.record_dir, exist_ok=True)
             rec = os.path.join(a.record_dir, "stream.%d.txt" % run_no)
         clk = None
-        if rec and not a.loop:  # a closed loop takes the exchange's reports as input; they are not recorded (ADR 49)
+        if rec and "--position-file" not in live_cmd:  # the account check is not recorded (ADR 49, 50)
             clk = os.path.join(a.record_dir, "clock.%d.txt" % run_no)
         live_rec = ["--clock-out", clk] if clk else []
         cap = subprocess.Popen(capture_cmd + (["--tee", rec] if rec else []), stdout=w, stderr=cap_err, start_new_session=True)

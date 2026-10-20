@@ -51,3 +51,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 47. [The kill sweep is not part of the order flow the feed caused](adr/0047-kill-sweep-is-not-in-the-feed-hash.md) (Accepted)
 48. [A live run replays to its hash only when no decision depends on message timing](adr/0048-live-hash-equals-replay-hash-only-without-timing-effects.md) (Accepted)
 49. [Record the live clock so a live run can be reproduced exactly](adr/0049-record-the-live-clock-to-reproduce-a-live-run.md) (Accepted)
+50. [Record the exchange's reports in the clock file](adr/0050-record-the-exchanges-reports-in-the-clock-file.md) (Accepted)
