@@ -19,3 +19,6 @@ The Python rule is an approximation of the C++ exit (float mid, the boundary wit
 - A rule measured from the snapshot's touch: see Context.
 - Skipping the resubscribe when the snapshot is wider than the limit: that is the case the replay cannot use, and the only fix is another snapshot.
 - Reading the window from the C++ side: as in ADR 43.
+
+## Measured (addendum, same day)
+One run with the new settings (SANDBOX.md): 53 resubscribes in 600 s (135 before), none under a second apart; 12 segments of 100 or more packets cover 539.4 s (520.9 s before); the exchange check compared 4 levels and all 4 matched. 33 of 54 snapshots were still wider than the exit line. Two runs at different times are not a controlled comparison.

@@ -6,7 +6,7 @@
 
 - Offline on the 136 segments of the 600 s sandbox capture: the replay's own exit fires in 103 segments, the 200 USD rule in 135 (so it cut at least 32 usable ones), a rule measured from the snapshot's touch in only 28 (it misses 78 of the replay's exits, the wide snapshots). The touch rule is rejected; the recommended limit is now 262 USD (ADR 44).
 - New `--resnap-min-s` (default 1): at most one drift resubscribe per second. Tests: throttle with a feed of only wide snapshots, the first request not held back, the command line defaults. Mutation checks: 7 mutants, 1 survived the first run (the function's own default, now tested), all killed after.
-- Not yet run against the sandbox with the new settings.
+- First run with the new settings (600 s): 53 resubscribes (135 before), none under 1 s apart; 12 long segments cover 539.4 s (520.9 s before); replay clean; the exchange check compared 4 levels and 4 matched, the first real sandbox comparison with any level (16 more outside the window; that snapshot happened to be narrow). One run each time, not a controlled comparison.
 
 ### Phase 36: the capture resubscribes on price drift
 
