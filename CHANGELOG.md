@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 48: one page on reproducing a live run
+
+- `docs/REPRODUCIBILITY.md`: how to record and replay exactly, the evidence by claim with its sample, what was withdrawn (Phase 41's general expectation, the "sandbox" label on the Phase 42 and 44 runs), and what is not covered. Documentation only; no code changed.
+
 ### Phase 47: the clock file carries the settings
 
 - A `C` header line records the nine settings that change decisions; `--clock-in` applies them and prints one warning if a flag given by hand conflicts (the file wins) (ADR 51). Replays need no flags. Tests: a live run with non-default settings replays flag-less to the same hash and prints nothing; each of the nine flags alone against the file warns and loses; equal flags are silent; a file without the line and a damaged line are handled; `--levels 12` changes the order flow and replays exactly; the model check line agrees (`--check-every`); the replay's order frames equal the frames the live run sent to the scripted exchange (this caught the `--close-collar-bps` case). Existing closed-loop cases and the `record_modes` drill replay without flags. Mutation: 25 mutants; survivors fixed by the tests above; 3 failed to compile and were redone, killed. One survives: `--max-orders` (book capacity), which did not change any output in any stream I could build, including a 600-level snapshot with `--max-orders 256`; it is recorded and applied but unproven.

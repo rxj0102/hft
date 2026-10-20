@@ -81,6 +81,7 @@ The smoke test places a few minimum-size orders worth under 5 USD and writes a r
 | [docs/LIVE_FEED.md](docs/LIVE_FEED.md), [docs/LIVE_PAPER.md](docs/LIVE_PAPER.md) | real data replay and the paper session |
 | [docs/SANDBOX.md](docs/SANDBOX.md), [docs/CLOSED_LOOP.md](docs/CLOSED_LOOP.md) | sandbox order entry, closed loop, closing, account check |
 | [docs/STRATEGY_LAB.md](docs/STRATEGY_LAB.md) | comparing strategy variants offline, and what that can and cannot say |
+| [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md) | replaying a live run exactly: how, what was shown, what was withdrawn |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md), [docs/RUNBOOK.md](docs/RUNBOOK.md), [docs/FAILURE_MODES.md](docs/FAILURE_MODES.md) | running it, what fails and what the engine does |
 | [docs/CI.md](docs/CI.md), [CHANGELOG.md](CHANGELOG.md) | the workflow, per-phase changes |
 
