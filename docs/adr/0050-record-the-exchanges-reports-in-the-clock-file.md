@@ -1,6 +1,6 @@
 # ADR 50: Record the exchange's reports in the clock file
 
-Status: Accepted
+Status: Accepted (the flags it asks you to repeat are recorded by ADR 51)
 
 ## Context
 ADR 49 recorded the clock of a live run so that it could be replayed exactly, but left out the exchange's reports. With `--exchange-fd` (the closed loop) the strategy and the flatten and close logic react to reports that arrive at times of their own, so such a run could not be reproduced.

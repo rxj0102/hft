@@ -707,10 +707,62 @@ os.remove(stream); os.remove(clk)
 # a clock file without the "H" line (written before there was one) is a run without an exchange
 rc, out, stream, clk = live_with_clock(text_ck, "eof", 11)
 lines_ = open(clk).read().splitlines(True)
-check(lines_[0] == "H 0\n", "clock: a plain live run starts with H 0 (%r)" % lines_[0])
-open(clk, "w").write("".join(lines_[1:]))
+check(lines_[0] == "H 0\n" and lines_[1].startswith("C "), "clock: a plain live run starts with H 0 and a C line (%r)" % lines_[:2])
+open(clk, "w").write("".join(lines_[2:]))
 rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
 check(rep.returncode == 0 and wire_hash(out) == wire_hash(rep.stdout), "clock: a file without the H line still replays (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
+os.remove(stream); os.remove(clk)
+# the settings that change decisions are in the clock file (ADR 51)
+def live_with_flags(flags, seed):
+    rnd = random.Random(seed)
+    stream = tempfile.mktemp(suffix=".l2"); clk = tempfile.mktemp(suffix=".clk")
+    open(stream, "w").write(text_ck)
+    proc = subprocess.Popen([BIN, "--report-s", "1000", "--clock-out", clk] + flags, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    lines = text_ck.splitlines(True)
+    i = 0
+    while i < len(lines):
+        n = rnd.randint(1, 40)
+        proc.stdin.write("".join(lines[i:i + n])); proc.stdin.flush()
+        i += n
+        time.sleep(rnd.choice([0, 0, 0.0003, 0.002]))
+    wait_idle(proc.pid)
+    out, err = proc.communicate(timeout=30)
+    return out, stream, clk
+
+flags = ["--rtt-us", "20", "--stale-ms", "777", "--lots", "3", "--levels", "4096", "--max-orders", "5000", "--check-every", "7", "--flatten-timeout-s", "1.5"]
+out, stream, clk = live_with_flags(flags, 21)
+hdr = open(clk).read().splitlines()[:2]
+check(hdr[0] == "H 0" and hdr[1] == "C stale=777000000 rtt=20000 lots=3 levels=4096 maxord=5000 chk=7 flat=1500000000 close=0 collar=30", "settings: the header records the flags: %s" % hdr)
+rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
+check(wire_hash(out) and wire_hash(out) == wire_hash(rep.stdout) and rep.stderr == "", "settings: a replay without flags gives the live hash and says nothing (%s vs %s) %r" % (wire_hash(out), wire_hash(rep.stdout), rep.stderr))
+mc = lambda o: [l for l in o.splitlines() if l.strip().startswith("model check:")]
+check(mc(out) and mc(out) == mc(rep.stdout), "settings: the model check line agrees (--check-every): %s vs %s" % (mc(out), mc(rep.stdout)))
+plain = subprocess.run([BIN, "--from", stream, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
+check(wire_hash(plain.stdout) != wire_hash(out), "settings: and without the clock file the same stream gives another hash (the settings matter)")
+rep2 = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000", "--rtt-us", "90", "--lots", "9"], capture_output=True, text=True, timeout=60)
+check(wire_hash(out) == wire_hash(rep2.stdout) and "recorded with" in rep2.stderr and "rtt=20000" in rep2.stderr and "rtt=90000" in rep2.stderr,
+      "settings: conflicting flags lose to the file, with a warning naming both: %r" % rep2.stderr)
+for fl_, val_ in (("--stale-ms", "1"), ("--rtt-us", "99"), ("--lots", "9"), ("--levels", "77"), ("--max-orders", "11"), ("--check-every", "3"),
+                  ("--flatten-timeout-s", "9"), ("--close-position", None), ("--close-collar-bps", "99")):
+    r_ = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000", fl_] + ([val_] if val_ else []), capture_output=True, text=True, timeout=60)
+    check(r_.returncode == 0 and "recorded with" in r_.stderr and wire_hash(r_.stdout) == wire_hash(out), "settings: %s alone against the file: warned, file wins (rc=%d) %r" % (fl_, r_.returncode, r_.stderr[:60]))
+rep3 = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000", "--rtt-us", "20", "--stale-ms", "777", "--lots", "3", "--levels", "4096",
+                       "--max-orders", "5000", "--check-every", "7", "--flatten-timeout-s", "1.5"], capture_output=True, text=True, timeout=60)
+check(wire_hash(out) == wire_hash(rep3.stdout) and rep3.stderr == "", "settings: flags equal to the recorded ones: no warning %r" % rep3.stderr)
+# a window small enough to matter (--levels): the segment ends at once, and the replay knows
+os.remove(stream); os.remove(clk)
+outB, streamB, clkB = live_with_flags(["--levels", "12"], 22)
+repB = subprocess.run([BIN, "--from", streamB, "--clock-in", clkB, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
+check(wire_hash(outB) == wire_hash(repB.stdout) and wire_hash(outB) != wire_hash(out) and "0 replace" in outB, "settings: --levels 12 changes the order flow and replays exactly (%s vs %s vs %s)" % (wire_hash(outB), wire_hash(repB.stdout), wire_hash(out)))
+os.remove(streamB); os.remove(clkB)
+out, stream, clk = live_with_flags(flags, 21)
+body = open(clk).read().splitlines(True)
+open(clk, "w").write("".join(body[:1] + body[2:]))
+rep4 = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"] + flags, capture_output=True, text=True, timeout=60)
+check(rep4.returncode == 0 and wire_hash(out) == wire_hash(rep4.stdout) and rep4.stderr == "", "settings: a file with H but no C line takes the flags given (%s vs %s)" % (wire_hash(out), wire_hash(rep4.stdout)))
+open(clk, "w").write("".join(body[:1] + ["C stale=oops\n"] + body[2:]))
+rep5 = subprocess.run([BIN, "--from", stream, "--clock-in", clk], capture_output=True, text=True, timeout=60)
+check(rep5.returncode == 1 and "damaged" in rep5.stderr, "settings: a damaged C line is refused (rc=%d) %r" % (rep5.returncode, rep5.stderr))
 os.remove(stream); os.remove(clk)
 # a clock file with more lines than the stream
 sp = tempfile.mktemp(suffix=".l2"); cp = tempfile.mktemp(suffix=".clk")
@@ -725,22 +777,33 @@ def ext_clock_case(mode, flatten_s, extra=(), feed=None, pace=0.03):
     feed = feed or ext_feed(30)
     rc, out, ex = run_external(mode, feed, flatten_s=flatten_s, pace=pace, extra=["--clock-out", clk] + list(extra))
     stream = tempfile.mktemp(suffix=".l2"); open(stream, "w").write("".join(feed))
-    rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000", "--stale-ms", "5000", "--flatten-timeout-s", flatten_s] + list(extra),
-                         capture_output=True, text=True, timeout=60)
+    # no settings flags: the clock file carries the live run's (ADR 51)
+    # the replay also writes its orders to a pipe: they must be the very frames the live run sent to the exchange
+    rr, ww = os.pipe()
+    got = []
+    def drain():
+        with os.fdopen(rr, "r") as f:
+            got.extend(f)
+    th = threading.Thread(target=drain); th.start()
+    rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000", "--orders-fd", str(ww)], capture_output=True, text=True, timeout=60, pass_fds=(ww,))
+    os.close(ww); th.join()
+    rep.frames = [json.loads(l) for l in got]
     rows = open(clk).read().splitlines()
     os.remove(stream); os.remove(clk)
     return rc, out, ex, rep, rows
 
 # report lines that do not parse are counted but change nothing, so they are not recorded: that count is the one difference
 summ = lambda o: [re.sub(r"\d+ unparsable;", "N unparsable;", l) for l in o.splitlines() if "wall-clock" not in l and "per update" not in l and "segment start" not in l and "per message" not in l]
-for mode, flat, extra, want_rc in (("ok", "2", [], 0), ("close_ok", "3", ["--close-position"], 0), ("close_none", "3", ["--close-position"], 4),
+for mode, flat, extra, want_rc in (("ok", "2", [], 0), ("close_ok", "3", ["--close-position"], 0), ("close_ok", "3", ["--close-position", "--close-collar-bps", "80"], 0),
+                                   ("close_none", "3", ["--close-position"], 4),
                                    ("silent", "0.5", [], 4), ("garbage", "2", [], 0), ("wrongseg", "0.5", [], 4)):
     rc, out, ex, rep, rows = ext_clock_case(mode, flat, extra)
-    tag = "clock exchange/%s" % mode
+    tag = "clock exchange/%s%s" % (mode, " " + " ".join(extra) if extra else "")
     check(rc == want_rc, tag + ": live exit %d (rc=%s)" % (want_rc, rc))
     check(rep.returncode == rc, tag + ": the replay exits the same way (%s vs %s)\n%s" % (rep.returncode, rc, rep.stderr[-300:]))
     check(wire_hash(out) and wire_hash(out) == wire_hash(rep.stdout), tag + ": same wire hash (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
     check(summ(out) == summ(rep.stdout), tag + ": and the same summary\n" + "\n".join(a for a in difflib.unified_diff(summ(out), summ(rep.stdout), lineterm="", n=0)))
+    check(ex.seen == rep.frames, tag + ": and the replay sends the very same order frames (%d live, %d replayed)" % (len(ex.seen), len(rep.frames)))
     check(rows[0] == "H 1", tag + ": the clock file says there was an exchange (%s)" % rows[0])
     if mode not in ("silent",):
         check(any(r.startswith("R ") for r in rows), tag + ": reports are recorded")

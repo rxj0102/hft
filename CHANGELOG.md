@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 47: the clock file carries the settings
+
+- A `C` header line records the nine settings that change decisions; `--clock-in` applies them and prints one warning if a flag given by hand conflicts (the file wins) (ADR 51). Replays need no flags. Tests: a live run with non-default settings replays flag-less to the same hash and prints nothing; each of the nine flags alone against the file warns and loses; equal flags are silent; a file without the line and a damaged line are handled; `--levels 12` changes the order flow and replays exactly; the model check line agrees (`--check-every`); the replay's order frames equal the frames the live run sent to the scripted exchange (this caught the `--close-collar-bps` case). Existing closed-loop cases and the `record_modes` drill replay without flags. Mutation: 25 mutants; survivors fixed by the tests above; 3 failed to compile and were redone, killed. One survives: `--max-orders` (book capacity), which did not change any output in any stream I could build, including a 600-level snapshot with `--max-orders 256`; it is recorded and applied but unproven.
+
 ### Phase 46: the exchange's reports are in the clock file
 
 - The clock file starts with `H 1` or `H 0` (exchange or not) and records each exchange report as `R <ns> <line>`; `--clock-in` replays a closed-loop run with an external venue and carries on after the end record for the flatten (ADR 50). `--clock-out` is refused with `--position-file` (the account check is not recorded). `supervise.py --record-dir` now writes the clock in bridge and closed-loop modes too.

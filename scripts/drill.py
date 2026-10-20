@@ -792,7 +792,7 @@ async def drill_record_modes(feed, port):
         if mode != "loop+position":
             out = open(os.path.join(r.dir, "live.out")).read()
             h = re.search(hre, out)
-            rep = subprocess.run([LIVE, "--from", os.path.join(base, "stream.1.txt"), "--clock-in", os.path.join(base, "clock.1.txt"), "--stale-ms", "5000"],
+            rep = subprocess.run([LIVE, "--from", os.path.join(base, "stream.1.txt"), "--clock-in", os.path.join(base, "clock.1.txt")],
                                  capture_output=True, text=True, timeout=60)
             m2 = re.search(hre, rep.stdout)
             check(h and m2 and h.group(1) == m2.group(1), mode + ": replay with the clock gives the live hash (%s vs %s)" % (h and h.group(1), m2 and m2.group(1)))

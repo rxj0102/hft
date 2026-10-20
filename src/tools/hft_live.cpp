@@ -383,8 +383,11 @@ int main(int argc, char** argv) {
   double pace = 0.0, report_s = 10.0, max_seconds = 0.0;
   bool spin = false;
   int orders_fd = -1, exchange_fd = -1;
+  bool cfg_given = false;  // a flag that changes decisions was given by hand
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
+    for (const char* f : {"--stale-ms", "--rtt-us", "--lots", "--levels", "--max-orders", "--check-every", "--flatten-timeout-s", "--close-position", "--close-collar-bps"})
+      if (a == f) cfg_given = true;
     auto num = [&](double& v) {
       if (i + 1 >= argc) return false;
       v = std::atof(argv[++i]);
@@ -450,6 +453,15 @@ int main(int argc, char** argv) {
     return 1;
   }
   // The clock file starts with "H 0" or "H 1": whether the run had an exchange behind it. A file without that line is "H 0".
+  // The settings that change decisions, as the clock file records them (ADR 51).
+  auto cfg_text = [&](const feed::LiveConfig& c) {
+    char b[256];
+    std::snprintf(b, sizeof b, "stale=%lld rtt=%lld lots=%lld levels=%lld maxord=%lld chk=%lld flat=%lld close=%d collar=%lld",
+                  static_cast<long long>(c.stale_ns), static_cast<long long>(c.venue_rtt_ns), static_cast<long long>(c.mm_qty_lots),
+                  static_cast<long long>(c.l2.num_levels), static_cast<long long>(c.max_orders), static_cast<long long>(c.check_every),
+                  static_cast<long long>(c.flatten_timeout_ns), c.close_position ? 1 : 0, static_cast<long long>(c.close_collar_bps));
+    return std::string(b);
+  };
   std::ifstream ck;
   if (!clock_in.empty()) {
     ck.open(clock_in, std::ios::binary);
@@ -462,6 +474,32 @@ int main(int argc, char** argv) {
     const std::streampos at = ck.tellg();
     if (ck >> hk >> hv && hk == 'H') {
       lc.external_venue = hv == 1;
+      std::string rest, cline;
+      std::getline(ck, rest);
+      const std::streampos at2 = ck.tellg();
+      if (std::getline(ck, cline) && cline.rfind("C ", 0) == 0) {
+        long long st = 0, rt = 0, lo = 0, lv = 0, mo = 0, chk = 0, fl = 0, collar = 0;
+        int cl = 0;
+        if (std::sscanf(cline.c_str(), "C stale=%lld rtt=%lld lots=%lld levels=%lld maxord=%lld chk=%lld flat=%lld close=%d collar=%lld", &st, &rt, &lo, &lv, &mo, &chk, &fl, &cl, &collar) != 9) {
+          std::fprintf(stderr, "%s: the settings line is damaged\n", clock_in.c_str());
+          return 1;
+        }
+        const std::string given = cfg_text(lc);
+        lc.stale_ns = static_cast<std::uint64_t>(st);
+        lc.venue_rtt_ns = static_cast<std::uint64_t>(rt);
+        lc.mm_qty_lots = lo;
+        lc.l2.num_levels = static_cast<std::uint32_t>(lv);
+        lc.max_orders = static_cast<std::uint32_t>(mo);
+        lc.check_every = static_cast<std::uint32_t>(chk);
+        lc.flatten_timeout_ns = static_cast<std::uint64_t>(fl);
+        lc.close_position = cl == 1;
+        lc.close_collar_bps = collar;
+        if (cfg_given && given != cfg_text(lc))
+          std::fprintf(stderr, "hft_live: the clock file was recorded with [%s]; using those settings, not [%s]\n", cfg_text(lc).c_str(), given.c_str());
+      } else {
+        ck.clear();
+        ck.seekg(at2);
+      }
     } else {
       ck.clear();
       ck.seekg(at);
@@ -548,7 +586,7 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  if (clock_f) std::fprintf(clock_f, "H %d\n", exchange_fd >= 0 ? 1 : 0);
+  if (clock_f) std::fprintf(clock_f, "H %d\nC %s\n", exchange_fd >= 0 ? 1 : 0, cfg_text(lc).c_str());
   auto stamp = [&](char kind, std::string_view text = {}) {
     const std::uint64_t t = now_ns();
     if (clock_f) std::fprintf(clock_f, "%c %llu%s%.*s\n", kind, static_cast<unsigned long long>(t), text.empty() ? "" : " ", static_cast<int>(text.size()), text.data());
