@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 45: record the live clock, replay a live run exactly
+
+- `hft_live --clock-out FILE` records every time value given to the session (line, idle poll, end); `--from STREAM --clock-in FILE` replays them (ADR 49). `supervise.py --record-dir` passes it (not with `--loop`). Tests: 4 live runs fed in random bursts (3 to end of input, 1 SIGTERM) each replay to their own live hash and orders line; refusals; a clock without final line. New drill `record_modes` (31 drills: bridge records the clock and replays to the live hash, loop mode does not request one). Mutation: 25 mutants in the first pass, survivors fixed by tests (K handling, refusal reasons, bridge and loop wiring) or removed (`fclose`, status calls in the clock replay); 3 survive as unobservable by output (the time given to the final shutdown or kill). 
+- Real data: the 8 streams of Phase 44 (production public feed, 4,100 to 4,250 lines each) piped through live mode with `--clock-out`: 8 of 8 replay exactly from their clocks (live hashes differ from Phase 44's because they were piped at file speed, not received in real time); replay by stamps differs for all 8. Two runs on the sandbox feed (explicit URL), one ending itself and one stopped by SIGTERM, both reproduce exactly (small: 47 and 43 replaces).
+
 ### Phase 44: 30 minutes recorded, and the live-versus-replay hash is not a determinism check
 
 - Eight recorded runs (1,805 s) on the production public market-data feed by mistake (default `--url`; read-only, no orders). Only 1 of 8 live hashes matched its replay. Replay is deterministic; the same file in live mode gives different hashes each time, because live uses arrival time as its clock. ADR 48 withdraws the "live replays to its hash" expectation; RUNBOOK and SANDBOX updated. Phase 42's real-data paragraph corrected: its run was also on the production feed, and a match is not guaranteed.

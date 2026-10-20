@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests the hft_live program as a process: files, pipes, signals, real time.
 Usage: test_live_tool.py path/to/hft_live. All data is invented; no network."""
-import os, signal, subprocess, sys, tempfile, time
+import os, re, signal, subprocess, sys, tempfile, time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "build/release/hft_live"
 failures = 0
@@ -630,6 +630,86 @@ rc, out, ex = run_external("close_ok", ext_feed(20), flatten_s="2", pace=0.03, e
 rows = [json.loads(l) for l in open(lp)]
 check([r for r in rows if r["event"] == "fill"] and not [r for r in rows if r["event"] == "mid"], "mid: no samples unless --mid-sample-ms is given; fills are logged regardless")
 os.remove(lp)
+
+# --clock-out / --clock-in: a live run, whose clock is the arrival time, reproduced exactly (ADR 49)
+import random
+def wait_idle(pid, quiet=0.15, limit=30):
+    """returns when the process has used no CPU time for `quiet` seconds (it has worked through what it was given)"""
+    def cpu():
+        f = open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()
+        return int(f[11]) + int(f[12])
+    last, since, t0 = cpu(), time.time(), time.time()
+    while time.time() - t0 < limit:
+        time.sleep(0.02)
+        c = cpu()
+        if c != last:
+            last, since = c, time.time()
+        elif time.time() - since >= quiet:
+            return
+
+
+def live_with_clock(text, how, seed):
+    """feeds text to hft_live on stdin in bursts with small pauses; how: 'eof' (input ends) or 'term' (SIGTERM)"""
+    rnd = random.Random(seed)
+    stream = tempfile.mktemp(suffix=".l2"); clk = tempfile.mktemp(suffix=".clk")
+    open(stream, "w").write(text)
+    proc = subprocess.Popen([BIN, "--report-s", "1000", "--clock-out", clk], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    lines = text.splitlines(True)
+    i = 0
+    while i < len(lines):
+        n = rnd.randint(1, 40)
+        proc.stdin.write("".join(lines[i:i + n])); proc.stdin.flush()
+        i += n
+        time.sleep(rnd.choice([0, 0, 0.0003, 0.002]))
+    wait_idle(proc.pid)  # quiet: hft_live polls its timers while nothing arrives
+    if how == "term":
+        proc.send_signal(signal.SIGTERM)
+        out, err = proc.communicate(timeout=30)
+    else:
+        out, err = proc.communicate(timeout=30)  # communicate closes stdin: end of input
+    return proc.returncode, out, stream, clk
+
+text_ck = churn(300)
+hashes = set()
+for how, seed in (("eof", 1), ("eof", 2), ("eof", 3), ("term", 4)):
+    rc, out, stream, clk = live_with_clock(text_ck, how, seed)
+    ends = [l.split()[0] for l in open(clk)]
+    rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
+    tag = "clock %s/%d" % (how, seed)
+    check(rc == 0 and rep.returncode == 0, tag + ": both exit 0 (%s, %s)\n%s" % (rc, rep.returncode, rep.stderr))
+    check(wire_hash(out) and wire_hash(out) == wire_hash(rep.stdout), tag + ": replay with the clock gives the live hash (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
+    orders_line = lambda o: [l.strip() for l in o.splitlines() if l.strip().startswith("orders:")]
+    check(orders_line(out) == orders_line(rep.stdout) and orders_line(out), tag + ": and the same orders line, the kill sweep included: %s vs %s" % (orders_line(out), orders_line(rep.stdout)))
+    check(ends[-1] == ("K" if how == "term" else "S") and ends.count("L") == len(text_ck.splitlines()), tag + ": clock file: one L per line, ends with %s (%s, %d L of %d lines)" % ("K" if how == "term" else "S", ends[-1], ends.count("L"), len(text_ck.splitlines())))
+    check("P" in ends, tag + ": polls are recorded")
+    check(re.search(r"orders: [1-9]\d* new", out) is not None and re.search(r"orders: \d+ new, [1-9]\d* replace", out) is not None, tag + ": a real order flow")
+    if how == "term":
+        check("by kill" in out and re.search(r"\(\d+ by pulls, [1-9]\d* by kill\)", out), tag + ": the live run had a kill sweep")
+    hashes.add(wire_hash(out))
+    os.remove(stream); os.remove(clk)
+# refusals
+rfd, wfd = os.pipe()
+for args, what, word in ((["--clock-in", "/dev/null"], "--clock-in without --from", "--clock-in needs --from"),
+                         (["--clock-out", "/tmp/x.clk", "--from", "/dev/null"], "--clock-out with --from", "--clock-out records"),
+                         (["--clock-out", "/tmp/x.clk", "--exchange-fd", str(rfd)], "--clock-out with --exchange-fd", "--clock-out records"),
+                         (["--clock-out", "/nonexistent-dir/x.clk"], "unwritable --clock-out", "cannot write")):
+    p_ = subprocess.run([BIN] + args, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL, pass_fds=(rfd,))
+    check(p_.returncode == 1 and word in p_.stderr, "clock: %s: exit 1 with the reason (rc=%d) %s" % (what, p_.returncode, p_.stderr[:80]))
+os.close(rfd); os.close(wfd)
+# the clock of a killed process has no final line: the replay still runs to the end of what was recorded
+rc, out, stream, clk = live_with_clock(text_ck, "eof", 9)
+full = open(clk).read().splitlines(True)
+open(clk, "w").write("".join(full[:-1]))
+rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
+check(rep.returncode == 0 and wire_hash(out) == wire_hash(rep.stdout), "clock: no final line: replay still gives the same hash (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
+os.remove(stream); os.remove(clk)
+# a clock file with more lines than the stream
+sp = tempfile.mktemp(suffix=".l2"); cp = tempfile.mktemp(suffix=".clk")
+open(sp, "w").write(snap(1_000_000)); open(cp, "w").write("L 1000000\nL 1000100\nS 1000200\n")
+p_ = subprocess.run([BIN, "--from", sp, "--clock-in", cp], capture_output=True, text=True, timeout=20)
+check(p_.returncode == 1 and "more lines" in p_.stderr, "clock: a clock file longer than the stream is refused (rc=%d)" % p_.returncode)
+os.remove(sp); os.remove(cp)
 
 if failures:
     sys.exit("%d live tool test failures" % failures)

@@ -1,6 +1,6 @@
 # ADR 48: A live run replays to its hash only when no decision depends on message timing
 
-Status: Accepted
+Status: Accepted (the reproduction it asks for is ADR 49)
 
 ## Context
 ADR 46 recorded each supervised run's stream and expected `hft_live --from` to reproduce the live order-flow hash. In Phase 41 three runs did, and ADR 47 fixed a real cause of one mismatch (the kill sweep). Phase 44 ran 30 minutes with eight recorded runs and only one matched; seven ended by themselves or by SIGTERM with live and replay hashes that differed, with small count differences (for example 4,420 against 4,421 replaces).
@@ -20,4 +20,4 @@ Tests on the Phase 44 recording of run 1 (4,208 lines):
 ## Consequences
 - The Phase 41 expectation "a run that ends by itself replays to its live hash" is withdrawn as a general claim. It held for four runs and failed for seven in Phase 44.
 - It is not known whether Phase 41's SIGTERM mismatch was the kill sweep, timing, or both. The sweep was a real cause (unit test); the timing effect was not known then.
-- A live run that must be reproduced exactly needs the arrival clock recorded, or a capture stamp used as the live clock. Not built.
+- A live run that must be reproduced exactly needs the arrival clock recorded, or a capture stamp used as the live clock. Built in ADR 49 as a recorded clock (`--clock-out`, `--clock-in`).

@@ -179,6 +179,10 @@ def main(argv=None):
         if a.record_dir:
             os.makedirs(a.record_dir, exist_ok=True)
             rec = os.path.join(a.record_dir, "stream.%d.txt" % run_no)
+        clk = None
+        if rec and not a.loop:  # a closed loop takes the exchange's reports as input; they are not recorded (ADR 49)
+            clk = os.path.join(a.record_dir, "clock.%d.txt" % run_no)
+        live_rec = ["--clock-out", clk] if clk else []
         cap = subprocess.Popen(capture_cmd + (["--tee", rec] if rec else []), stdout=w, stderr=cap_err, start_new_session=True)
         os.close(w)
         bridge = None
@@ -193,7 +197,7 @@ def main(argv=None):
                 rr, rw = os.pipe()
                 extra_live += ["--exchange-fd", str(rr)]
                 keep.append(rr)
-            live = subprocess.Popen(live_cmd + extra_live, stdin=r, stdout=live_out, stderr=live_err,
+            live = subprocess.Popen(live_cmd + live_rec + extra_live, stdin=r, stdout=live_out, stderr=live_err,
                                     start_new_session=True, pass_fds=tuple(keep))
             bridge_out = open(os.path.join(a.run_dir, "bridge.out"), "ab")
             bridge_err = open(os.path.join(a.run_dir, "bridge.err"), "ab")
@@ -205,11 +209,11 @@ def main(argv=None):
                 os.close(rr)
                 os.close(rw)
         else:
-            live = subprocess.Popen(live_cmd, stdin=r, stdout=live_out, stderr=live_err, start_new_session=True)
+            live = subprocess.Popen(live_cmd + live_rec, stdin=r, stdout=live_out, stderr=live_err, start_new_session=True)
         os.close(r)
         t0 = time.monotonic()
         starts.append(time.time())
-        log.emit("pair_start", run=run_no, capture_pid=cap.pid, live_pid=live.pid, bridge_pid=bridge.pid if bridge else None, record=rec)
+        log.emit("pair_start", run=run_no, capture_pid=cap.pid, live_pid=live.pid, bridge_pid=bridge.pid if bridge else None, record=rec, clock=clk)
 
         why = None
         wd_who = None

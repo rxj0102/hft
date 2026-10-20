@@ -378,7 +378,7 @@ void write_metrics(const std::string& path, const feed::LiveSession& s, double u
 int main(int argc, char** argv) {
   feed::LiveConfig lc;
   lc.timed = true;
-  std::string from, resnap_file, log_path, metrics_path, position_file;
+  std::string from, resnap_file, log_path, metrics_path, position_file, clock_out, clock_in;
   double metrics_s = 5.0, mid_sample_ms = 0.0;
   double pace = 0.0, report_s = 10.0, max_seconds = 0.0;
   bool spin = false;
@@ -402,6 +402,8 @@ int main(int argc, char** argv) {
     else if (a == "--report-s" && num(v) && v > 0) report_s = v;
     else if (a == "--max-seconds" && num(v) && v > 0) max_seconds = v;
     else if (a == "--resnap-file" && i + 1 < argc) resnap_file = argv[++i];
+    else if (a == "--clock-out" && i + 1 < argc) clock_out = argv[++i];
+    else if (a == "--clock-in" && i + 1 < argc) clock_in = argv[++i];
     else if (a == "--spin") spin = true;
     else if (a == "--log" && i + 1 < argc) log_path = argv[++i];
     else if (a == "--metrics" && i + 1 < argc) metrics_path = argv[++i];
@@ -416,7 +418,7 @@ int main(int argc, char** argv) {
     else {
       std::fprintf(stderr,
                    "usage: hft_live [--from capture.l2 [--pace X]] [--stale-ms N] [--rtt-us N] [--lots N] [--levels N]\n"
-                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S] [--close-position [--close-collar-bps N]] [--position-file PATH]] [--mid-sample-ms N]\n"
+                   "                [--max-orders N] [--check-every N] [--report-s S] [--max-seconds S] [--resnap-file PATH] [--spin] [--clock-out FILE | --from F --clock-in FILE]\n                [--log FILE|-] [--metrics FILE] [--metrics-s S] [--orders-fd N [--exchange-fd N] [--flatten-timeout-s S] [--close-position [--close-collar-bps N]] [--position-file PATH]] [--mid-sample-ms N]\n"
                    "reads capture-format lines from stdin unless --from is given\n");
       return 1;
     }
@@ -443,6 +445,10 @@ int main(int argc, char** argv) {
   }
   OrderOut* oo = orders_fd >= 0 ? &oout : nullptr;
   ReportIn rin;
+  if ((!clock_out.empty() && (exchange_fd >= 0 || !from.empty())) || (!clock_in.empty() && from.empty())) {
+    std::fprintf(stderr, "--clock-out records a live run without --exchange-fd (the exchange's reports are not recorded); --clock-in needs --from\n");
+    return 1;
+  }
   if (lc.close_position && exchange_fd < 0) {
     std::fprintf(stderr, "--close-position needs --exchange-fd (closing needs the exchange's reports)\n");
     return 1;
@@ -643,7 +649,50 @@ int main(int argc, char** argv) {
     }
   };
 
-  if (!from.empty()) {
+  // --clock-out: every time value handed to the session, in order (L line, P poll, K or S the end). With --from and
+  // --clock-in the same values are replayed, so a live run can be reproduced exactly (ADR 48, 49).
+  std::FILE* clock_f = nullptr;
+  if (!clock_out.empty()) {
+    clock_f = std::fopen(clock_out.c_str(), "w");
+    if (!clock_f) {
+      std::fprintf(stderr, "cannot write %s\n", clock_out.c_str());
+      return 1;
+    }
+  }
+  auto stamp = [&](char kind) {
+    const std::uint64_t t = now_ns();
+    if (clock_f) std::fprintf(clock_f, "%c %llu\n", kind, static_cast<unsigned long long>(t));
+    return t;
+  };
+
+  if (!from.empty() && !clock_in.empty()) {
+    std::ifstream in(from, std::ios::binary), ck(clock_in);
+    if (!in || !ck) {
+      std::fprintf(stderr, "cannot read %s\n", in ? clock_in.c_str() : from.c_str());
+      return 1;
+    }
+    std::string line;
+    char kind = 0, end_kind = 0;
+    unsigned long long t = 0;
+    while (!g_stop && ck >> kind >> t) {
+      if (kind == 'L') {
+        if (!std::getline(in, line)) {
+          std::fprintf(stderr, "clock file has more lines than %s\n", from.c_str());
+          return 1;
+        }
+        session.on_line(line, t);
+      } else if (kind == 'P') {
+        session.poll(t);
+      } else {
+        end_kind = kind;
+        last_now = t;
+        break;
+      }
+      last_now = t;
+    }
+    if (g_stop || end_kind == 'K') session.kill(last_now);
+    else session.shutdown(last_now);
+  } else if (!from.empty()) {
     std::ifstream in(from, std::ios::binary);
     if (!in) {
       std::fprintf(stderr, "cannot read %s\n", from.c_str());
@@ -697,7 +746,7 @@ int main(int argc, char** argv) {
           carry.append(buf, static_cast<std::size_t>(n));
           std::size_t pos = 0, nl;
           while ((nl = carry.find('\n', pos)) != std::string::npos) {
-            session.on_line(std::string_view(carry).substr(pos, nl - pos), now_ns());
+            session.on_line(std::string_view(carry).substr(pos, nl - pos), stamp('L'));
             pos = nl + 1;
             after_line();
           }
@@ -705,7 +754,7 @@ int main(int argc, char** argv) {
           if (carry.size() > (1u << 22)) carry.clear();  // a "line" this long is not from our capture script
         }
       } else if (r == 0 || session.busy()) {
-        session.poll(now_ns());
+        session.poll(stamp('P'));
         after_line();
       }
       if (rin.lost && !lost_handled) {  // the bridge died: nobody will confirm anything; stop and say so
@@ -717,7 +766,7 @@ int main(int argc, char** argv) {
       periodic();
       if (max_seconds > 0 && secs() >= max_seconds) break;
     }
-    last_now = now_ns();
+    last_now = stamp(g_stop || exchange_lost ? 'K' : 'S');
     if (g_stop || exchange_lost) session.kill(last_now);
     else session.shutdown(last_now);
     // External venue: the segment is over only when the exchange has confirmed the cancels (or the timeout passed).
@@ -726,7 +775,7 @@ int main(int argc, char** argv) {
       pollfd q{rin.fd, POLLIN, 0};
       ::poll(&q, 1, 2);
       pump_reports();
-      session.poll(now_ns());
+      session.poll(stamp('P'));
       after_line();
       oout.flush();
     }

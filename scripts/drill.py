@@ -755,8 +755,44 @@ async def drill_record_term(feed, port):
           "the replay of the cut recording gives the live hash (%s vs %s)" % (h and h.group(1), m2 and m2.group(1)))
     check(bool(re.search(r"orders: [1-9]\d* new", rep.stdout)) and bool(re.search(r"\(0 by pulls, [1-9]\d* by kill\)", out)),
           "and it is a real order flow, with a kill sweep in the live run")
+    # with the live run's own clock the whole recording replays, not only a cut of it, and exactly
+    clk = os.path.join(base, "clock.1.txt")
+    check(os.path.exists(clk) and open(clk).read().rstrip().splitlines()[-1].startswith("K "), "the clock file ends with the kill")
+    rep2 = subprocess.run([LIVE, "--from", first, "--clock-in", clk], capture_output=True, text=True, timeout=60)
+    m3 = re.search(r"wire hash of the order flow the feed caused \(flatten excluded\): ([0-9a-f]+)", rep2.stdout)
+    check(rep2.returncode == 0 and m3 is not None and h is not None and m3.group(1) == h.group(1),
+          "replayed with the live run's clock: the same hash (%s vs %s)" % (h and h.group(1), m3 and m3.group(1)))
+    check("by kill" in rep2.stdout and bool(re.search(r"\(0 by pulls, [1-9]\d* by kill\)", rep2.stdout)), "and the replay ends by the kill too")
     r.cleanup()
     shutil.rmtree(base, ignore_errors=True)
+
+
+async def drill_record_modes(feed, port):
+    """--record-dir with a bridge keeps the clock too; in a closed loop the exchange's reports are inputs that are not
+    recorded, so there is a stream but no clock, and the run is unharmed."""
+    import re
+    for mode in ("bridge", "loop"):
+        base = tempfile.mkdtemp(prefix="drill-recmode-")
+        ex = new_exchange()
+        r = (bridge_run if mode == "bridge" else loop_run)(feed, port, ex, extra=["--record-dir", base])
+        check(await until(lambda: ex.open_orders(), 20), mode + ": the quotes reach the exchange with recording on")
+        st = r.sup("pair_start")[0]
+        check(st.get("record") == os.path.join(base, "stream.1.txt"), mode + ": the stream is recorded")
+        if mode == "bridge":
+            check(st.get("clock") == os.path.join(base, "clock.1.txt"), "bridge: the clock is recorded: %s" % st.get("clock"))
+        else:
+            check(st.get("clock") is None, "loop: no clock file is requested: %s" % st.get("clock"))
+        check(await r.stop() == 0, mode + ": supervisor exits 0")
+        if mode == "bridge":
+            out = open(os.path.join(r.dir, "live.out")).read()
+            h = re.search(r"flatten excluded\): ([0-9a-f]+)", out)
+            rep = subprocess.run([LIVE, "--from", os.path.join(base, "stream.1.txt"), "--clock-in", os.path.join(base, "clock.1.txt")],
+                                 capture_output=True, text=True, timeout=60)
+            m2 = re.search(r"flatten excluded\): ([0-9a-f]+)", rep.stdout)
+            check(h and m2 and h.group(1) == m2.group(1), "bridge: replay with the clock gives the live hash (%s vs %s)" % (h and h.group(1), m2 and m2.group(1)))
+        ex.stop()
+        r.cleanup()
+        shutil.rmtree(base, ignore_errors=True)
 
 
 DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill_kill_capture),
@@ -768,7 +804,7 @@ DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill
           ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop),
           ("loop_close", drill_loop_close), ("loop_close_no_liquidity", drill_loop_close_no_liquidity), ("loop_close_off_market", drill_loop_close_off_the_market),
           ("loop_carry_restart", drill_loop_carry_restart),
-          ("loop_account_mismatch", drill_loop_account_mismatch), ("record", drill_record), ("record_term", drill_record_term)]
+          ("loop_account_mismatch", drill_loop_account_mismatch), ("record", drill_record), ("record_term", drill_record_term), ("record_modes", drill_record_modes)]
 
 
 async def main(only):
