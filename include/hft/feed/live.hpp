@@ -235,6 +235,16 @@ class LiveSession {
     deliver_due(*seg_, now);
   }
 
+  // True when poll(now) would change nothing: no segment is ending, the stale deadline is not reached, no venue
+  // report is due, and time does not run backwards. Such a poll need not be recorded to reproduce a run (ADR 52).
+  bool poll_idle(std::uint64_t now) const noexcept {
+    if (now < last_now_) return false;  // poll would count a time regression
+    if (seg_ && seg_->ending) return false;
+    if (halted_ || !seg_) return true;
+    if (now >= last_feed_ && now - last_feed_ >= cfg_.stale_ns) return false;
+    return !seg_->venue.has_due(now);
+  }
+
   // The next time poll() has something to do on its own (for driving recorded
   // time); ~0 when nothing is pending.
   std::uint64_t next_deadline() const noexcept { return seg_ && !halted_ ? last_feed_ + cfg_.stale_ns : ~0ULL; }

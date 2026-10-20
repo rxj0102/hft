@@ -53,3 +53,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 49. [Record the live clock so a live run can be reproduced exactly](adr/0049-record-the-live-clock-to-reproduce-a-live-run.md) (Accepted)
 50. [Record the exchange's reports in the clock file](adr/0050-record-the-exchanges-reports-in-the-clock-file.md) (Accepted)
 51. [The clock file carries the settings that change decisions](adr/0051-clock-file-carries-the-settings.md) (Accepted)
+52. [Record only the timer polls that can act](adr/0052-record-only-polls-that-can-act.md) (Accepted)

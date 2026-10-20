@@ -11,7 +11,7 @@ Status after Phases 41 to 47 (2026-10-20). This page says what can be reproduced
 1. Record the run: `python3 scripts/supervise.py --record-dir DIR ...` (or `capture_l2.py --tee STREAM | hft_live --clock-out CLOCK`). This keeps `DIR/stream.<run>.txt` and `DIR/clock.<run>.txt`. Do not commit them.
 2. Replay it: `hft_live --from DIR/stream.N.txt --clock-in DIR/clock.N.txt`. No other flags are needed.
 
-The clock file holds, in order: whether an exchange was behind the run (`H`), the nine settings that change decisions (`C`: stale-ms, rtt-us, lots, levels, max-orders, check-every, flatten-timeout, close-position, close-collar-bps), and then one line per time value handed to the session: input line (`L`), idle poll (`P`), exchange report with its text (`R`), and the end (`K` for a signal, `S` for end of input). A flag given by hand that conflicts with the file loses, with one warning. The replay prints only the summary.
+The clock file holds, in order: whether an exchange was behind the run (`H`), the nine settings that change decisions (`C`: stale-ms, rtt-us, lots, levels, max-orders, check-every, flatten-timeout, close-position, close-collar-bps), and then one line per time value handed to the session: input line (`L`), timer poll that could act (`P`, ADR 52; polls that change nothing are left out), exchange report with its text (`R`), and the end (`K` for a signal, `S` for end of input). A flag given by hand that conflicts with the file loses, with one warning. The replay prints only the summary.
 
 ## What was shown
 
@@ -41,8 +41,8 @@ Mutation checks were run for each step; the counts and the survivors are in the 
 - A new setting added to the program must also be added to the `C` line, or replays will silently differ (ADR 51).
 - Real arrival patterns: the 8 streams in the strongest evidence were piped at file speed, not received in real time.
 - Paper venue only: it never fills.
-- Size: clock files are about 14 times the size of the stream (91 MB against 6.7 MB in 2 hours), because idle polls are recorded.
+- Size: Phase 49's clocks were about 14 times the stream (91 MB against 6.7 MB in 2 hours) because every idle poll was recorded. Since ADR 52 only polls that can act are recorded; a 60 s paced run gave 447 line records and 45 polls (6.9 KB). The soak was not repeated in real time with the new format.
 
 ## Related
 
-[RUNBOOK.md](RUNBOOK.md) (running and recording), [SANDBOX.md](SANDBOX.md) (the runs), ADRs [46](adr/0046-record-the-stream-of-a-supervised-run.md), [47](adr/0047-kill-sweep-is-not-in-the-feed-hash.md), [48](adr/0048-live-hash-equals-replay-hash-only-without-timing-effects.md), [49](adr/0049-record-the-live-clock-to-reproduce-a-live-run.md), [50](adr/0050-record-the-exchanges-reports-in-the-clock-file.md), [51](adr/0051-clock-file-carries-the-settings.md).
+[RUNBOOK.md](RUNBOOK.md) (running and recording), [SANDBOX.md](SANDBOX.md) (the runs), ADRs [46](adr/0046-record-the-stream-of-a-supervised-run.md), [47](adr/0047-kill-sweep-is-not-in-the-feed-hash.md), [48](adr/0048-live-hash-equals-replay-hash-only-without-timing-effects.md), [49](adr/0049-record-the-live-clock-to-reproduce-a-live-run.md), [50](adr/0050-record-the-exchanges-reports-in-the-clock-file.md), [51](adr/0051-clock-file-carries-the-settings.md), [52](adr/0052-record-only-polls-that-can-act.md).

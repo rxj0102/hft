@@ -1,6 +1,6 @@
 # ADR 49: Record the live clock so a live run can be reproduced exactly
 
-Status: Accepted (extended by ADR 50: header line and exchange reports)
+Status: Accepted (extended by ADR 50: header line and exchange reports; ADR 52: only polls that can act are recorded)
 
 ## Context
 ADR 48 found that a live run's order flow depends on message arrival times, which replay does not have (it uses the capture's stamps), so live and replay hashes mostly differ. To check that the live code path is deterministic given its inputs, the inputs must include the clock.
@@ -14,5 +14,5 @@ ADR 48 found that a live run's order flow depends on message arrival times, whic
 ## Consequences
 - A recorded run replays to its live hash exactly, including when it ended by SIGTERM, whatever the arrival timing was. Tested: the same stream fed live with different burst patterns gives different hashes, and each replays exactly with its own clock.
 - Costs when the flag is on: one buffered `fprintf` per input line and per idle poll in the tool's loop, outside the engine. Off by default: a null check. The perf gate was not rerun; the engine is untouched.
-- Size: idle polls (about 1,000 a second) dominate the file; in a 2-hour soak the clocks were 91 MB against 6.7 MB of stream.
+- Size: as first written, idle polls (about 1,000 a second) dominated the file; in a 2-hour soak the clocks were 91 MB against 6.7 MB of stream. ADR 52 records only polls that can act.
 - Not covered: reports from a real or fake exchange (`--exchange-fd`), the wall-clock-dependent logging and metrics (they do not feed decisions), and a process killed by SIGKILL.

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 50: the clock file records only polls that can act
+
+- `LiveSession::poll_idle(now)` says a timer poll would change nothing; `--clock-out` writes only the other polls (ADR 52). Format unchanged; older files still replay. Tests: a property test (4,000 random steps, one session polling always against one polling only when not idle: counters, segment hashes, frame counts and reasons equal; idle polls change nothing; a poll from the past is not idle), and a tool test of 1.5 s of silence past a 1 s stale limit (about 1,500 idle polls, 1 to 5 recorded, quotes pulled, same hash on replay). Mutation: 11 mutants; one survives by design (not making the idle polls at all is equivalent, which is the claim); one survivor killed by a new case (time regression).
+- Measured: a real-time paced 60 s feed (447 lines) made a clock of 447 L and 45 P lines (6.9 KB); the Phase 49 clocks averaged about 860 poll lines a second (91 MB in 2 h). The 24 soak streams piped at file speed with the new format replay exactly (24 of 24); that run alone says nothing about size, since file-speed piping has almost no idle time. The clock is now roughly the size of the stream.
+
 ### Phase 49: a 2-hour recorded soak, every run replayed from its clock
 
 - `supervise.py --record-dir` on the sandbox feed (URL given explicitly), 300 s runs, 24 runs in 7,200 s, one hand-injected SIGKILL of `hft_live` at 3,600 s, SIGTERM at the end (exit 0). All 23 runs that printed a summary replay from their stream and clock to the same wire hash and orders line (23 of 23; 4,503 replaces in 101 segments); the SIGKILLed run's clock ends without an end record and still replays to completion. No desyncs, book errors, model-check failures, risk rejects or stale pulls; 74 window exits with 74 resubscribes. Cost: the clocks are 91 MB against 6.7 MB of stream, because idle polls (about 1,000 a second) dominate. No code changed. One session on a thin sandbox book, paper venue only.

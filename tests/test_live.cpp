@@ -563,6 +563,70 @@ void test_kill_after_quiet_period() {
 
 // The order flow "the feed caused" (the hash a run prints, compared between a live run and its replay) must not
 // include what the end of the run sends: the kill sweep is teardown, like the flatten after a shutdown.
+// A poll that poll_idle() calls idle changes nothing: leaving it out gives the same run (ADR 52).
+void test_idle_polls_change_nothing() {
+  LiveConfig c = small_cfg();
+  c.stale_ns = 400'000;  // short, so the script crosses the stale deadline now and then
+  LiveSession a(c), b(c);  // a polls at every chance, b only when poll_idle() says the poll could act
+  warm_up(a, 1'000'000);
+  warm_up(b, 1'000'000);
+  auto sig = [](const LiveSession& s) {
+    const LiveStats& st = s.stats();
+    return std::vector<std::uint64_t>{s.open_orders(), st.stale_events, st.sent_new, st.sent_replace, st.sent_cancel, st.reports,
+                                      st.acc, st.rep, st.canc, st.segments, st.pulled_cancels, st.time_regressions, s.active() ? 1u : 0u};
+  };
+  std::uint64_t t = 1'004'000, rng = 12345;
+  auto next = [&](std::uint64_t mod) {
+    rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (rng >> 33) % mod;
+  };
+  int idle = 0, busy = 0, lines = 0;
+  for (int i = 0; i < 4000; ++i) {
+    t += 1 + next(i % 400 == 399 ? 900'000 : 120'000);  // mostly short gaps, now and then a long silence
+    if (next(3) == 0) {
+      // a snapshot now and then restarts the segment after a stale pull
+      const std::string line = next(50) == 0 ? snapshot_line(t) : upd(t, "buy", "100.00", next(2) ? "5" : "0");
+      a.on_line(line, t);
+      b.on_line(line, t);
+      ++lines;
+      continue;
+    }
+    const bool is_idle = b.poll_idle(t);
+    CHECK(is_idle == a.poll_idle(t));  // the two sessions are in the same state
+    const auto before = sig(a);
+    a.poll(t);
+    if (is_idle) {
+      ++idle;
+      CHECK(sig(a) == before);  // an idle poll changed nothing
+    } else {
+      ++busy;
+      b.poll(t);
+    }
+  }
+  CHECK(idle > 500 && busy > 20 && lines > 500);  // the script has both kinds of poll
+  CHECK(sig(a) == sig(b));
+  a.shutdown(t + 10);
+  b.shutdown(t + 10);
+  CHECK(a.summaries().size() == b.summaries().size() && !a.summaries().empty());
+  for (std::size_t i = 0; i < a.summaries().size() && i < b.summaries().size(); ++i) {
+    CHECK(a.summaries()[i].hash_before_flatten == b.summaries()[i].hash_before_flatten);
+    CHECK(a.summaries()[i].frames_before_flatten == b.summaries()[i].frames_before_flatten);
+    CHECK(a.summaries()[i].reason == b.summaries()[i].reason);
+  }
+  CHECK(a.stats().stale_events == b.stats().stale_events && a.stats().stale_events > 0);
+
+  // A poll from the past is not idle: poll() counts it as a time regression. In a live run time does not go
+  // backwards, but a recorded file could say so, and the replay has to count it too.
+  LiveSession r(c);
+  warm_up(r, 1'000'000);  // the last time is 1'004'000; the orders' acks are due 50 us later
+  CHECK(!r.poll_idle(1'003'999));
+  CHECK(r.poll_idle(1'004'001));
+  CHECK(!r.poll_idle(1'054'000));  // the first ack is due: a poll here delivers it
+  CHECK(r.stats().time_regressions == 0);
+  r.poll(1'003'999);
+  CHECK(r.stats().time_regressions == 1);
+}
+
 void test_kill_sweep_is_not_in_the_feed_hash() {
   LiveSession a(small_cfg()), b(small_cfg());
   warm_up(a, 1'000'000);
@@ -1222,6 +1286,7 @@ int main() {
   test_kill_after_quiet_period();
   test_shutdown_is_not_a_kill();
   test_kill_sweep_is_not_in_the_feed_hash();
+  test_idle_polls_change_nothing();
   test_window_exit();
   test_integrity_failure_halts_and_flattens();
   test_final_mismatch_halts();

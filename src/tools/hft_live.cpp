@@ -587,6 +587,12 @@ int main(int argc, char** argv) {
     }
   }
   if (clock_f) std::fprintf(clock_f, "H %d\nC %s\n", exchange_fd >= 0 ? 1 : 0, cfg_text(lc).c_str());
+  // A timer poll is recorded only when it could act (ADR 52); the others change nothing, so a replay can leave them out.
+  auto poll_at = [&](feed::LiveSession& ses) {
+    const std::uint64_t t = now_ns();
+    if (clock_f && !ses.poll_idle(t)) std::fprintf(clock_f, "P %llu\n", static_cast<unsigned long long>(t));
+    ses.poll(t);
+  };
   auto stamp = [&](char kind, std::string_view text = {}) {
     const std::uint64_t t = now_ns();
     if (clock_f) std::fprintf(clock_f, "%c %llu%s%.*s\n", kind, static_cast<unsigned long long>(t), text.empty() ? "" : " ", static_cast<int>(text.size()), text.data());
@@ -819,7 +825,7 @@ int main(int argc, char** argv) {
           if (carry.size() > (1u << 22)) carry.clear();  // a "line" this long is not from our capture script
         }
       } else if (r == 0 || session.busy()) {
-        session.poll(stamp('P'));
+        poll_at(session);
         after_line();
       }
       if (rin.lost && !lost_handled) {  // the bridge died: nobody will confirm anything; stop and say so
@@ -840,7 +846,7 @@ int main(int argc, char** argv) {
       pollfd q{rin.fd, POLLIN, 0};
       ::poll(&q, 1, 2);
       pump_reports();
-      session.poll(stamp('P'));
+      poll_at(session);
       after_line();
       oout.flush();
     }

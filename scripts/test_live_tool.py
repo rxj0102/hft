@@ -704,6 +704,25 @@ open(clk, "w").write("".join(full[:-1]))
 rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
 check(rep.returncode == 0 and wire_hash(out) == wire_hash(rep.stdout), "clock: no final line: replay still gives the same hash (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
 os.remove(stream); os.remove(clk)
+# only polls that can act are recorded (ADR 52): a long silence is hundreds of idle polls and one that pulls the quotes
+text_st = churn(100) + churn(100)  # the second snapshot restarts the segment after the stale pull
+stream = tempfile.mktemp(suffix=".l2"); clk = tempfile.mktemp(suffix=".clk")
+open(stream, "w").write(text_st)
+proc = subprocess.Popen([BIN, "--report-s", "1000", "--stale-ms", "1000", "--clock-out", clk], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+lines_st = text_st.splitlines(True)
+proc.stdin.write("".join(lines_st[:101])); proc.stdin.flush()
+wait_idle(proc.pid)
+time.sleep(1.5)  # 1.5 s of silence, 1 s is the limit (starting a segment takes a few hundred ms)
+proc.stdin.write("".join(lines_st[101:])); proc.stdin.flush()
+wait_idle(proc.pid)
+out, err = proc.communicate(timeout=30)
+kinds = [l.split()[0] for l in open(clk)]
+check("1 stale-feed pulls" in out, "idle polls: the silence pulled the quotes once: %s" % [l for l in out.splitlines() if "stale" in l][:1])
+check(1 <= kinds.count("P") <= 5 and kinds.count("L") == len(lines_st), "idle polls: about 1,500 idle polls, %d recorded (the one that pulled), %d lines" % (kinds.count("P"), kinds.count("L")))
+rep = subprocess.run([BIN, "--from", stream, "--clock-in", clk, "--report-s", "1000"], capture_output=True, text=True, timeout=60)
+check(wire_hash(out) and wire_hash(out) == wire_hash(rep.stdout) and "1 stale-feed pulls" in rep.stdout, "idle polls: and the replay pulls the quotes at the same point, same hash (%s vs %s)" % (wire_hash(out), wire_hash(rep.stdout)))
+os.remove(stream); os.remove(clk)
+
 # a clock file without the "H" line (written before there was one) is a run without an exchange
 rc, out, stream, clk = live_with_clock(text_ck, "eof", 11)
 lines_ = open(clk).read().splitlines(True)
