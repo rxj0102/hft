@@ -727,6 +727,38 @@ async def drill_record(feed, port):
     shutil.rmtree(base, ignore_errors=True)
 
 
+async def drill_record_term(feed, port):
+    """A run stopped by SIGTERM prints a summary too. Its recording, cut to the lines hft_live says it read, replays to
+    the same order-flow hash: the kill sweep is not part of it (ADR 47)."""
+    import re
+    base = tempfile.mkdtemp(prefix="drill-recterm-")
+    cap = ("%s %s --url ws://127.0.0.1:%d --out - --seconds 60 --idle-timeout 2 --resnap-file {resnap}" %
+           (sys.executable, os.path.join(HERE, "capture_l2.py"), port))
+    r = Run(feed, port, extra=("--record-dir", base, "--stale-ms", "5000"), capture_cmd=cap)
+    check(await quoting(r), "a segment started and is quoting")
+    await asyncio.sleep(1.5)
+    check(await r.stop() == 0, "supervisor exits 0 on SIGTERM")
+    out = open(os.path.join(r.dir, "live.out")).read()
+    h = re.search(r"wire hash of the order flow the feed caused \(flatten excluded\): ([0-9a-f]+)", out)
+    n = re.search(r"input: (\d+) lines", out)
+    check(h is not None and n is not None and "stopped by signal" in out, "hft_live printed a summary after the signal")
+    ends = r.live_events("segment_end")
+    check(ends and ends[-1]["reason"] == "kill", "the segment ended by the kill: %s" % (ends[-1:],))
+    cut = os.path.join(base, "cut.txt")
+    first = os.path.join(base, "stream.1.txt")
+    keep = int(n.group(1)) if n else 0
+    with open(first) as f, open(cut, "w") as g:
+        g.writelines(l for _, l in zip(range(keep), f))
+    rep = subprocess.run([LIVE, "--from", cut], capture_output=True, text=True, timeout=60)
+    m2 = re.search(r"wire hash of the order flow the feed caused \(flatten excluded\): ([0-9a-f]+)", rep.stdout)
+    check(rep.returncode == 0 and m2 is not None and h is not None and h.group(1) == m2.group(1),
+          "the replay of the cut recording gives the live hash (%s vs %s)" % (h and h.group(1), m2 and m2.group(1)))
+    check(bool(re.search(r"orders: [1-9]\d* new", rep.stdout)) and bool(re.search(r"\(0 by pulls, [1-9]\d* by kill\)", out)),
+          "and it is a real order flow, with a kill sweep in the live run")
+    r.cleanup()
+    shutil.rmtree(base, ignore_errors=True)
+
+
 DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill_kill_capture),
           ("kill_live", drill_kill_live), ("hang", drill_hang), ("sigterm", drill_sigterm), ("term_ignored", drill_term_ignored),
           ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity),
@@ -736,7 +768,7 @@ DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill
           ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop),
           ("loop_close", drill_loop_close), ("loop_close_no_liquidity", drill_loop_close_no_liquidity), ("loop_close_off_market", drill_loop_close_off_the_market),
           ("loop_carry_restart", drill_loop_carry_restart),
-          ("loop_account_mismatch", drill_loop_account_mismatch), ("record", drill_record)]
+          ("loop_account_mismatch", drill_loop_account_mismatch), ("record", drill_record), ("record_term", drill_record_term)]
 
 
 async def main(only):

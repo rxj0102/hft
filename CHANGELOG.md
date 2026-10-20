@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 43: drill for the SIGTERM replay
+
+- New `record_term` drill (30 drills): a supervised, recorded run is stopped by SIGTERM; the recording, cut to the lines `hft_live` reports reading, replays to the live order-flow hash, and the live run had a kill sweep. Mutation: reverting the Phase 42 fix makes the drill fail (hash differs); restored, it passes. Fake feed only.
+
 ### Phase 42: a SIGTERM-ended run now replays to its live hash
 
 - Cause of the Phase 41 mismatch found by a unit test (3 checks failed before the fix): the kill sweep's cancels were counted in `hash_before_flatten` and `frames_before_flatten`, while a normal end leaves them to the flatten, which the hash excludes. `Live::kill()` now takes the segment's numbers before the sweep (ADR 47). Stop path only; the hot path is untouched.

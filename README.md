@@ -55,7 +55,7 @@ Everything that needs no key runs locally:
 
 ```
 pip install -r scripts/requirements.txt
-scripts/ci_local.sh                 # after the release build: all Python suites and the 29 drills against local fakes
+scripts/ci_local.sh                 # after the release build: all Python suites and the 30 drills against local fakes
 ```
 
 Running against the real sandbox (your own key, on a profile used only for this; set it in environment variables and never paste it anywhere):
