@@ -16,3 +16,6 @@ With N around 5 a capture has a real chance of at least one narrow snapshot even
 ## Rejected
 - Choosing the narrowest snapshot in the capture tool: it would hide how many were wide, which is a finding about the sandbox.
 - A wider replay window for the check: ADR 41.
+
+## Measured (addendum, same day)
+First real run (SANDBOX.md): five snapshots, all narrow this time, each with 3 or 4 levels inside the window, 16 of 16 identical. The levels were mostly the same few at the touch, so the sum is not 16 independent checks; the value was seeing the touch change between snapshots and the replay follow it. How often snapshots are wide did not matter in this run.

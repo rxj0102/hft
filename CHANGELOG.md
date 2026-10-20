@@ -5,7 +5,7 @@
 ### Phase 38: several exchange snapshots for the verify check
 
 - `capture_l2.py --verify --verify-count N` takes N exchange snapshots near the end of the capture; `hft_replay --verify` checks each and sums them (ADR 45), because about half the sandbox's snapshots are wider than the replay window and cannot be compared. A one-line verify file prints as before. New tests in `test_capture.py` and `test_replay_cli.py`. Mutation checks: 29 mutants, 2 survived the first run (a no-op control, equivalent by construction; the summed absent count, test added), none now.
-- Not yet run against the sandbox.
+- First real run (600 s, 5 snapshots): all five fetched and compared, 16 of 16 levels identical (3 or 4 per snapshot; 84 more outside the window). Sizes at the touch changed across the snapshots and the replay matched each time. The five are within 9 s of each other, not independent. Details in docs/SANDBOX.md.
 
 ### Phase 37: the drift rule, fixed with the data from the first real run
 
