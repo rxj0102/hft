@@ -21,6 +21,7 @@ The clock file holds, in order: whether an exchange was behind the run (`H`), th
 | Live and stamp replay agree only if no decision depends on timing (ADR 48) | Phase 44: 1 of 8 runs matched. The same file piped into live mode 3 times gave 3 hashes; replay twice gave one | 8 runs, 30 min, one feed |
 | With the clock, a live run replays exactly (ADR 49) | The 8 Phase 44 streams piped live and replayed from their clocks: 8 of 8. Two sandbox runs (one ended by SIGTERM): 2 of 2. Four test runs fed in random bursts: 4 of 4 | small; the 8 were piped at file speed |
 | With the exchange's reports, a closed loop replays exactly (ADR 50) | Six scripted-exchange cases (normal, close, failed close, silent, garbage, wrong segment) match in hash, summary, exit code and order frames; 3 recorded streams driven through the scripted exchange, with and without closing: 6 of 6 | fake exchange only |
+| A long supervised session reproduces run by run | Phase 49: 2 hours on the sandbox feed, 24 runs, one SIGKILL: 23 of 23 summaries replay exactly; the killed run's cut clock replays to its end | one session, thin book |
 | The settings travel with the clock (ADR 51) | A replay with no flags matches a live run with non-default settings; each of the nine flags alone against the file warns and loses | tests |
 
 Mutation checks were run for each step; the counts and the survivors are in the CHANGELOG.
@@ -33,13 +34,14 @@ Mutation checks were run for each step; the counts and the survivors are in the 
 
 ## Not covered
 
-- A SIGKILLed process: no summary, and its clock is cut off without an end record. Only tested on a file cut by hand.
+- A SIGKILLed process: no summary, and its clock is cut off without an end record. The replay of that clock runs to the end of what was recorded (shown once, Phase 49), but there is nothing from the live process to compare it with.
 - `--position-file` (the account check is not recorded; `--clock-out` is refused with it).
 - Any real or sandbox exchange behind the loop. The signed side has never been run (no secret or passphrase). Everything in the closed-loop rows above is the repo's scripted exchange.
 - `--max-orders` is recorded and applied but no test can show it matters.
 - A new setting added to the program must also be added to the `C` line, or replays will silently differ (ADR 51).
 - Real arrival patterns: the 8 streams in the strongest evidence were piped at file speed, not received in real time.
 - Paper venue only: it never fills.
+- Size: clock files are about 14 times the size of the stream (91 MB against 6.7 MB in 2 hours), because idle polls are recorded.
 
 ## Related
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 49: a 2-hour recorded soak, every run replayed from its clock
+
+- `supervise.py --record-dir` on the sandbox feed (URL given explicitly), 300 s runs, 24 runs in 7,200 s, one hand-injected SIGKILL of `hft_live` at 3,600 s, SIGTERM at the end (exit 0). All 23 runs that printed a summary replay from their stream and clock to the same wire hash and orders line (23 of 23; 4,503 replaces in 101 segments); the SIGKILLed run's clock ends without an end record and still replays to completion. No desyncs, book errors, model-check failures, risk rejects or stale pulls; 74 window exits with 74 resubscribes. Cost: the clocks are 91 MB against 6.7 MB of stream, because idle polls (about 1,000 a second) dominate. No code changed. One session on a thin sandbox book, paper venue only.
+
 ### Phase 48: one page on reproducing a live run
 
 - `docs/REPRODUCIBILITY.md`: how to record and replay exactly, the evidence by claim with its sample, what was withdrawn (Phase 41's general expectation, the "sandbox" label on the Phase 42 and 44 runs), and what is not covered. Documentation only; no code changed.

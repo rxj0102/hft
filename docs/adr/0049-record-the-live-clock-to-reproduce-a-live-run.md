@@ -14,4 +14,5 @@ ADR 48 found that a live run's order flow depends on message arrival times, whic
 ## Consequences
 - A recorded run replays to its live hash exactly, including when it ended by SIGTERM, whatever the arrival timing was. Tested: the same stream fed live with different burst patterns gives different hashes, and each replays exactly with its own clock.
 - Costs when the flag is on: one buffered `fprintf` per input line and per idle poll in the tool's loop, outside the engine. Off by default: a null check. The perf gate was not rerun; the engine is untouched.
+- Size: idle polls (about 1,000 a second) dominate the file; in a 2-hour soak the clocks were 91 MB against 6.7 MB of stream.
 - Not covered: reports from a real or fake exchange (`--exchange-fd`), the wall-clock-dependent logging and metrics (they do not feed decisions), and a process killed by SIGKILL.
