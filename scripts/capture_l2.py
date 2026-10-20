@@ -82,7 +82,7 @@ class DriftWatch:
 
 
 async def capture(url, product, channel, seconds, out_path, idle_timeout, max_reconnects, connect_fn=None,
-                  verify_path=None, resnap_file=None, poll_step=0.25, drift_usd=None, drift_min_s=1.0):
+                  verify_path=None, resnap_file=None, poll_step=0.25, drift_usd=None, drift_min_s=1.0, verify_count=1, verify_spacing=2.0):
     """Returns a dict of counters. `connect_fn` lets tests substitute a local server.
     `out_path` "-" streams to stdout. `resnap_file`: when this file exists, remove it and
     resubscribe (a new snapshot) on a fresh connection. `drift_usd`: do the same when the best
@@ -102,8 +102,9 @@ async def capture(url, product, channel, seconds, out_path, idle_timeout, max_re
     vtask = None
     if verify_path:
         # a second connection, opened while this one is live, near the end of the capture
-        vtask = asyncio.create_task(fetch_verify_snapshot(url, product, channel, verify_path, connect_fn,
-                                                          delay=max(seconds - 6.0, seconds * 0.5), t0_ns=t0))
+        vtask = asyncio.create_task(fetch_verify_snapshots(
+            url, product, channel, verify_path, connect_fn, delay=verify_delay(seconds, verify_count, verify_spacing),
+            t0_ns=t0, count=verify_count, spacing=verify_spacing))
     f = sys.stdout if streaming else open(out_path, "w", encoding="utf-8", newline="\n")
     try:
         f.write("#%d\tstart\t%s\t%s\n" % (now(), url, product))
@@ -182,22 +183,22 @@ async def capture(url, product, channel, seconds, out_path, idle_timeout, max_re
         if not streaming:
             f.close()
     if vtask:
-        stats["verify"] = await vtask
+        stats["verify_n"] = await vtask
+        stats["verify"] = stats["verify_n"] > 0
     return stats
 
 
-async def fetch_verify_snapshot(url, product, channel, verify_path, connect_fn=None, timeout=15.0, delay=0.0, t0_ns=None):
-    """Opens a second connection (after `delay` seconds) and writes the exchange's own
-    snapshot of the book to `verify_path` as one `<t_ns>\t<raw>` line, with t_ns on the
-    main capture's clock when `t0_ns` is given. The replay tool compares the book it
-    reconstructed as of that time with it: that checks that the update messages were
-    read correctly, which a self-consistency test cannot. Returns True on success."""
+def verify_delay(seconds, count, spacing):
+    """Seconds into the capture at which the first verify snapshot is asked for: late enough that the last one
+    arrives about 6 s before the end, but never earlier than half way."""
+    return max(seconds - 6.0 - (count - 1) * spacing, seconds * 0.5)
+
+
+async def fetch_one_snapshot(url, product, channel, connect_fn=None, timeout=15.0):
+    """One connection, one snapshot: returns (arrival time in monotonic ns, raw message) or None."""
     import websockets
 
     connect = connect_fn or (lambda u: websockets.connect(u, open_timeout=15, max_size=None))
-    t0 = t0_ns if t0_ns is not None else time.monotonic_ns()
-    if delay > 0:
-        await asyncio.sleep(delay)
     try:
         async with connect(url) as ws:
             await ws.send(json.dumps({"type": "subscribe", "product_ids": [product], "channels": [channel]}))
@@ -207,12 +208,40 @@ async def fetch_verify_snapshot(url, product, channel, verify_path, connect_fn=N
                 if isinstance(msg, bytes):
                     msg = msg.decode("utf-8", "replace")
                 if '"type":"snapshot"' in msg.replace(" ", ""):
-                    with open(verify_path, "w", encoding="utf-8", newline="\n") as f:
-                        f.write("%d\t%s\n" % (time.monotonic_ns() - t0, msg.replace("\n", " ")))
-                    return True
+                    return time.monotonic_ns(), msg.replace("\n", " ")
     except Exception:
         pass
-    return False
+    return None
+
+
+async def fetch_verify_snapshots(url, product, channel, verify_path, connect_fn=None, timeout=15.0, delay=0.0, t0_ns=None,
+                                 count=1, spacing=2.0):
+    """Opens `count` further connections, one after the other `spacing` seconds apart (the first after `delay`
+    seconds), and writes the exchange's own snapshots of the book to `verify_path`, one `<t_ns>\t<raw>` line each, with
+    t_ns on the main capture's clock when `t0_ns` is given. The replay tool compares the book it reconstructed as of
+    each time with it: that checks that the update messages were read correctly, which a self-consistency test cannot.
+    Several snapshots are asked for because the sandbox's snapshots are often wider than the replay's price window,
+    and such a snapshot cannot be compared. The file is written once at the end, and only if at least one snapshot was
+    fetched. Returns how many were written."""
+    t0 = t0_ns if t0_ns is not None else time.monotonic_ns()
+    if delay > 0:
+        await asyncio.sleep(delay)
+    lines = []
+    for k in range(count):
+        if k:
+            await asyncio.sleep(spacing)
+        got = await fetch_one_snapshot(url, product, channel, connect_fn, timeout)
+        if got:
+            lines.append("%d\t%s\n" % (got[0] - t0, got[1]))
+    if lines:
+        with open(verify_path, "w", encoding="utf-8", newline="\n") as f:
+            f.writelines(lines)
+    return len(lines)
+
+
+async def fetch_verify_snapshot(url, product, channel, verify_path, connect_fn=None, timeout=15.0, delay=0.0, t0_ns=None):
+    """One snapshot; True on success."""
+    return await fetch_verify_snapshots(url, product, channel, verify_path, connect_fn, timeout, delay, t0_ns) == 1
 
 
 def main(argv=None):
@@ -234,6 +263,9 @@ def main(argv=None):
                     help="at most one drift resubscribe per this many seconds (default 1). The sandbox sends a snapshot whose "
                          "touch is already wider than the replay window about half the time; without this the capture "
                          "reconnects as fast as it can until a narrow one comes")
+    ap.add_argument("--verify-count", type=int, default=1,
+                    help="with --verify: take this many exchange snapshots, about 2 s apart, ending near the end of the "
+                         "capture. The sandbox's snapshots are often wider than the replay window, and those cannot be compared")
     ap.add_argument("--verify", action="store_true",
                     help="near the end of the capture, fetch the exchange's own snapshot on a second connection into "
                          "<out>.verify, to check the replayed book against")
@@ -245,13 +277,13 @@ def main(argv=None):
     if a.verify and a.out == "-":
         sys.exit("--verify needs a file, not stdout")
     st = asyncio.run(capture(a.url, a.product, a.channel, a.seconds, a.out, a.idle_timeout, a.max_reconnects,
-                             verify_path=(a.out + ".verify") if a.verify else None, resnap_file=a.resnap_file, drift_usd=a.resnap_drift_usd, drift_min_s=a.resnap_min_s))
+                             verify_path=(a.out + ".verify") if a.verify else None, resnap_file=a.resnap_file, drift_usd=a.resnap_drift_usd, drift_min_s=a.resnap_min_s, verify_count=a.verify_count))
     out = sys.stderr if a.out == "-" else sys.stdout
     print("captured %(messages)d messages, %(reconnects)d reconnects, %(errors)d errors, %(resnaps)d resubscribes "
           "(%(drift_resnaps)d for price drift)" % st,
           file=out)
     if a.verify:
-        print("verify snapshot: %s" % ("written to " + a.out + ".verify" if st.get("verify") else "FAILED"))
+        print("verify snapshots: %s" % ("%d of %d written to %s.verify" % (st["verify_n"], a.verify_count, a.out) if st.get("verify") else "FAILED"))
     if a.out == "-":
         # If the reader went away, what is still buffered would be flushed at interpreter exit into the broken pipe and
         # print "Exception ignored ... BrokenPipeError". Flush now, and on failure point stdout at /dev/null (the recipe

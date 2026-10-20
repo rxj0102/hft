@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 38: several exchange snapshots for the verify check
+
+- `capture_l2.py --verify --verify-count N` takes N exchange snapshots near the end of the capture; `hft_replay --verify` checks each and sums them (ADR 45), because about half the sandbox's snapshots are wider than the replay window and cannot be compared. A one-line verify file prints as before. New tests in `test_capture.py` and `test_replay_cli.py`. Mutation checks: 29 mutants, 2 survived the first run (a no-op control, equivalent by construction; the summed absent count, test added), none now.
+- Not yet run against the sandbox.
+
 ### Phase 37: the drift rule, fixed with the data from the first real run
 
 - Offline on the 136 segments of the 600 s sandbox capture: the replay's own exit fires in 103 segments, the 200 USD rule in 135 (so it cut at least 32 usable ones), a rule measured from the snapshot's touch in only 28 (it misses 78 of the replay's exits, the wide snapshots). The touch rule is rejected; the recommended limit is now 262 USD (ADR 44).

@@ -46,3 +46,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 42. [A snapshot taken long after the segment ended is not compared](adr/0042-stale-snapshot-is-not-compared.md) (Accepted)
 43. [The capture can resubscribe on price drift by itself](adr/0043-capture-resubscribes-on-price-drift.md) (Accepted)
 44. [Resubscribe at the replay's own exit line, and no faster than once a second](adr/0044-resubscribe-at-the-replay-exit-line-with-a-minimum-interval.md) (Accepted)
+45. [Several exchange snapshots for the verify check](adr/0045-several-exchange-snapshots-for-verify.md) (Accepted)

@@ -140,35 +140,63 @@ int main(int argc, char** argv) {
                       static_cast<unsigned long long>(r.messages_applied), static_cast<unsigned long long>(r.packets));
       }
       if (!verify_path.empty() && seg_no == static_cast<int>(loader.segments().size())) {
-        // the exchange's own snapshot, fetched right after the capture: did we read the updates correctly?
+        // the exchange's own snapshots, fetched near the end of the capture: did we read the updates correctly?
         std::ifstream vf(verify_path);
+        std::vector<std::string> vls;
         std::string vl;
-        const std::size_t vtab = (vf && std::getline(vf, vl)) ? vl.find('\t') : std::string::npos;
-        if (vtab == std::string::npos) {
+        while (vf && std::getline(vf, vl))
+          if (vl.find('\t') != std::string::npos) vls.push_back(vl);
+        if (vls.empty()) {
           std::printf("  exchange snapshot check: cannot read %s\n", verify_path.c_str());
         } else {
-          const std::uint64_t vt = std::strtoull(vl.c_str(), nullptr, 10);
-          feed::CaptureLoader upto(lc, check_every, vt);  // the book as of the moment the snapshot arrived
-          upto.load(path);
-          const feed::VerifyResult vr = upto.segments().empty()
-              ? feed::VerifyResult{}
-              : feed::verify_against_snapshot(upto.segments().back(), feed::parse_l2(std::string_view(vl).substr(vtab + 1)), 10, vt);
-          if (vr.stale) {
-            std::printf("  exchange snapshot check: not comparable. The replay segment ended %.1f s before the exchange snapshot was taken\n"
-                        "  (the price left the window), so the replayed book is the book of an earlier moment.\n",
-                        static_cast<double>(vr.stale_gap_ns) / 1e9);
-          } else if (!vr.usable) {
-            std::printf("  exchange snapshot check: no usable snapshot or no book at that time\n");
-          } else {
-            std::printf("  exchange snapshot check (10 nearest levels per side; exchange snapshot from a second\n"
-                        "  connection vs. this replay's book at the same moment, which differ by network skew):\n"
-                        "    %llu of %llu levels identical, %llu differ in size, %llu absent from the replayed book\n",
-                        static_cast<unsigned long long>(vr.equal), static_cast<unsigned long long>(vr.compared),
-                        static_cast<unsigned long long>(vr.size_differs), static_cast<unsigned long long>(vr.missing_in_model));
-            if (vr.outside_window)
-              std::printf("    (%llu more of the nearest levels are outside the price window, which drops them by design: not compared)\n",
-                          static_cast<unsigned long long>(vr.outside_window));
+          std::size_t n_stale = 0, n_unusable = 0, n_none_inside = 0, n_compared = 0;
+          std::uint64_t t_compared = 0, t_equal = 0, t_differ = 0, t_missing = 0, t_outside = 0;
+          for (std::size_t vi = 0; vi < vls.size(); ++vi) {
+            const std::string& line = vls[vi];
+            const std::size_t vtab = line.find('\t');
+            const std::uint64_t vt = std::strtoull(line.c_str(), nullptr, 10);
+            if (vls.size() > 1)
+              std::printf("  exchange snapshot %zu of %zu, taken %.1f s into the capture:\n", vi + 1, vls.size(),
+                          static_cast<double>(vt) / 1e9);
+            feed::CaptureLoader upto(lc, check_every, vt);  // the book as of the moment the snapshot arrived
+            upto.load(path);
+            const feed::VerifyResult vr = upto.segments().empty()
+                ? feed::VerifyResult{}
+                : feed::verify_against_snapshot(upto.segments().back(), feed::parse_l2(std::string_view(line).substr(vtab + 1)), 10, vt);
+            if (vr.stale) {
+              ++n_stale;
+              std::printf("  exchange snapshot check: not comparable. The replay segment ended %.1f s before the exchange snapshot was taken\n"
+                          "  (the price left the window), so the replayed book is the book of an earlier moment.\n",
+                          static_cast<double>(vr.stale_gap_ns) / 1e9);
+            } else if (!vr.usable) {
+              ++n_unusable;
+              std::printf("  exchange snapshot check: no usable snapshot or no book at that time\n");
+            } else {
+              if (vr.compared == 0) ++n_none_inside; else ++n_compared;
+              t_compared += vr.compared;
+              t_equal += vr.equal;
+              t_differ += vr.size_differs;
+              t_missing += vr.missing_in_model;
+              t_outside += vr.outside_window;
+              std::printf("  exchange snapshot check (10 nearest levels per side; exchange snapshot from a second\n"
+                          "  connection vs. this replay's book at the same moment, which differ by network skew):\n"
+                          "    %llu of %llu levels identical, %llu differ in size, %llu absent from the replayed book\n",
+                          static_cast<unsigned long long>(vr.equal), static_cast<unsigned long long>(vr.compared),
+                          static_cast<unsigned long long>(vr.size_differs), static_cast<unsigned long long>(vr.missing_in_model));
+              if (vr.outside_window)
+                std::printf("    (%llu more of the nearest levels are outside the price window, which drops them by design: not compared)\n",
+                            static_cast<unsigned long long>(vr.outside_window));
+            }
           }
+          if (vls.size() > 1)
+            std::printf("  exchange snapshot summary: %zu snapshots; %zu compared at least one level, %zu had none inside the price window,\n"
+                        "  %zu not comparable (the segment had ended), %zu without a usable book.\n"
+                        "    over the compared ones: %llu of %llu levels identical, %llu differ in size, %llu absent from the replayed book\n"
+                        "    (%llu more of the nearest levels were outside the window: not compared)\n",
+                        vls.size(), n_compared, n_none_inside, n_stale, n_unusable,
+                        static_cast<unsigned long long>(t_equal), static_cast<unsigned long long>(t_compared),
+                        static_cast<unsigned long long>(t_differ), static_cast<unsigned long long>(t_missing),
+                        static_cast<unsigned long long>(t_outside));
         }
       }
       if (r.wire_hash != r2.wire_hash || r.frames != r2.frames) exit_code = exit_code ? exit_code : 2;

@@ -102,6 +102,86 @@ async def verify_test():
     ok = await capture_l2.fetch_verify_snapshot("ws://127.0.0.1:9", "BTC-USD", "level2_batch", tempfile.mktemp(), timeout=1.0)
     check(not ok, "verify fails cleanly when the server is unreachable")
 
+async def verify_many_test():
+    """Several exchange snapshots: spaced, on the main clock, and a failure of one does not lose the others."""
+    conns = {"n": 0, "skip": set()}
+
+    async def serve(ws):
+        conns["n"] += 1
+        n = conns["n"]
+        try:
+            await ws.recv()
+            if n in conns["skip"]:
+                await asyncio.sleep(3)  # connects, subscribes, never sends a snapshot
+                return
+            await ws.send(json.dumps({"type": "subscriptions", "channels": []}))
+            await ws.send(snap_msg(1000, 1010))
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
+        path = tempfile.mktemp(suffix=".verify")
+        t0 = time.monotonic_ns()
+        n = await capture_l2.fetch_verify_snapshots(url, "BTC-USD", "level2_batch", path, timeout=2.0, t0_ns=t0, count=3, spacing=0.3)
+        rows = read(path)
+        ts = [int(r.split("\t")[0]) for r in rows]
+        check(n == 3 and len(rows) == 3 and all('"snapshot"' in r for r in rows), "three snapshots fetched and written (%d, %d rows)" % (n, len(rows)))
+        check(all(b - a >= 0.25e9 for a, b in zip(ts, ts[1:])) and ts[0] > 0, "spaced at least the asked spacing, on the clock of t0 (%s)" % ts)
+        # the second connection never sends a snapshot: the first and third are kept
+        conns["n"] = 0
+        conns["skip"] = {2}
+        path = tempfile.mktemp(suffix=".verify")
+        n = await capture_l2.fetch_verify_snapshots(url, "BTC-USD", "level2_batch", path, timeout=0.6, count=3, spacing=0.1)
+        check(n == 2 and len(read(path)) == 2, "one failed fetch leaves the other two (%d)" % n)
+        # all fail: no file at all
+        conns["n"] = 0
+        conns["skip"] = {1, 2}
+        path = tempfile.mktemp(suffix=".verify")
+        n = await capture_l2.fetch_verify_snapshots(url, "BTC-USD", "level2_batch", path, timeout=0.5, count=2, spacing=0.1)
+        check(n == 0 and not os.path.exists(path), "no snapshot, no file (%d)" % n)
+        # inside a capture: the count is reported and the lines end before the capture does
+        conns["n"] = 0
+        conns["skip"] = set()
+        out = tempfile.mktemp(suffix=".l2")
+        st = await capture_l2.capture(url, "BTC-USD", "level2_batch", 5.0, out, 3.0, 5, verify_path=out + ".verify",
+                                      verify_count=2, verify_spacing=0.5)
+        rows = read(out + ".verify")
+        stop_t = int(read(out)[-1].split("\t")[0].lstrip("#"))
+        check(st["verify_n"] == 2 and st["verify"] is True and len(rows) == 2, "a capture with two verify snapshots: %s" % (st,))
+        check(all(int(r.split("\t")[0]) <= stop_t + 1e9 for r in rows), "both lines are near the end of the capture")
+    check(capture_l2.verify_delay(100, 1, 2.0) == 94.0 and capture_l2.verify_delay(100, 3, 2.0) == 90.0
+          and capture_l2.verify_delay(10, 3, 2.0) == 5.0 and capture_l2.verify_delay(20, 2, 1.0) == 13.0, "when the verify snapshots start")
+
+    async def serve_no_verify(ws):  # the capture connection (it also asks for heartbeats) gets data; the others never get a snapshot
+        try:
+            sub = json.loads(await ws.recv())
+            if "heartbeat" not in sub.get("channels", []):
+                await asyncio.sleep(3)
+                return
+            await ws.send(snap_msg(1000, 1010))
+            await asyncio.sleep(5)
+        except Exception:
+            pass
+    async with websockets.serve(serve_no_verify, "127.0.0.1", 0) as server:
+        url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
+        out = tempfile.mktemp(suffix=".l2")
+        st = await capture_l2.capture(url, "BTC-USD", "level2_batch", 3.0, out, 5.0, 5, verify_path=out + ".verify",
+                                      verify_count=1, verify_spacing=0.1)
+        check(st["verify"] is False and st["verify_n"] == 0 and not os.path.exists(out + ".verify"), "a capture whose verify fetches all fail reports it: %s" % (st,))
+    # the command line
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
+        env = dict(os.environ, NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+        for extra, secs, want in (([], "4", "1 of 1 written"), (["--verify-count", "2"], "8", "2 of 2 written")):
+            out = tempfile.mktemp(suffix=".l2")
+            cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture_l2.py"), "--url", url,
+                   "--out", out, "--seconds", secs, "--verify"] + extra
+            p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+            o, e = await asyncio.wait_for(p.communicate(), 40)
+            check(want in o.decode() and len(read(out + ".verify")) == int(want[0]), "command line %s: %s" % (extra, o.decode().strip()[-90:]))
+
+
 async def resnap_test():
     """A file appearing makes the capture reconnect at once and get a fresh snapshot."""
     conns = {"n": 0}
@@ -334,6 +414,7 @@ async def stdout_test():
 
 asyncio.run(main())
 asyncio.run(verify_test())
+asyncio.run(verify_many_test())
 asyncio.run(resnap_test())
 drift_unit_test()
 asyncio.run(drift_test())
