@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 39: a live paper session on the real sandbox feed
+
+- 360 s, `capture_l2.py` into `hft_live` (paper, no orders leave the process): 2,085 messages, 6 segments (5 window exits, each recovered in 0.74-0.84 s), always QUOTING at the 10 s samples, 0 desyncs, 0 model failures, flat at every segment end, and the recorded stream replays to the same order-flow hash. Details and limits in docs/SANDBOX.md (no fills, no exchange orders, shared-box timing).
+- This container can reach the public sandbox; the earlier note that it could not was an untested assumption.
+
 ### Phase 38: several exchange snapshots for the verify check
 
 - `capture_l2.py --verify --verify-count N` takes N exchange snapshots near the end of the capture; `hft_replay --verify` checks each and sums them (ADR 45), because about half the sandbox's snapshots are wider than the replay window and cannot be compared. A one-line verify file prints as before. New tests in `test_capture.py` and `test_replay_cli.py`. Mutation checks: 29 mutants, 2 survived the first run (a no-op control, equivalent by construction; the summed absent count, test added), none now.
