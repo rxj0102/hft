@@ -1,6 +1,6 @@
 # ADR 46: Record the stream of a supervised run, and replay it to check the order flow
 
-Status: Accepted
+Status: Accepted (its hash-equality expectation is limited by ADR 48)
 
 ## Context
 `hft_live` prints a hash of the order flow the feed caused. A recorded stream replayed through `hft_live --from` should give the same hash as the live run, which checks that the live path is deterministic given its input. The supervised sessions on the sandbox (Phase 40) did not save the stream, so that check could not be made on them.

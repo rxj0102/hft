@@ -49,3 +49,4 @@ Each record: context, decision, consequences, evidence. Numbers refer to measure
 45. [Several exchange snapshots for the verify check](adr/0045-several-exchange-snapshots-for-verify.md) (Accepted)
 46. [Record the stream of a supervised run, and replay it to check the order flow](adr/0046-record-the-stream-of-a-supervised-run.md) (Accepted)
 47. [The kill sweep is not part of the order flow the feed caused](adr/0047-kill-sweep-is-not-in-the-feed-hash.md) (Accepted)
+48. [A live run replays to its hash only when no decision depends on message timing](adr/0048-live-hash-equals-replay-hash-only-without-timing-effects.md) (Accepted)

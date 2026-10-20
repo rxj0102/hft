@@ -12,7 +12,7 @@ Cause: a normal end (end of input, `--max-seconds`) leaves the cancels to the fl
 - The kill sweep's frames still count in the totals (`frames_total`, order counters, `by kill`), because they are real orders; only the "caused by the feed" hash and its frame count leave them out.
 
 ## Consequences
-- A run stopped by SIGTERM now replays to its live hash when its recording is cut to the `input: N lines` in its summary (the line the process was reading when it stopped may not be in its summary).
+- The kill sweep no longer makes a stopped run's hash differ from a replay of its recording (cut to the `input: N lines` in its summary). A match is still not guaranteed, because live timing can change decisions (ADR 48).
 - Hashes printed by older builds for killed runs include the sweep and are not comparable.
 - A drill (`record_term`) stops a recorded supervised run with SIGTERM and checks the cut recording replays to the live hash; with the fix reverted it fails.
 - Unchanged: the hot path. The change is in the stop path only.
