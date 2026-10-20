@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Phase 40: 30 minutes under the supervisor on the sandbox feed
+
+- `supervise.py` on the public sandbox feed, paper mode, 1,800 s, with a SIGKILL (600 s) and a SIGSTOP hang (1,200 s) injected by hand: the kill was restarted in 0.5 s, the hang was caught by the watchdog at its 30 s limit, SIGTERM ended it with exit 0. 13 window exits, each recovered in 0.46-1.02 s (median 0.77 s); 0 stale pulls, desyncs, model failures or fills; the two killed segments have no end record, as the runbook says. Not recorded, so not replayed; no exchange orders; one run. Details in docs/SANDBOX.md.
+
 ### Phase 39: a live paper session on the real sandbox feed
 
 - 360 s, `capture_l2.py` into `hft_live` (paper, no orders leave the process): 2,085 messages, 6 segments (5 window exits, each recovered in 0.74-0.84 s), always QUOTING at the 10 s samples, 0 desyncs, 0 model failures, flat at every segment end, and the recorded stream replays to the same order-flow hash. Details and limits in docs/SANDBOX.md (no fills, no exchange orders, shared-box timing).

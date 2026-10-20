@@ -127,4 +127,4 @@ One status line every 10 seconds on stderr: `QUOTING` (a segment is live), `PULL
 - If the pipe ends early, check the capture script's stderr first (`captured N messages ...` is its last line).
 
 ## 5. Known operational gaps
-No automatic flatten. No order-entry heartbeats or retransmission. One instrument per pipeline. Snapshot delivery is the host's job. The live paper session has been run for up to 90 seconds at a time against the production public feed and for 360 seconds against the public sandbox feed (SANDBOX.md); the supervisor is a script (no service manager, no reboot survival, no alert delivery), and nothing has traded on a real exchange.
+No automatic flatten. No order-entry heartbeats or retransmission. One instrument per pipeline. Snapshot delivery is the host's job. The live paper session has been run for up to 90 seconds at a time against the production public feed for 360 seconds against the public sandbox feed, and for 30 minutes under the supervisor on that feed with a kill and a hang injected (SANDBOX.md); the supervisor is a script (no service manager, no reboot survival, no alert delivery), and nothing has traded on a real exchange.
