@@ -51,7 +51,7 @@ Parameter search with held-out markets (`--grid`, ADR 34), 2026-10-17: grids of 
 | Compilers | gcc 13 and clang 18, release, ASan and UBSan cells | CI matrix |
 | Fuzzing | 9 libFuzzer targets, 45 s each in CI; longer local runs were clean after the fixes listed in the changelog | `fuzz-smoke` job |
 | Python suites | capture script, live tool, order bridge, sandbox smoke test, PnL report, strategy lab, all against local fakes | `scripts/ci_local.sh` |
-| Fault drills | 28 drills against a fake feed and a fake exchange: connection drop, silence, kill -9 of each process, hang, crash loop, exchange down, bad credentials, close with and without liquidity, restart with a carried position, account mismatch | `python3 scripts/drill.py` |
+| Fault drills | 29 drills against a fake feed and a fake exchange: connection drop, silence, kill -9 of each process, hang, crash loop, exchange down, bad credentials, close with and without liquidity, restart with a carried position, account mismatch | `python3 scripts/drill.py` |
 | GitHub Actions | 9 jobs, green on the latest push to master and main at the time of writing | `gh run list` |
 
 The drills are timing-based. One of them failed once in a local run during Phase 21; the cause was a race in the drill itself (it counted orders before the old process had died), it was fixed, and it passed three repeats afterwards.

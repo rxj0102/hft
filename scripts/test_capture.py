@@ -376,6 +376,48 @@ async def drift_cli_test():
             check(m is not None and lo <= n <= hi, "command line %s: %d drift resubscribes (expected %d to %d): %s" % (extra, n, lo, hi, text.strip()[-120:]))
 
 
+async def tee_test():
+    """--tee keeps a copy of exactly what was written, in a file or on stdout."""
+    async def serve(ws):
+        try:
+            await ws.recv()
+            await ws.send(SNAP)
+            for i in range(5):
+                await ws.send(upd(i))
+            await asyncio.sleep(2)
+        except Exception:
+            pass
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
+        out = tempfile.mktemp(suffix=".l2")
+        copy = tempfile.mktemp(suffix=".copy")
+        open(copy, "w").write("left over from an earlier run\n")
+        import gc, warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            st = await capture_l2.capture(url, "BTC-USD", "level2_batch", 1.0, out, 3.0, 5, tee_path=copy)
+            gc.collect()
+        check(not [w for w in caught if issubclass(w.category, ResourceWarning)], "no file is left open: %s" % [str(w.message) for w in caught])
+        check("left over" not in open(copy).read(), "an existing copy file is replaced, not appended to")
+        check(st["messages"] == 6 and read(out) == read(copy) and len(read(out)) >= 8, "with a file output the copy is identical (%d lines)" % len(read(copy)))
+        check(read(copy)[0].startswith("#") and read(copy)[-1].split("\t")[1] == "stop", "and it is whole: start line to stop line")
+        env = dict(os.environ, NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+        env.pop("PYTHONUNBUFFERED", None)  # the test is about the capture's own flushing
+        copy2 = tempfile.mktemp(suffix=".copy")
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture_l2.py"), "--url", url,
+               "--out", "-", "--seconds", "1.5", "--tee", copy2]
+        p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+        t_start = time.monotonic()
+        first = [(await asyncio.wait_for(p.stdout.readline(), 10)).decode() for _ in range(6)]
+        waited = time.monotonic() - t_start
+        mid = read(copy2)  # the capture is still running: it has 1.5 s to go
+        check(waited < 1.2 and p.returncode is None, "lines are streamed as they come, not at the end (%.2f s for six)" % waited)
+        check(mid[:6] == [l.rstrip("\n") for l in first], "and the copy already holds them while the capture runs (%d lines)" % len(mid))
+        rest, e = await asyncio.wait_for(p.communicate(), 30)
+        o = "".join(first).encode() + rest
+        check(o.decode().splitlines() == read(copy2) and len(read(copy2)) >= 8, "on stdout the copy is identical to what was streamed (%d lines)" % len(read(copy2)))
+
+
 async def stdout_test():
     """`--out -` streams line by line and stops quietly when the reader goes away."""
     import subprocess
@@ -420,6 +462,7 @@ drift_unit_test()
 asyncio.run(drift_test())
 asyncio.run(drift_throttle_test())
 asyncio.run(drift_cli_test())
+asyncio.run(tee_test())
 asyncio.run(stdout_test())
 if failures:
     sys.exit("%d capture test failures" % failures)

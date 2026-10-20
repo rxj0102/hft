@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 41: a recorded supervised run, replayed to the same hash
+
+- `capture_l2.py --tee PATH` and `supervise.py --record-dir DIR` keep each run's stream (ADR 46). New `record` drill and tee tests. Mutation checks: 16 mutants, 4 survived the first run (two flush cases masked by `PYTHONUNBUFFERED=1` in this shell, the file close, the directory creation), all killed after.
+- 18 minutes on the sandbox feed, five runs (one SIGKILL, one SIGTERM at the end): the three runs that ended by themselves replay to exactly their live order-flow hashes. The SIGTERM-ended run did not reproduce (cause not verified); the killed run has no summary. Details in docs/SANDBOX.md.
+
 ### Phase 40: 30 minutes under the supervisor on the sandbox feed
 
 - `supervise.py` on the public sandbox feed, paper mode, 1,800 s, with a SIGKILL (600 s) and a SIGSTOP hang (1,200 s) injected by hand: the kill was restarted in 0.5 s, the hang was caught by the watchdog at its 30 s limit, SIGTERM ended it with exit 0. 13 window exits, each recovered in 0.46-1.02 s (median 0.77 s); 0 stale pulls, desyncs, model failures or fills; the two killed segments have no end record, as the runbook says. Not recorded, so not replayed; no exchange orders; one run. Details in docs/SANDBOX.md.

@@ -22,7 +22,8 @@ Live use: `--out -` writes the same lines to stdout, flushed one by one, for
 makes the capture drop its connection and subscribe again, to get a fresh
 snapshot, whenever PATH appears (hft_live creates it when the price has left
 its grid window). Without hft_live, `--resnap-drift-usd N` does the same when the best price
-has moved N USD from the last snapshot's mid (262 matches the replay's exit; see ADR 43). If the reader goes away the capture stops quietly.
+has moved N USD from the last snapshot's mid (262 matches the replay's exit; see ADR 43).
+`--tee PATH` keeps a copy of everything written, for replaying a live session afterwards. If the reader goes away the capture stops quietly.
 """
 import argparse
 import asyncio
@@ -32,6 +33,21 @@ import sys
 import time
 
 DEFAULT_URL = "wss://ws-feed.exchange.coinbase.com"
+
+
+class _Tee:
+    """Writes every line to two files. Used to keep a copy of the stream that goes to hft_live."""
+
+    def __init__(self, a, b):
+        self.a, self.b = a, b
+
+    def write(self, s):
+        self.a.write(s)
+        self.b.write(s)
+
+    def flush(self):
+        self.a.flush()
+        self.b.flush()
 
 
 class DriftWatch:
@@ -82,7 +98,7 @@ class DriftWatch:
 
 
 async def capture(url, product, channel, seconds, out_path, idle_timeout, max_reconnects, connect_fn=None,
-                  verify_path=None, resnap_file=None, poll_step=0.25, drift_usd=None, drift_min_s=1.0, verify_count=1, verify_spacing=2.0):
+                  verify_path=None, resnap_file=None, poll_step=0.25, drift_usd=None, drift_min_s=1.0, verify_count=1, verify_spacing=2.0, tee_path=None):
     """Returns a dict of counters. `connect_fn` lets tests substitute a local server.
     `out_path` "-" streams to stdout. `resnap_file`: when this file exists, remove it and
     resubscribe (a new snapshot) on a fresh connection. `drift_usd`: do the same when the best
@@ -106,6 +122,10 @@ async def capture(url, product, channel, seconds, out_path, idle_timeout, max_re
             url, product, channel, verify_path, connect_fn, delay=verify_delay(seconds, verify_count, verify_spacing),
             t0_ns=t0, count=verify_count, spacing=verify_spacing))
     f = sys.stdout if streaming else open(out_path, "w", encoding="utf-8", newline="\n")
+    tee_file = None
+    if tee_path:
+        tee_file = open(tee_path, "w", encoding="utf-8", newline="\n")
+        f = _Tee(f, tee_file)
     try:
         f.write("#%d\tstart\t%s\t%s\n" % (now(), url, product))
         resnapped = False
@@ -180,8 +200,10 @@ async def capture(url, product, channel, seconds, out_path, idle_timeout, max_re
     except BrokenPipeError:
         stats["reader_gone"] = True
     finally:
+        if tee_file:
+            tee_file.close()
         if not streaming:
-            f.close()
+            (f.a if tee_file else f).close()
     if vtask:
         stats["verify_n"] = await vtask
         stats["verify"] = stats["verify_n"] > 0
@@ -263,6 +285,9 @@ def main(argv=None):
                     help="at most one drift resubscribe per this many seconds (default 1). The sandbox sends a snapshot whose "
                          "touch is already wider than the replay window about half the time; without this the capture "
                          "reconnects as fast as it can until a narrow one comes")
+    ap.add_argument("--tee", default=None,
+                    help="also write every line to this file (a copy of the stream sent to hft_live, to replay afterwards "
+                         "with `hft_live --from`)")
     ap.add_argument("--verify-count", type=int, default=1,
                     help="with --verify: take this many exchange snapshots, about 2 s apart, ending near the end of the "
                          "capture. The sandbox's snapshots are often wider than the replay window, and those cannot be compared")
@@ -277,7 +302,7 @@ def main(argv=None):
     if a.verify and a.out == "-":
         sys.exit("--verify needs a file, not stdout")
     st = asyncio.run(capture(a.url, a.product, a.channel, a.seconds, a.out, a.idle_timeout, a.max_reconnects,
-                             verify_path=(a.out + ".verify") if a.verify else None, resnap_file=a.resnap_file, drift_usd=a.resnap_drift_usd, drift_min_s=a.resnap_min_s, verify_count=a.verify_count))
+                             verify_path=(a.out + ".verify") if a.verify else None, resnap_file=a.resnap_file, drift_usd=a.resnap_drift_usd, drift_min_s=a.resnap_min_s, verify_count=a.verify_count, tee_path=a.tee))
     out = sys.stderr if a.out == "-" else sys.stdout
     print("captured %(messages)d messages, %(reconnects)d reconnects, %(errors)d errors, %(resnaps)d resubscribes "
           "(%(drift_resnaps)d for price drift)" % st,

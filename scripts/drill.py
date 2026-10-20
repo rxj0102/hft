@@ -695,6 +695,38 @@ async def drill_loop_account_mismatch(feed, port):
         pass
 
 
+async def drill_record(feed, port):
+    """--record-dir keeps each run's stream. Replayed through hft_live --from, a run that ended by itself gives the
+    same order-flow hash as the live run did."""
+    import re
+    base = tempfile.mkdtemp(prefix="drill-rec-")
+    recdir = os.path.join(base, "not", "made", "yet")  # the supervisor makes it
+    cap = ("%s %s --url ws://127.0.0.1:%d --out - --seconds 3 --idle-timeout 2 --resnap-file {resnap}" %
+           (sys.executable, os.path.join(HERE, "capture_l2.py"), port))
+    r = Run(feed, port, extra=("--record-dir", recdir, "--stale-ms", "5000"), capture_cmd=cap)
+    ok = await until(lambda: len(r.sup("pair_start")) >= 2, 25)
+    check(ok, "the capture ended by itself after 3 s and the pair was started again")
+    starts = r.sup("pair_start")
+    check(starts and starts[0].get("record") == os.path.join(recdir, "stream.1.txt")
+          and len(starts) >= 2 and starts[1].get("record") == os.path.join(recdir, "stream.2.txt"),
+          "each run records into its own file: %s" % [e.get("record") for e in starts])
+    await r.stop()
+    first = os.path.join(recdir, "stream.1.txt")
+    lines = open(first).read().splitlines() if os.path.exists(first) else []
+    check(len(lines) > 10 and lines[0].startswith("#") and "\tstart\t" in lines[0] and lines[-1].split("\t")[1] == "stop",
+          "the first stream is whole: a start line, data, a stop line (%d lines)" % len(lines))
+    out = open(os.path.join(r.dir, "live.out")).read()
+    m = re.search(r"wire hash of the order flow the feed caused \(flatten excluded\): ([0-9a-f]+)", out)
+    check(m is not None, "hft_live printed its summary when the capture ended")
+    rep = subprocess.run([LIVE, "--from", first], capture_output=True, text=True, timeout=60)
+    m2 = re.search(r"wire hash of the order flow the feed caused \(flatten excluded\): ([0-9a-f]+)", rep.stdout)
+    check(rep.returncode == 0 and m2 is not None and m is not None and m.group(1) == m2.group(1),
+          "the replay of the recorded stream gives the live run's order-flow hash (%s vs %s)" % (m and m.group(1), m2 and m2.group(1)))
+    check(bool(re.search(r"orders: [1-9]\d* new", rep.stdout)), "and that hash is of a real order flow, not an empty one")
+    r.cleanup()
+    shutil.rmtree(base, ignore_errors=True)
+
+
 DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill_kill_capture),
           ("kill_live", drill_kill_live), ("hang", drill_hang), ("sigterm", drill_sigterm), ("term_ignored", drill_term_ignored),
           ("capture_dies_live_stuck", drill_capture_dies_live_stuck), ("slow_flapping", drill_slow_flapping), ("crash_loop", drill_crash_loop), ("integrity", drill_integrity),
@@ -704,7 +736,7 @@ DRILLS = [("drop", drill_drop), ("silent", drill_silent), ("kill_capture", drill
           ("loop_dead_at_stop", drill_loop_exchange_dead_at_stop),
           ("loop_close", drill_loop_close), ("loop_close_no_liquidity", drill_loop_close_no_liquidity), ("loop_close_off_market", drill_loop_close_off_the_market),
           ("loop_carry_restart", drill_loop_carry_restart),
-          ("loop_account_mismatch", drill_loop_account_mismatch)]
+          ("loop_account_mismatch", drill_loop_account_mismatch), ("record", drill_record)]
 
 
 async def main(only):

@@ -39,7 +39,7 @@ These exclude the NIC, kernel, TLS, JSON parsing and the exchange, and p99.9 and
 - Nine libFuzzer targets, including one where the fuzz input plays the exchange.
 - Mutation checks at every phase: bugs injected on purpose, and a test had to fail. The first runs always had survivors, and each was either killed with a new test or removed as unobservable. Counts are in [docs/RESULTS.md](docs/RESULTS.md) and the changelog.
 - GitHub Actions with nine jobs (build and test cells, TSan, fuzz smoke, performance gate). It has found real faults that local runs missed, such as a missing Python package in five cells and a race in a test. See [docs/CI.md](docs/CI.md).
-- 45 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
+- 46 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Build and run
 
@@ -55,7 +55,7 @@ Everything that needs no key runs locally:
 
 ```
 pip install -r scripts/requirements.txt
-scripts/ci_local.sh                 # after the release build: all Python suites and the 28 drills against local fakes
+scripts/ci_local.sh                 # after the release build: all Python suites and the 29 drills against local fakes
 ```
 
 Running against the real sandbox (your own key, on a profile used only for this; set it in environment variables and never paste it anywhere):

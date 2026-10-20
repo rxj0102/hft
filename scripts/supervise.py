@@ -106,6 +106,9 @@ def main(argv=None):
                     help="with --loop: log the book's mid (when it changes) at most this often, for scripts/pnl_report.py; 0 turns it off. "
                          "Roughly 40 MB of events.jsonl per day at the default on a busy book")
     ap.add_argument("--bridge-cmd", default=None, help="replace the bridge command (shell-split)")
+    ap.add_argument("--record-dir", default=None,
+                    help="keep a copy of each run's stream in DIR/stream.<run>.txt (the capture is started with --tee), to "
+                         "replay afterwards with `hft_live --from`. A --capture-cmd of your own must accept --tee")
     a = ap.parse_args(argv)
     if (a.close_position or a.close_collar_bps is not None or a.position_file) and not (a.loop and not a.live_cmd):
         ap.error("--close-position, --close-collar-bps and --position-file need --loop and the default hft_live command (add the options to --live-cmd yourself otherwise)")
@@ -172,7 +175,11 @@ def main(argv=None):
         cap_err = open(os.path.join(a.run_dir, "capture.err"), "ab")
         live_out = open(os.path.join(a.run_dir, "live.out"), "ab")
         live_err = open(os.path.join(a.run_dir, "live.err"), "ab")
-        cap = subprocess.Popen(capture_cmd, stdout=w, stderr=cap_err, start_new_session=True)
+        rec = None
+        if a.record_dir:
+            os.makedirs(a.record_dir, exist_ok=True)
+            rec = os.path.join(a.record_dir, "stream.%d.txt" % run_no)
+        cap = subprocess.Popen(capture_cmd + (["--tee", rec] if rec else []), stdout=w, stderr=cap_err, start_new_session=True)
         os.close(w)
         bridge = None
         bridge_out = bridge_err = None
@@ -202,7 +209,7 @@ def main(argv=None):
         os.close(r)
         t0 = time.monotonic()
         starts.append(time.time())
-        log.emit("pair_start", run=run_no, capture_pid=cap.pid, live_pid=live.pid, bridge_pid=bridge.pid if bridge else None)
+        log.emit("pair_start", run=run_no, capture_pid=cap.pid, live_pid=live.pid, bridge_pid=bridge.pid if bridge else None, record=rec)
 
         why = None
         wd_who = None
