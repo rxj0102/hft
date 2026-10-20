@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phase 42: a SIGTERM-ended run now replays to its live hash
+
+- Cause of the Phase 41 mismatch found by a unit test (3 checks failed before the fix): the kill sweep's cancels were counted in `hash_before_flatten` and `frames_before_flatten`, while a normal end leaves them to the flatten, which the hash excludes. `Live::kill()` now takes the segment's numbers before the sweep (ADR 47). Stop path only; the hot path is untouched.
+- On the sandbox feed: a run of 110 s ended by SIGTERM (2 new, 1,210 replace, 2 cancel by kill), recording cut to the 1,924 lines it had read, replayed to the same hash 0affbb37adeef186. One run.
+
 ### Phase 41: a recorded supervised run, replayed to the same hash
 
 - `capture_l2.py --tee PATH` and `supervise.py --record-dir DIR` keep each run's stream (ADR 46). New `record` drill and tee tests. Mutation checks: 16 mutants, 4 survived the first run (two flush cases masked by `PYTHONUNBUFFERED=1` in this shell, the file close, the directory creation), all killed after.

@@ -401,6 +401,7 @@ void test_external_flatten_times_out() {
 }
 
 void test_external_kill_and_shutdown() {
+  std::uint64_t ext_hash[2] = {0, 0}, ext_frames[2] = {0, 0};
   for (int kill = 0; kill < 2; ++kill) {
     TapLog log;
     LiveConfig c = ext_cfg();
@@ -421,7 +422,10 @@ void test_external_kill_and_shutdown() {
     CHECK(!s.busy() && s.summaries().size() == 1 && s.summaries()[0].flat);
     CHECK(s.summaries()[0].kill_latched == (kill == 1));
     CHECK(s.summaries()[0].reason == (kill ? EndReason::Kill : EndReason::Shutdown));
+    ext_hash[kill] = s.summaries()[0].hash_before_flatten;
+    ext_frames[kill] = s.summaries()[0].frames_before_flatten;
   }
+  CHECK(ext_hash[0] == ext_hash[1] && ext_frames[0] == ext_frames[1]);  // the kill sweep is not feed-caused order flow
 }
 
 void test_external_fill_and_stale_reports() {
@@ -555,6 +559,34 @@ void test_kill_after_quiet_period() {
   CHECK(sm.reason == EndReason::Kill && sm.flat && sm.kill_latched);
   CHECK(s.stats().kill_cancels > 0);
   CHECK(sm.flatten_sim_ns >= 50'000 && sm.flatten_sim_ns < 1'000'000);  // one cancel round trip after the kill, not zero
+}
+
+// The order flow "the feed caused" (the hash a run prints, compared between a live run and its replay) must not
+// include what the end of the run sends: the kill sweep is teardown, like the flatten after a shutdown.
+void test_kill_sweep_is_not_in_the_feed_hash() {
+  LiveSession a(small_cfg()), b(small_cfg());
+  warm_up(a, 1'000'000);
+  warm_up(b, 1'000'000);
+  CHECK(a.open_orders() > 0 && a.open_orders() == b.open_orders());
+  a.shutdown(1'006'000);
+  b.kill(1'006'000);
+  const SegmentSummary& sa = a.summaries().back();
+  const SegmentSummary& sb = b.summaries().back();
+  CHECK(sb.reason == EndReason::Kill && sb.kill_latched && b.stats().kill_cancels > 0);  // the sweep did send cancels
+  CHECK(sa.frames_before_flatten == sb.frames_before_flatten);
+  CHECK(sa.hash_before_flatten == sb.hash_before_flatten);
+  // and the frames the sweep sent are still counted in the total
+  CHECK(sb.frames_total >= sb.frames_before_flatten + b.stats().kill_cancels);
+  // a kill after more traffic: the same holds when the strategy has been reacting for a while
+  LiveSession c(small_cfg()), d(small_cfg());
+  warm_up(c, 1'000'000);
+  warm_up(d, 1'000'000);
+  c.poll(1'200'000);
+  d.poll(1'200'000);
+  c.shutdown(5'000'000);
+  d.kill(5'000'000);
+  CHECK(c.summaries().back().frames_before_flatten == d.summaries().back().frames_before_flatten);
+  CHECK(c.summaries().back().hash_before_flatten == d.summaries().back().hash_before_flatten);
 }
 
 void test_shutdown_is_not_a_kill() {
@@ -1189,6 +1221,7 @@ int main() {
   test_kill();
   test_kill_after_quiet_period();
   test_shutdown_is_not_a_kill();
+  test_kill_sweep_is_not_in_the_feed_hash();
   test_window_exit();
   test_integrity_failure_halts_and_flattens();
   test_final_mismatch_halts();

@@ -90,7 +90,7 @@ The crashing input is written as `crash-<hash>` in the working directory. Rerun 
 ```
 python3 scripts/supervise.py --run-dir /tmp/hft-run --log /tmp/hft-run/supervisor.jsonl
 ```
-Add `--record-dir DIR` to keep each run's stream as `DIR/stream.<run>.txt`. A run that ended by itself (not killed, not stopped by SIGTERM) replays with `hft_live --from DIR/stream.N.txt` to the same `wire hash` as its summary in `live.out` (ADR 46). Do not commit the recordings.
+Add `--record-dir DIR` to keep each run's stream as `DIR/stream.<run>.txt`. A run that ended by itself or was stopped by SIGTERM (not SIGKILL, which prints no summary) replays with `hft_live --from DIR/stream.N.txt` to the same `wire hash` as its summary in `live.out` (ADR 46, 47); for a stopped run cut the recording to the `input: N lines` in the summary first (`head -N`). Do not commit the recordings.
 Read `supervisor.jsonl` first: `pair_start`/`pair_stopped` say what died and how (`signal` 9 is kill -9, `why: watchdog` is a hang). Then `events.jsonl` for what `hft_live` saw, and `metrics.prom` for the counters.
 - Exit 4 from the supervisor: `hft_live` reported an integrity failure (`halted` in `events.jsonl`). Do not restart blindly. Keep `events.jsonl`, `live.err` and the capture; treat it as a bug.
 - Exit 3: a crash loop. Read `live.err` and `capture.err`; the usual causes are a missing binary, a bad option, or no network.

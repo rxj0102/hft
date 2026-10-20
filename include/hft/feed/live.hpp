@@ -243,6 +243,10 @@ class LiveSession {
   void kill(std::uint64_t now) {
     now = clamp(now);
     if (seg_) {
+      // taken before the sweep; end_segment ignores them for a segment already ending, which has its own
+      seg_->pre_kill_hash = seg_->hash;
+      seg_->pre_kill_frames = seg_->frames;
+      seg_->have_pre_kill = true;
       seg_->venue.set_now(now);  // the kill sweep goes out now, not at the time of the last packet
       seg_->pipe->gateway().kill(risk::KillReason::Manual, now);
     }
@@ -347,6 +351,9 @@ class LiveSession {
     AckVenue venue;
     std::unique_ptr<Pipe> pipe;
     std::uint64_t hash = 0xCBF29CE484222325ULL, frames = 0, bytes = 0;
+    // what the feed had caused when a kill came: the kill sweep is teardown and is not part of it
+    std::uint64_t pre_kill_hash = 0, pre_kill_frames = 0;
+    bool have_pre_kill = false;
     std::uint64_t pkts = 0, last_cp = 0;
     // external venue
     std::uint64_t number = 0, xseq = 0;
@@ -498,8 +505,8 @@ class LiveSession {
     SegmentSummary sm;
     sm.reason = why;
     sm.packets = s.pkts;
-    sm.frames_before_flatten = s.frames;
-    sm.hash_before_flatten = s.hash;
+    sm.frames_before_flatten = s.have_pre_kill ? s.pre_kill_frames : s.frames;
+    sm.hash_before_flatten = s.have_pre_kill ? s.pre_kill_hash : s.hash;
     sm.open_before_flatten = s.pipe->gateway().oms().open_orders();
     auto& g = s.pipe->gateway();
     if (cfg_.external_venue) {

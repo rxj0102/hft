@@ -11,7 +11,7 @@ Status: Accepted
 - A drill (`record`) checks on a fake feed that a run that ends by itself replays to the live hash.
 
 ## Consequences
-Only a run that ends by itself (the capture's `--seconds` elapsed, hft_live read to the end of its input) is comparable. A killed process prints no summary. A run stopped by SIGTERM does print one, but it did not reproduce on the sandbox (below), so it is not a valid comparison.
+Only a run that ends by itself (the capture's `--seconds` elapsed, hft_live read to the end of its input) is comparable. A killed process prints no summary. A run stopped by SIGTERM prints one; in Phase 41 it did not reproduce (below), which ADR 47 explains and fixes.
 The recording grows with the stream (about 0.5 MB per 10 minutes on the sandbox); like other captures it must not be committed.
 
 ## Measured (sandbox, 18 minutes, five runs)
