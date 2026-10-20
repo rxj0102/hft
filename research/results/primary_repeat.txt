@@ -1,0 +1,24 @@
+hft_lab: 16 markets (seeds 1000..1015) x 200000 requests, 5 variants; md 5 us, ingress 10 us, egress 10 us, jitter 2 us, queue penalty 0%
+risk limits derived from the variants: max order qty 100, max position 80 (the strategy cap should bind first)
+
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                             +17.93      0.38        +8.39       +9.54        549    6.3%        12
+noalpha                           +1.14      0.14        +3.13       -1.99        200    3.4%        12
+wide                              +0.66      0.14        +0.52       +0.14         30    0.5%         7
+noskew                           +25.37      2.80       +10.94      +14.44        704    7.3%        40
+strongskew                       +13.10      0.27        +7.40       +5.71        510    6.7%        11
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                          -16.78      0.35  -47.51     0/16/0   <0.0001        -5.26       -11.53
+wide                             -17.27      0.43  -40.39     0/16/0   <0.0001        -7.87        -9.40
+noskew                            +7.45      2.65   +2.81     11/5/0    0.2101        +2.55        +4.90
+strongskew                        -4.82      0.21  -23.10     0/16/0   <0.0001        -0.99        -3.83
+
+Read this with care: the fills are simulated (queue model, no market impact), the markets come from one synthetic
+generator, and 4 comparisons were made without adjusting p for that. A small p here says a variant beat the base on
+these generated markets, not that it would make money anywhere. PnL = edge + inventory: a gain that sits in the inventory
+column is the price drifting under a position, which is luck as much as skill. With n markets the smallest possible sign p
+is 2/2^n (3.05e-05 here).
+
+run digest 52c79c853996e295 (changes if any run's result changes)

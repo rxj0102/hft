@@ -1,0 +1,1 @@
+{"benchmark_repeats":5,"benchmark_requests":300000,"primary_seed":1000,"confirmation_seed":5000,"markets":16,"requests":200000,"robustness_markets":8,"robustness_requests":40000,"bootstrap_seed":7219,"scope":"Synthetic generator only; timing covers in-memory bytes to staged order, excludes network/TLS/kernel/exchange."}

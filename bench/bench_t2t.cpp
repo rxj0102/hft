@@ -201,6 +201,8 @@ Platform measure_platform(const core::TscCalibration& cal, int cpu) {
 
 // ---- results --------------------------------------------------------------------------------------------
 
+double g_tpn = 2.8;  // TSC ticks per ns, set once in main after calibration (used for the shadow lead time)
+
 struct Hist {
   Histogram h;
   void rec(std::uint64_t ticks, std::uint64_t floor) { h.record(ticks > floor ? ticks - floor : 0); }
@@ -236,17 +238,52 @@ using PipeT = Pipeline<TxRef<Stamp>>;
 
 // One timed pass over the first `limit` inputs. `cold` flushes L1/L2 before each tick.
 bool run_total(const Session& s, std::size_t limit, bool cold, volatile std::uint8_t* junk, std::size_t junk_n, std::uint64_t floor,
-               Pass& out) {
+               Pass& out, std::uint64_t gap_ticks = 0, std::size_t shadow_k = 0) {
   core::Region region = make_region();
   Tx<true>* tx = new Tx<true>();
   auto* p = new PipeT<true>(TxRef<true>{tx}, s.cfg.mm);
   if (!init_pipe(*p, region, s)) return false;
+  // Optional shadow pipeline: a second, independent instance fed its own copy of the session from input 0. During the idle gap, just before
+  // each real tick, it processes shadow_k inputs so the same code paths run (instruction cache, branch predictors) without touching the
+  // live book's data. It never sends anything; its own wire is a private Tx.
+  core::Region shadow_region = make_region();
+  Tx<true>* stx = nullptr;
+  PipeT<true>* sp = nullptr;
+  std::size_t shadow_pos = 0;
+  if (shadow_k) {
+    stx = new Tx<true>();
+    sp = new PipeT<true>(TxRef<true>{stx}, s.cfg.mm);
+    if (!init_pipe(*sp, shadow_region, s)) return false;
+  }
   const rusage u0 = usage();
   const std::size_t n_in = std::min(limit, s.inputs.size());
   for (std::size_t i = 0; i < n_in; ++i) {
     const Input& in = s.inputs[i];
     std::size_t n = 0;
     if (cold) pollute(junk, junk_n);
+    if (gap_ticks) {  // idle spin before the tick, outside the timed interval: inter-arrival spacing without cache pollution
+      const std::uint64_t g0 = rdtsc_ordered();
+      if (shadow_k && sp) {
+        const std::uint64_t lead = static_cast<std::uint64_t>(3000.0 * g_tpn);  // run the shadow ticks in the last ~3 us of the gap
+        while (rdtsc_ordered() - g0 + lead < gap_ticks) {
+        }
+        for (std::size_t k = 0; k < shadow_k && shadow_pos < s.inputs.size(); ++k, ++shadow_pos) {
+          const Input& si = s.inputs[shadow_pos];
+          std::size_t sn = 0;
+          stx->t_first = 0;
+          stx->frames = 0;
+          if (si.kind == Input::Md) {
+            const std::uint8_t* sd = s.packet(si.idx, sn);
+            if (sp->ingest(md::Line::A, sd, sn, si.now)) sp->decide(si.now);
+          } else {
+            const std::uint8_t* sd = s.report(si.idx, sn);
+            sp->on_report(sd, sn, si.now);
+          }
+        }
+      }
+      while (rdtsc_ordered() - g0 < gap_ticks) {
+      }
+    }
     tx->t_first = 0;
     tx->frames = 0;
     if (in.kind == Input::Md) {
@@ -280,6 +317,8 @@ bool run_total(const Session& s, std::size_t limit, bool cold, volatile std::uin
   const bool ok = n_in < s.inputs.size() ||
                   matches_backtest(s, p->gateway().stats(), p->gateway().oms().position().pos, p->book().digest(),
                                    p->feed().stats(), p->gateway().risk().killed());
+  delete sp;
+  delete stx;
   delete p;
   delete tx;
   return ok;
@@ -449,10 +488,19 @@ void print_row(const char* name, const Hist& x, double tpn) {
 
 void json_hist(std::FILE* f, const char* key, const Hist& x, double tpn, bool last = false) {
   const Histogram& h = x.h;
-  std::fprintf(f, "  \"%s\": {\"n\": %llu, \"p50\": %.1f, \"p99\": %.1f, \"p999\": %.1f, \"max\": %.1f}%s\n", key,
+  std::fprintf(f, "  \"%s\": {\"n\": %llu, \"p50\": %.1f, \"p99\": %.1f, \"p999\": %.1f, \"max\": %.1f, \"ticks_per_ns\": %.8f, \"bins\": [", key,
                static_cast<unsigned long long>(h.count()), static_cast<double>(h.quantile(0.50)) / tpn,
                static_cast<double>(h.quantile(0.99)) / tpn, static_cast<double>(h.quantile(0.999)) / tpn,
-               static_cast<double>(h.max()) / tpn, last ? "" : ",");
+               static_cast<double>(h.max()) / tpn, tpn);
+  bool first = true;
+  for (unsigned i = 0; i < Histogram::kBuckets; ++i) {
+    if (h.bucket_count(i) == 0) continue;
+    std::fprintf(f, "%s{\"upper_ticks\": %llu, \"count\": %llu}", first ? "" : ",",
+                 static_cast<unsigned long long>(Histogram::bucket_upper_edge(i)),
+                 static_cast<unsigned long long>(h.bucket_count(i)));
+    first = false;
+  }
+  std::fprintf(f, "]}%s\n", last ? "" : ",");
 }
 
 std::string cpu_model() {
@@ -489,6 +537,7 @@ int main(int argc, char** argv) {
   const char* json = nullptr;
   const char* prof = nullptr;
   double prof_seconds = 20;
+  bool gap_sweep = false;
   for (int i = 1; i < argc; ++i) {
     auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
     if (!std::strcmp(argv[i], "--requests")) requests = std::strtoull(next(), nullptr, 10);
@@ -499,6 +548,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--workload")) workload = std::strtoull(next(), nullptr, 10);
     else if (!std::strcmp(argv[i], "--profile")) prof = next();
     else if (!std::strcmp(argv[i], "--seconds")) prof_seconds = std::atof(next());
+    else if (!std::strcmp(argv[i], "--gap-sweep")) gap_sweep = true;
     else {
       std::fprintf(stderr, "unknown option %s\n", argv[i]);
       return 64;
@@ -597,6 +647,7 @@ int main(int argc, char** argv) {
   // ---- the measurement ----------------------------------------------------------------------------------------------
   const core::TscCalibration cal;
   const double tpn = cal.ticks_per_ns();
+  g_tpn = tpn;
   utsname un{};
   uname(&un);
   int paranoid = -1;
@@ -704,6 +755,29 @@ int main(int argc, char** argv) {
   print_row("report-to-decision", cold.rep_all, tpn);
   std::printf("\n");
 
+  // Inter-arrival spacing: an idle spin before every tick (outside the timed interval), no cache pollution. Each gap is compared with a
+  // gap-0 pass over the same first N inputs, so the only difference is the idle time between ticks.
+  struct GapRow { double gap_us; std::size_t n; double idle0_p50, idle0_p99, idle_p50, idle_p99, act0_p50, act_p50, idle_w_p50, act_w_p50; std::uint64_t n_idle, n_act; };
+  std::vector<GapRow> gap_rows;
+  if (gap_sweep) {
+    std::printf("== inter-arrival spacing: idle spin before every tick, gap 0 over the same first N inputs as control ==\n");
+    std::printf("  %-9s %-8s %-10s %-24s %-24s %-22s\n", "gap us", "N", "n idle/act", "no-order p50 / p99 (ctl)", "no-order p50 / p99", "order p50 (ctl) / p50");
+    const double gaps_us[] = {0.0, 1.0, 5.0, 20.0, 100.0, 1000.0, 10000.0};
+    for (const double g : gaps_us) {
+      std::size_t n = g == 0.0 ? 40000 : std::min<std::size_t>(40000, std::max<std::size_t>(300, static_cast<std::size_t>(2.0e6 / g)));
+      Pass c, x, w;
+      run_total(s, n, false, nullptr, 0, pf.floor_ticks, c, 0);
+      run_total(s, n, false, nullptr, 0, pf.floor_ticks, x, static_cast<std::uint64_t>(g * 1000.0 * tpn));
+      if (g >= 5.0) run_total(s, n, false, nullptr, 0, pf.floor_ticks, w, static_cast<std::uint64_t>(g * 1000.0 * tpn), 5);
+      auto q = [&](const Hist& h, double qq) { return static_cast<double>(h.h.quantile(qq)) / tpn; };
+      GapRow r{g, n, q(c.idle, 0.50), q(c.idle, 0.99), q(x.idle, 0.50), q(x.idle, 0.99), q(c.act, 0.50), q(x.act, 0.50), q(w.idle, 0.50), q(w.act, 0.50), x.idle.h.count(), x.act.h.count()};
+      gap_rows.push_back(r);
+      std::printf("  %-9.0f %-8zu %5llu/%-4llu %9.1f / %-10.1f %9.1f / %-10.1f %9.1f / %-9.1f  warmed(5 shadow ticks): no-order %.1f order %.1f\n", g, n, static_cast<unsigned long long>(r.n_idle),
+                  static_cast<unsigned long long>(r.n_act), r.idle0_p50, r.idle0_p99, r.idle_p50, r.idle_p99, r.act0_p50, r.act_p50, r.idle_w_p50, r.act_w_p50);
+    }
+    std::printf("\n");
+  }
+
   // Book capacity changes the cache footprint of the order id table, so it moves the tail.
   std::printf("== book capacity sensitivity (hot caches; same session, same wire bytes) ==\n");
   std::printf("  %-12s %-12s %12s %12s %12s %12s\n", "capacity", "id table", "t2t p50", "t2t p99", "no-order p50", "no-order p99");
@@ -745,6 +819,15 @@ int main(int argc, char** argv) {
       json_hist(f, "stage_md", st.md, tpn);
       json_hist(f, "stage_strategy", st.strat, tpn);
       json_hist(f, "stage_gateway", st.gate, tpn);
+      std::fprintf(f, "  \"gap_sweep\": [");
+      for (std::size_t k = 0; k < gap_rows.size(); ++k) {
+        const GapRow& r = gap_rows[k];
+        std::fprintf(f, "%s{\"gap_us\": %.1f, \"n_inputs\": %zu, \"n_idle\": %llu, \"n_act\": %llu, \"idle_ctl_p50\": %.1f, \"idle_ctl_p99\": %.1f, "
+                        "\"idle_p50\": %.1f, \"idle_p99\": %.1f, \"act_ctl_p50\": %.1f, \"act_p50\": %.1f, \"idle_warm_p50\": %.1f, \"act_warm_p50\": %.1f}", k ? ", " : "", r.gap_us, r.n,
+                     static_cast<unsigned long long>(r.n_idle), static_cast<unsigned long long>(r.n_act), r.idle0_p50, r.idle0_p99, r.idle_p50,
+                     r.idle_p99, r.act0_p50, r.act_p50, r.idle_w_p50, r.act_w_p50);
+      }
+      std::fprintf(f, "],\n");
       std::fprintf(f, "  \"ns_per_input\": %.1f,\n  \"noise_gt5us_per_s\": %llu\n}\n", ns_per_input,
                    static_cast<unsigned long long>(pf.gt5us));
       std::fclose(f);

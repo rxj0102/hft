@@ -7,6 +7,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <cmath>
 
 namespace hft::core {
 
@@ -33,7 +34,7 @@ class Histogram {
   std::uint64_t quantile(double q) const noexcept {
     if (total_ == 0) return 0;
     if (q >= 1.0) return max_;
-    auto target = static_cast<std::uint64_t>(q * static_cast<double>(total_));
+    auto target = static_cast<std::uint64_t>(std::ceil(q * static_cast<double>(total_)));
     if (target == 0) target = 1;
     std::uint64_t seen = 0;
     for (unsigned i = 0; i < kBuckets; ++i) {
@@ -45,6 +46,10 @@ class Histogram {
     }
     return max_;
   }
+
+  // Read-only evidence export; record() and fixed storage are unchanged.
+  std::uint64_t bucket_count(unsigned i) const noexcept { return counts_[i]; }
+  static std::uint64_t bucket_upper_edge(unsigned i) noexcept { return upper_edge(i); }
 
   void reset() noexcept {
     counts_.fill(0);

@@ -1,0 +1,19 @@
+Exception in thread Thread-7 (run):
+Traceback (most recent call last):
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "/workspace/hft/scripts/test_live_tool.py", line 335, in run
+    os.write(self.reports_w, (json.dumps(msg) + "\n").encode())
+OSError: [Errno 9] Bad file descriptor
+Exception in thread Thread-27 (run):
+Traceback (most recent call last):
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "/workspace/hft/scripts/test_live_tool.py", line 335, in run
+    os.write(self.reports_w, (json.dumps(msg) + "\n").encode())
+BrokenPipeError: [Errno 32] Broken pipe
+test_live_tool: all checks passed

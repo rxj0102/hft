@@ -1,0 +1,9 @@
+# Literature and template provenance
+
+Inspected the original journal PDF of Marco Avellaneda and Sasha Stoikov, “High-frequency trading in a limit order book,” Quantitative Finance 8(3), 217–224 (2008), in `https://github.com/fedecaccia/avellaneda-stoikov`, commit `1e84656689e5ed4801e40ffc00ccb3ce602884b3`, `doc/1_Avellaneda-Stoikov_high_frequency_trading_in_a_limit_order_book.pdf`. This is a mirror, not the publisher, and its source identity is recorded explicitly. It establishes the original optimal-control context, not the optimality of this repository's imbalance heuristic. Current empirical results from that paper have not been reproduced.
+
+Budish–Cramton–Shim and Holm are established citations retained with known bibliographic metadata; direct publisher/index verification remains outstanding because scholarly domains are blocked by the live network policy. A current comprehensive systems and market-making literature review is incomplete. Do not assert algorithmic priority or that the few references in this working draft exhaust related work. The supplied bibliography is retained separately as `paper/supplied-references-unverified.bib` and is not automatically trusted.
+
+The IEEEtran class is the same licensed v1.8b mirror documented in the Rough Volatility artifact. The installed standard `ieeetr.bst` supplies numeric IEEE bibliography style. Current official venue author kits and requirements must be checked before submission.
+
+Possible venue fit: IEEE HPEC for a stronger systems/performance study with external baselines; IEEE CIFEr for synthetic finance experiments if an active call fits; IEEE Access after novelty and independent validation improve. No current active call, acceptance rate, impact factor, fee or deadline is asserted. A pure implementation paper needs a stronger contribution argument than low host latency alone.

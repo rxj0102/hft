@@ -1,0 +1,125 @@
+hft_lab: 8 markets (seeds 15000..15007) x 40000 requests, 5 variants; md 5 us, ingress 10 us, egress 10 us, jitter 2 us, queue penalty 0%
+risk limits derived from the variants: max order qty 100, max position 80 (the strategy cap should bind first)
+regimes: default,volatile,quiet,informed,uninformed,thin,slow (same seeds in each; a regime changes generator settings, not the generator)
+
+regime default: the generator's own settings
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +3.47      0.33        +1.62       +1.85        109    6.1%         9
+noalpha                           +0.08      0.13        +0.62       -0.54         40    3.1%         9
+wide                              +0.13      0.09        +0.05       +0.08          5    0.4%         6
+noskew                            +5.34      2.56        +2.18       +3.16        139    7.1%        38
+strongskew                        +2.50      0.22        +1.42       +1.08         99    6.4%         7
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                           -3.39      0.30  -11.46      0/8/0    0.0078        -1.00        -2.39
+wide                              -3.34      0.29  -11.36      0/8/0    0.0078        -1.57        -1.77
+noskew                            +1.86      2.35   +0.79      3/5/0    0.7266        +0.55        +1.31
+strongskew                        -0.97      0.13   -7.67      0/8/0    0.0078        -0.20        -0.77
+
+regime volatile: the fair value jumps four times as often
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +7.50      0.39        +2.99       +4.51        202    8.8%        10
+noalpha                           -0.60      0.32        +1.71       -2.31        124    7.2%        13
+wide                              -0.02      0.30        +0.26       -0.28         22    1.3%         6
+noskew                           +11.91      3.73        +4.06       +7.85        258   10.0%        40
+strongskew                        +5.00      0.19        +2.63       +2.37        192    8.9%         8
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                           -8.09      0.56  -14.47      0/8/0    0.0078        -1.27        -6.82
+wide                              -7.52      0.32  -23.30      0/8/0    0.0078        -2.73        -4.80
+noskew                            +4.41      3.71   +1.19      6/2/0    0.2891        +1.07        +3.34
+strongskew                        -2.49      0.33   -7.60      0/8/0    0.0078        -0.36        -2.14
+
+regime quiet: the fair value jumps a quarter as often
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +1.64      0.12        +0.84       +0.80         55    4.1%         9
+noalpha                           +0.12      0.05        +0.20       -0.08         14    1.4%         6
+wide                              +0.03      0.03        +0.03       +0.00          1    0.1%         4
+noskew                            +2.96      0.89        +1.24       +1.72         77    4.9%        38
+strongskew                        +1.24      0.11        +0.75       +0.49         52    4.4%         7
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                           -1.52      0.13  -12.06      0/8/0    0.0078        -0.64        -0.88
+wide                              -1.60      0.12  -13.53      0/8/0    0.0078        -0.81        -0.80
+noskew                            +1.32      0.85   +1.56      5/3/0    0.7266        +0.40        +0.93
+strongskew                        -0.40      0.07   -5.89      0/8/0    0.0078        -0.10        -0.30
+
+regime informed: more informed flow and a stronger lean (more adverse selection)
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              -2.65      0.89        +7.05       -9.70        323   11.9%        24
+noalpha                           -1.63      0.45        +7.10       -8.73        326   12.7%        16
+wide                              -3.81      1.02        +3.81       -7.62        111    4.7%        24
+noskew                            -5.83      4.31        +0.67       -6.50         44    3.5%        40
+strongskew                        -0.94      0.51        +6.71       -7.65        341   13.0%        15
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                           +1.02      0.72   +1.41      5/3/0    0.7266        +0.06        +0.97
+wide                              -1.16      0.44   -2.61      2/6/0    0.2891        -3.24        +2.08
+noskew                            -3.18      3.57   -0.89      3/5/0    0.7266        -6.38        +3.20
+strongskew                        +1.71      0.42   +4.11      7/1/0    0.0703        -0.34        +2.05
+
+regime uninformed: little informed flow and a weak lean (a weak signal)
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +0.55      0.05        +0.15       +0.40         12    1.1%         7
+noalpha                           +0.03      0.02        +0.04       -0.01          3    0.4%         3
+wide                              +0.00      0.00        +0.00       +0.00          0    0.0%         0
+noskew                            +2.58      0.72        +0.51       +2.07         32    2.2%        37
+strongskew                        +0.37      0.03        +0.15       +0.22         12    1.3%         6
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                           -0.53      0.05   -9.61      0/8/0    0.0078        -0.11        -0.41
+wide                              -0.55      0.05  -10.59      0/8/0    0.0078        -0.15        -0.40
+noskew                            +2.03      0.70   +2.91      6/2/0    0.2891        +0.36        +1.67
+strongskew                        -0.18      0.04   -5.19      0/8/0    0.0078        -0.00        -0.18
+
+regime thin: a third of the resting orders (a thin book)
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +3.38      0.18        +2.60       +0.78        172    6.3%         9
+noalpha                           +0.74      0.18        +2.29       -1.54        144    8.2%        12
+wide                              +0.26      0.11        +0.38       -0.12         21    0.9%         8
+noskew                            +2.86      0.82        +2.52       +0.34        161    5.8%        41
+strongskew                        +3.13      0.14        +2.61       +0.52        187    6.9%        10
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                           -2.64      0.25  -10.47      0/8/0    0.0078        -0.31        -2.32
+wide                              -3.12      0.27  -11.72      0/8/0    0.0078        -2.22        -0.90
+noskew                            -0.52      0.86   -0.60      2/6/0    0.2891        -0.07        -0.44
+strongskew                        -0.25      0.17   -1.49      3/5/0    0.7266        +0.01        -0.26
+
+regime slow: requests four times as far apart (a slow tape)
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +3.49      0.31        +1.56       +1.92        104    5.6%         9
+noalpha                           +0.12      0.17        +0.54       -0.43         32    2.7%         9
+wide                              +0.18      0.09        +0.08       +0.10          5    0.4%         4
+noskew                            +5.92      2.54        +2.33       +3.59        144    6.7%        38
+strongskew                        +2.48      0.22        +1.31       +1.16         88    5.4%         5
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                           -3.37      0.28  -12.17      0/8/0    0.0078        -1.02        -2.35
+wide                              -3.31      0.24  -13.84      0/8/0    0.0078        -1.48        -1.82
+noskew                            +2.44      2.39   +1.02      4/4/0    1.0000        +0.77        +1.67
+strongskew                        -1.01      0.13   -7.92      0/8/0    0.0078        -0.25        -0.76
+
+across regimes: mean PnL difference from the base in each regime
+variant                        default    volatile       quiet    informed  uninformed        thin        slow better in       worst
+noalpha                          -3.39       -8.09       -1.52       +1.02       -0.53       -2.64       -3.37     1/7         -8.09
+wide                             -3.34       -7.52       -1.60       -1.16       -0.55       -3.12       -3.31     0/7         -7.52
+noskew                           +1.86       +4.41       +1.32       -3.18       +2.03       -0.52       +2.44     5/7         -3.18
+strongskew                       -0.97       -2.49       -0.40       +1.71       -0.18       -0.25       -1.01     1/7         -2.49
+A variant that wins in the regime it was tuned for and loses elsewhere is fitted to that regime. 'better in' counts
+regimes where the mean difference is above zero; it is not a test, and every regime uses the same seeds.
+
+Read this with care: the fills are simulated (queue model, no market impact), the markets come from one synthetic
+generator (regimes change its settings, not its kind), and 4 comparisons were made without adjusting p for that. A small p here says a variant beat the base on
+these generated markets, not that it would make money anywhere. PnL = edge + inventory: a gain that sits in the inventory
+column is the price drifting under a position, which is luck as much as skill. With n markets the smallest possible sign p
+is 2/2^n (0.00781 here).
+
+run digest b07a23df361d72bd (changes if any run's result changes)

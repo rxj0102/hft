@@ -37,6 +37,14 @@ static void test_histogram_small_exact() {
   CHECK(h.min() == 0);
   CHECK(h.max() == 63);
   CHECK(h.quantile(0.5) == 31);
+  h.reset();
+  for (std::uint64_t x : {1u, 2u, 3u, 4u, 5u}) h.record(x);
+  CHECK(h.quantile(0.5) == 3);  // nearest rank is ceil(5/2), not floor
+  CHECK(h.quantile(0.9) == 5);
+  std::uint64_t exported = 0;
+  for (unsigned i = 0; i < h.kBuckets; ++i) exported += h.bucket_count(i);
+  CHECK(exported == h.count());
+
 }
 
 static void test_histogram_uniform() {

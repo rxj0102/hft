@@ -1,0 +1,69 @@
+== tick-to-trade, production pipeline, recorded session ==
+  cpu            Intel(R) Xeon(R) Processor @ 2.80GHz
+  kernel         Linux 6.18.44-fc-v139, 2 cpus online
+  compiler       13.3.0
+  build          NDEBUG
+  TSC            2.8002 ticks/ns, invariant yes
+  memory         hugepages THP hint, mlock yes, prefault yes
+  pinned         cpu 1 (ok)
+  timer overhead 14.3 ns (rdtsc pair with lfence, p50, subtracted from every interval)
+  platform noise a do-nothing spin for 1 s lost the CPU: >1us 2754 times, >5us 1652, >20us 663, >100us 17, longest 3769.3 us
+  session        319633 inputs (310987 feed packets, 8646 exchange reports), 7795 order frames on the wire
+                 new 86, replace 7709, cancel 0
+
+  verify         replay puts the backtest's exact bytes on the wire (hash d8420c58f2152785): OK
+  book sizing    peak 279 resting orders; recorded with capacity 65536 (id table 131072 slots, 2048 KiB)
+  measured at    capacity 1024 (id table 2048 slots, 32 KiB) (3x peak, power of two)
+
+== hot caches: packets replayed back to back (best case for caches and predictors) ==
+  tick-to-trade, any order                7233  p50   158.2  p90   185.3  p99   356.8  p99.9   1759.5  max   26945.9 ns
+    first frame was a replace             7200  p50   158.2  p90   185.3  p99   328.2  p99.9    776.7  max   26945.9 ns
+    first frame was a new order             33  p50   336.8  p90   405.3  p99  1751.3  p99.9   1751.3  max    1751.3 ns
+    first frame was a cancel                 -
+  tick-to-decision, no order            303754  p50    95.4  p90   111.1  p99   231.1  p99.9    451.0  max   65263.1 ns
+  report-to-decision (all reports)        8646  p50    74.6  p90   152.5  p99   322.5  p99.9    582.5  max   50643.5 ns
+  report-to-order (report caused one)       412  p50   146.8  p90   299.6  p99   531.0  p99.9    894.9  max     894.9 ns
+  ticks: 310987 feed packets, 7233 caused an order (2.3%), 8646 reports
+  during the pass: page faults 0, voluntary context switches 0, involuntary 0
+
+== where the time goes (ticks that sent an order; the probes between stages are not free, see the measured probe cost below) ==
+  feed handler: parse, arbitrate, book      7233  p50    66.1  p90   138.2  p99   273.9  p99.9    588.2  max   32141.2 ns
+  strategy: signal and quote logic        7233  p50   105.3  p90   135.3  p99   158.2  p99.9    822.4  max   18377.9 ns
+  gateway: risk, OMS, encode, stage       7233  p50    49.6  p90    80.4  p99   276.8  p99.9    565.3  max   37285.9 ns
+    sum of the three, same ticks          7233  p50   225.3  p90   353.9  p99   593.9  p99.9   2193.8  max   37466.6 ns
+    end to end, same run                  7233  p50   253.9  p90   382.5  p99   622.5  p99.9   2216.6  max   37495.1 ns
+  after the wire (second side etc.)       7233  p50    22.1  p90    30.0  p99   151.1  p99.9    356.8  max     847.1 ns
+  probe cost: the staged run's end to end p50 is 95.7 ns above the unprobed headline p50 (158.2 ns); stage times
+  below include their share of it, so read them as proportions, not as exact nanoseconds
+  no-order ticks: feed handler          303754  p50    51.1  p90   118.2  p99   273.9  p99.9    548.2  max   78896.4 ns
+  no-order ticks: strategy              303754  p50    96.8  p90   131.1  p99   146.8  p99.9    371.0  max  155994.3 ns
+
+== the other feed line ==
+  duplicate packet dropped (line B)     310987  p50    16.4  p90    20.0  p99    32.1  p99.9     41.4  max   53205.4 ns
+
+== cold L1 and L2: a 4 MiB walk before every tick (first 40000 inputs; data still in L3) ==
+  tick-to-trade, any order                 865  p50  1508.1  p90  2170.9  p99  3016.6  p99.9  39187.9  max   39187.9 ns
+  tick-to-decision, no order             38134  p50   719.6  p90  1062.4  p99  1485.2  p99.9  32545.8  max  665729.3 ns
+  report-to-decision                      1001  p50   845.3  p90  1268.1  p99  2056.6  p99.9   5622.1  max   12852.6 ns
+
+== inter-arrival spacing: idle spin before every tick, gap 0 over the same first N inputs as control ==
+  gap us    N        n idle/act no-order p50 / p99 (ctl) no-order p50 / p99       order p50 (ctl) / p50 
+  0         40000    38134/865       93.9 / 251.1           93.9 / 236.8          161.1 / 159.6      warmed(5 shadow ticks): no-order 0.0 order 0.0
+  1         40000    38134/865       93.9 / 248.2           96.8 / 248.2          161.1 / 173.9      warmed(5 shadow ticks): no-order 0.0 order 0.0
+  5         40000    38134/865       93.9 / 233.9          101.1 / 388.2          159.6 / 205.3      warmed(5 shadow ticks): no-order 103.9 order 191.1
+  20        40000    38134/865       95.4 / 279.6          163.9 / 565.3          161.1 / 328.2      warmed(5 shadow ticks): no-order 182.5 order 299.6
+  100       20000    19007/462       93.9 / 268.2          276.8 / 891.0          158.2 / 559.6      warmed(5 shadow ticks): no-order 222.5 order 439.6
+  1000      2000      1924/37        96.8 / 348.2          479.6 / 1873.8         178.2 / 1713.8     warmed(5 shadow ticks): no-order 393.9 order 1176.7
+  10000     300        274/12       152.5 / 445.3         2742.3 / 23038.0        242.5 / 2719.4     warmed(5 shadow ticks): no-order 753.9 order 2536.6
+
+== book capacity sensitivity (hot caches; same session, same wire bytes) ==
+  capacity     id table          t2t p50      t2t p99 no-order p50 no-order p99
+  1024            32 KiB        159.6 ns     405.3 ns      95.4 ns     282.5 ns   <- headline
+  4096           128 KiB        228.2 ns     651.0 ns     142.5 ns     456.8 ns
+  16384          512 KiB        165.3 ns     462.5 ns     101.1 ns     342.5 ns
+  65536         2048 KiB        262.5 ns     593.9 ns     205.3 ns     496.7 ns
+  262144        8192 KiB        213.9 ns     559.6 ns     152.5 ns     468.2 ns
+
+== sustained ==
+  111.0 ns per input on average (9.01 M inputs/s), no probes in the loop
+

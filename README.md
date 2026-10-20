@@ -1,5 +1,8 @@
 # hft
 
+Research revision: [reproducible synthetic experiments, IEEE-format draft and evidence review](research/README.md). These distinguish measured in-memory timing, local fake-exchange tests and synthetic PnL from real-venue claims.
+
+
 [![ci](https://github.com/rxj0102/hft/actions/workflows/ci.yml/badge.svg)](https://github.com/rxj0102/hft/actions/workflows/ci.yml)
 
 A tick-to-trade engine in C++20, built in phase gates with a measurement or a test at every gate. Market data goes in, an order book, a market-making strategy, pre-trade risk, an order management system and an order-entry gateway react in about 115 to 130 ns at the median on a shared VM (hot caches), and around that sit the pieces that make it something you could point at an exchange: a supervisor, a bridge to the Coinbase Exchange sandbox, a closed loop for fills, a position that survives restarts, and a PnL report.
