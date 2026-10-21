@@ -73,7 +73,7 @@ Starting a segment takes 108-127 ms on this VM, from the snapshot line to the pi
 - Timing excludes the network and TLS (they happen in Python), and the Python side costs more than the engine.
 - The stale limit (3 s) and the model-check interval (100 packets) are chosen, not tuned.
 - Two of the guard checks in `end_segment` are redundant with each other in a closed system with this venue (the OMS has no working order, the venue has no live order); they are kept as a cross-check against a venue that disagrees with the OMS and are not exercised by any test.
-- Real-clock behaviour was observed over runs of 25 to 90 seconds, not hours.
+- Real-clock behaviour was first observed over runs of 25 to 90 seconds. Later sessions ran 30 minutes and 2 hours under the supervisor on the sandbox feed (docs/SANDBOX.md, Phases 40, 49 and 51); nothing longer has been run, and all of it was paper.
 
 ## Running it
 
@@ -81,7 +81,7 @@ Starting a segment takes 108-127 ms on this VM, from the snapshot line to the pi
 python3 -m pip install websockets
 cmake --preset release && cmake --build --preset release
 python3 scripts/capture_l2.py --out - --seconds 600 --resnap-file /tmp/hft.resnap | ./build/release/hft_live --resnap-file /tmp/hft.resnap
-./build/release/hft_live --from data/btc.l2            # a recording, through the same code, with its own stamps as the clock
+./build/release/hft_live --from data/btc.l2            # a recording, through the same code, with its own stamps as the clock (add --clock-in FILE to replay a recorded live run exactly: docs/REPRODUCIBILITY.md)
 ./build/release/hft_live --from data/btc.l2 --pace 1   # the same, at the recorded speed
 ```
 

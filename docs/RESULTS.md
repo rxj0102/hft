@@ -52,6 +52,7 @@ Parameter search with held-out markets (`--grid`, ADR 34), 2026-10-17: grids of 
 | Fuzzing | 9 libFuzzer targets, 45 s each in CI; longer local runs were clean after the fixes listed in the changelog | `fuzz-smoke` job |
 | Python suites | capture script, live tool, order bridge, sandbox smoke test, PnL report, strategy lab, all against local fakes | `scripts/ci_local.sh` |
 | Fault drills | 31 drills against a fake feed and a fake exchange: connection drop, silence, kill -9 of each process, hang, crash loop, exchange down, bad credentials, close with and without liquidity, restart with a carried position, account mismatch, SIGTERM of a recorded run replayed to its hash, recorded clock in bridge and loop modes | `python3 scripts/drill.py` |
+| Exact replay of recorded live runs | 23 of 23 runs of a 2-hour sandbox session and 5 of 5 of a 30-minute one replay to the same hash and orders line from their stream and clock; scripted closed-loop cases and 6 runs on recorded data too. Paper venue and fake exchange only. See [REPRODUCIBILITY.md](REPRODUCIBILITY.md) | `hft_live --from STREAM --clock-in CLOCK` |
 | GitHub Actions | 9 jobs, green on the latest push to master and main at the time of writing | `gh run list` |
 
 The drills are timing-based. One of them failed once in a local run during Phase 21; the cause was a race in the drill itself (it counted orders before the old process had died), it was fixed, and it passed three repeats afterwards.
@@ -67,6 +68,12 @@ At every phase from the start, bugs were injected into the new code on purpose a
 | 21 | PnL report and fill events | 30 | 7 |
 | 23 | strategy lab, backtester hooks, report tie order | 133 | 24 of 95 in the first round, 3 of 33 in the second (equivalent) |
 | 24 | grid search with held-out markets | 60 | 17 of 60 in the first round (3 equivalent, 7 did not compile and were rewritten) |
+| 41 | stream recording (`--tee`, `--record-dir`) | 16 | 4 |
+| 42 | kill sweep out of the feed hash | 11 | 1 (an unobservable guard, removed) |
+| 45 | live clock (`--clock-out`, `--clock-in`) | 25 in the first pass | 7, each fixed by a test or removed; 2 left that no output can show |
+| 46 | exchange reports in the clock | 15 | 1 (an unobservable guard, removed); 1 did not compile and was redone |
+| 47 | settings in the clock | 25 | 3 (levels, check-every, close collar: fixed by tests); `--max-orders` cannot be shown to matter |
+| 50 | record only polls that can act | 11 | 2: one case added, one equivalent by design |
 
 A few survivors in each phase were equivalent mutants (the changed code behaves the same) and are said to be so in the changelog.
 

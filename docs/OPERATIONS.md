@@ -67,7 +67,7 @@ A run on the real Coinbase feed through the supervisor: kill -9 of `hft_live` at
 
 ## With the order bridge
 
-`supervise.py --bridge` adds a third process (docs/SANDBOX.md). `bridge.jsonl` has its events (`bridge_start`, `clock_skew`, `cancel_all`, `start_flat`, `order_rejected`, `rate_limited`, `http_5xx`, `net_error`, `order_vanished`, `stray_order`, `fatal`, `exit_flat`, `exit`), `bridge.prom` its metrics (`hft_bridge_*`). If any of the three dies the trio restarts; the new bridge cancels everything first. Bridge exit 2 or 4 is fatal for the supervisor (exit 4). The extra drills: bridge_flow, kill_bridge, kill_live_bridge, exchange_down, bad_credentials, bridge_hang, all against `scripts/fake_exchange.py`.
+`supervise.py --record-dir DIR` keeps each run's stream and clock so the run can be replayed exactly (docs/REPRODUCIBILITY.md; drills `record`, `record_term`, `record_modes`). `supervise.py --bridge` adds a third process (docs/SANDBOX.md). `bridge.jsonl` has its events (`bridge_start`, `clock_skew`, `cancel_all`, `start_flat`, `order_rejected`, `rate_limited`, `http_5xx`, `net_error`, `order_vanished`, `stray_order`, `fatal`, `exit_flat`, `exit`), `bridge.prom` its metrics (`hft_bridge_*`). If any of the three dies the trio restarts; the new bridge cancels everything first. Bridge exit 2 or 4 is fatal for the supervisor (exit 4). The extra drills: bridge_flow, kill_bridge, kill_live_bridge, exchange_down, bad_credentials, bridge_hang, all against `scripts/fake_exchange.py`.
 
 ## Closed loop (`supervise.py --loop`)
 
