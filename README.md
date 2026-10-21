@@ -4,6 +4,8 @@
 
 A tick-to-trade engine in C++20, built in phase gates with a measurement or a test at every gate. Market data goes in, an order book, a market-making strategy, pre-trade risk, an order management system and an order-entry gateway react in about 115 to 130 ns at the median on a shared VM (hot caches), and around that sit the pieces that make it something you could point at an exchange: a supervisor, a bridge to the Coinbase Exchange sandbox, a closed loop for fills, a position that survives restarts, and a PnL report.
 
+**Start here:** [docs/CASE_STUDY.md](docs/CASE_STUDY.md) is a five-minute read of what was built, five things worth telling, and what is not claimed. To build and test, see [Build and run](#build-and-run).
+
 **Honest status:** the C++ pipeline, the replay oracle, the fuzzers and the drills are built and tested. The sandbox bridge and everything that depends on a real exchange (closed loop, closing orders, account check, PnL on real fills) have only run against a local fake exchange written from the public API documentation. No API key was available, so the real sandbox has never been run. [docs/RESULTS.md](docs/RESULTS.md) says exactly what was measured, how, and what was not.
 
 ![Architecture](docs/architecture.svg)
@@ -73,6 +75,7 @@ The smoke test places a few minimum-size orders worth under 5 USD and writes a r
 
 | | |
 |---|---|
+| [docs/CASE_STUDY.md](docs/CASE_STUDY.md) | five-minute summary: what was built, what went wrong and was fixed, what is not claimed |
 | [docs/RESULTS.md](docs/RESULTS.md) | every measured number, with command, machine and caveats |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module map and data flow |
 | [docs/DESIGN.md](docs/DESIGN.md) | phase-by-phase design log with measurements |
