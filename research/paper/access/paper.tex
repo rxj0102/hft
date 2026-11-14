@@ -1,0 +1,185 @@
+\documentclass{ieeeaccess}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{url}
+\usepackage{bm}
+\makeatletter
+\AtBeginDocument{\DeclareMathVersion{bold}
+\SetSymbolFont{operators}{bold}{T1}{times}{b}{n}
+\SetSymbolFont{NewLetters}{bold}{T1}{times}{b}{it}
+\SetMathAlphabet{\mathrm}{bold}{T1}{times}{b}{n}
+\SetMathAlphabet{\mathit}{bold}{T1}{times}{b}{it}
+\SetMathAlphabet{\mathbf}{bold}{T1}{times}{b}{n}
+\SetMathAlphabet{\mathtt}{bold}{OT1}{pcr}{b}{n}
+\SetSymbolFont{symbols}{bold}{OMS}{cmsy}{b}{n}
+\renewcommand\boldmath{\@nomath\boldmath\mathversion{bold}}}
+\makeatother
+\input{numbers}
+\input{spacing_numbers}
+
+\begin{document}
+\history{Date of publication xxxx 00, 0000, date of current version xxxx 00, 0000.}
+\doi{10.1109/ACCESS.2024.0429000}
+
+\title{Spacing Matters: Back-to-Back Replay Understates Tick-to-Trade Latency in a Reproducible C++ Market-Data Pipeline}
+\author{\uppercase{Rajvardhan Jadhav}\authorrefmark{1}}
+\address[1]{Fox School of Business, Temple University, Philadelphia, PA, USA (e-mail: rajvardhanjadhav124@gmail.com)}
+\tfootnote{Funding information to be confirmed by the author.}
+
+\markboth
+{Jadhav: Spacing Matters: Back-to-Back Replay Understates Tick-to-Trade Latency}
+{Jadhav: Spacing Matters: Back-to-Back Replay Understates Tick-to-Trade Latency}
+
+\corresp{Corresponding author: Rajvardhan Jadhav (e-mail: rajvardhanjadhav124@gmail.com).}
+
+\begin{abstract}
+Latency of software trading systems is usually measured by replaying recorded market data packets back to back, a practice that keeps processor caches and branch predictors warm. We study how much this understates the cost of a tick when packets are spaced as on a real feed. Using an open, reproducible C++20 pipeline that covers feed arbitration, an order book, a market-making decision, risk checks, order management and order staging, we insert an idle gap before each tick, outside the timed interval and with no memory traffic, and compare against a matched back-to-back control. On a shared two-core cloud virtual machine, the median latency of ticks that send no order rises by a factor of 2.9 at a gap of 100 microseconds, 5 at one millisecond and 14 at ten milliseconds. Running the pipeline's code on a shadow instance during the gap recovers only part of the penalty, so the cause is not isolated. We replicate the back-to-back timings on a second host, compare the order book with a standard-library reference, and report paired synthetic strategy ablations with multiplicity-corrected inference. The full-session replay is verified byte for byte against the backtest before any latency is reported. We make no claim about exchange latency, real fills or profitability. All code, raw outputs and scripts regenerate the reported numbers.
+\end{abstract}
+
+\begin{keywords}
+Benchmarking methodology, cache warming, latency measurement, limit order book, reproducibility, tick-to-trade
+\end{keywords}
+
+\titlepgskip=-21pt
+
+\maketitle
+
+\section{Introduction}
+\label{sec:introduction}
+\PARstart{T}{ick-to-trade} latency, the time from the arrival of a market data packet to the staging of an order in response, is a central figure of merit for electronic trading software. Published and informal figures are frequently obtained by replaying a captured session through the system as fast as it will accept packets. This keeps instruction and data caches and branch predictors warm and so yields a best case. A live system sees a packet every few hundred microseconds to tens of milliseconds, and between packets the same core may sit idle or run other code. How much the best-case figure understates the cost of a tick at realistic spacing is rarely reported together with an artifact that lets a reader check it.
+
+This article makes three contributions, each tied to preserved raw outputs.
+\begin{enumerate}
+\item \textbf{A controlled spacing measurement.} In a pinned, single-thread replay of a byte-verified session, an idle gap before each tick increases measured latency by large factors without the benchmark evicting its own working set, relative to a matched back-to-back control (Section~\ref{sec:spacing}).
+\item \textbf{A test of one mitigation.} Running the pipeline's code path on a shadow instance during the gap recovers only part of the penalty, which narrows but does not settle the cause (Section~\ref{sec:warming}).
+\item \textbf{A reproducible artifact and honest scope.} The pipeline, tests, experiment drivers and manuscript generator rebuild from one command. Hot-cache timings were replicated on a second host, and a book-update baseline and paired synthetic strategy ablations are reported with their limits (Sections~\ref{sec:host} and~\ref{sec:ablation}). No profitability, formal-verification or exchange-latency claim is made.
+\end{enumerate}
+The pipeline design combines familiar techniques. The novelty is the measurement and the evidence chain, not a new algorithm.
+
+\section{Related Work}
+\label{sec:related}
+\textbf{Order books and markets.} Limit order book structure and dynamics are surveyed in~\cite{gould2013}. Stochastic and queue-reactive models of book dynamics appear in~\cite{cont2010,huang2015}, and the value of queue position is analyzed in~\cite{moallemi2017}. Market making under inventory risk is treated classically in~\cite{avellaneda2008}, and latency-driven market design in~\cite{budish2015}. These works concern market models and incentives, not software latency measurement. We use them only to place the synthetic strategy experiments of Section~\ref{sec:ablation}.
+
+\textbf{Benchmarking methodology.} Measurement bias from seemingly irrelevant experimental setup was demonstrated in~\cite{mytkowicz2009}. Statistically rigorous benchmarking with a bounded number of repetitions is treated in~\cite{kalibera2013}, and reporting practice for scientific benchmarking of parallel systems in~\cite{hoefler2015}. Our spacing experiment is a concrete instance of this concern in a trading-system setting.
+
+\textbf{Cache warming in low-latency software.} The phenomenon itself is known to practitioners. Because the order-sending path of a trading system executes rarely, its code and data are often cold when needed. The C++ low-latency design literature describes cache warming, for example running the engine on every event but releasing orders only when needed, and reports a large benefit in a cold-versus-warm microbenchmark~\cite{bilokon2023}. That benchmark compares access patterns over a data set rather than sweeping idle time between invocations. Open-source matching engines such as~\cite{jericevich2021} report latency and throughput tests. In the sources we could access, we did not find a controlled sweep of idle time between ticks, with a matched back-to-back control, for an inspectable end-to-end pipeline. This is a statement about our search and not a claim of priority (Section~\ref{sec:discussion}).
+
+\section{System Under Study}
+\label{sec:system}
+\subsection{Pipeline}
+An encoded feed packet passes through arbitration between two redundant lines, gap detection and snapshot recovery, an order-book update, a market-making decision, pre-trade risk checks, order management and order-entry staging, in one thread run to completion. The book uses flat price levels, pooled intrusive order nodes, a bitmap of occupied levels and an identifier lookup table. The node size of 32 bytes is a compile-time check and not a proof of cache behavior. A separate compile target checks selected hot-path headers with exceptions and run-time type information disabled. The measured path excludes the network interface, the kernel network stack, transport security, message parsing and the exchange. Correctness checks are differential, using an independent reference book and a replay hash, and are not formal verification.
+
+\subsection{Strategy and synthetic venue}
+The strategy combines a quoted spread, an order-book imbalance lean and an inventory skew with risk limits. Its coefficients are engineering choices and no optimal-control claim is made. The backtester stages orders through the production gateway and order manager and executes them in a queue-aware synthetic venue with separate market-data, ingress and egress delays. The generator includes informed flow that the imbalance reveals, so removing the imbalance lean tests whether the engineered signal is used and not whether such a signal exists in historical data. Marked profit and loss is decomposed into spread edge, inventory mark-to-market and explicit fees. There is no modeled endogenous market impact and no calibrated real-venue queue model.
+
+\section{Measurement Method}
+\label{sec:method}
+\textbf{Timed interval.} Each tick is timed with ordered reads of the processor time-stamp counter around ingest and decision. The median timer overhead, about 14 to 15 ns, is subtracted. A tick is classified as an \emph{order} tick if at least one order frame is staged and as a \emph{no-order} tick otherwise (tick-to-decision). Latencies are stored in a fixed-bin histogram that preserves bin counts and tick calibration, and quantiles use the nearest-rank definition $\lceil qn\rceil$. A defect in the predecessor used $\lfloor qn\rfloor$, which can fall below the stated quantile for odd sample counts, and was corrected with regression tests.
+
+\textbf{Verification gate.} Before any latency is printed, the production pipeline must emit the exact wire bytes of the backtest session, checked by hash. A failed match aborts the run. The gapped passes replay a prefix of the same session through the same code path and are not re-hashed themselves.
+
+\textbf{Hosts.} Host A is a shared AMD EPYC 9V74 virtual machine with a four-core quota and GCC 14. Host B is a shared virtual machine with an \HostBCpu\ processor, two virtual cores and GCC 13.3. Neither has hardware performance counters, processor isolation or a fixed frequency. Both are cloud virtual machines of the same provider class, so the replication tests software and compiler variation and not hardware diversity. The benchmark thread is pinned to one core.
+
+\textbf{Spacing control.} For each gap $g$, a spin loop of duration $g$ runs before every tick, outside the timed interval. Its latency is compared with a gap-0 pass over the same first $N$ inputs, so the only difference between the two is idle time between ticks. For large $g$ the number of inputs $N$ is reduced so that a pass takes about two seconds ($N=40{,}000$ for $g\le 20$~\textmu s, 20{,}000 at 100~\textmu s, 2{,}000 at 1~ms and 300 at 10~ms). The spin executes no memory traffic and so does not evict the benchmark's own working set. Ratios are computed per run, and the median over five sequential runs is reported.
+
+\textbf{Shadow warming.} In the warmed variant, a second, independent pipeline instance fed its own copy of the session from the first input processes five inputs in the last 3~\textmu s of each gap. The same code paths therefore run without touching the live book's data and without sending anything.
+
+\section{Spacing Results}
+\label{sec:spacing}
+Table~\ref{tab:spacing} and Fig.~\ref{fig:spacing} give the median over five runs on Host B.
+\begin{table}[t]
+\caption{Median over five runs on Host B. No-order p50 (the median latency of ticks that send no order), its ratio to the matched gap-0 control, the same median with shadow warming, and the order-tick p50. Order-tick values at gaps of 1~ms and above rest on few samples (37 and 12 per run) and are descriptive. The 10~ms row uses only 300 inputs. Source: \texttt{results/spacing/*/benchmark\_*.json}.}
+\label{tab:spacing}
+\centering\footnotesize
+\resizebox{\columnwidth}{!}{\input{spacing_table}}
+\end{table}
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{figures/spacing.pdf}
+\caption{Latency versus idle gap before each tick on logarithmic axes. Bars show the minimum to maximum of the five-run p50. The dotted line is the back-to-back no-order p50.}
+\label{fig:spacing}
+\end{figure}
+The penalty is negligible at a gap of 1~\textmu s, about 8\% at 5~\textmu s, and grows steadily thereafter. By 1~ms the no-order p50 is five times its back-to-back value and the order p50 has grown more than tenfold. The no-order p99 also rises, from 0.24~\textmu s back to back to about 1.1~\textmu s at 100~\textmu s and 2.0~\textmu s at 1~ms. At the 10~ms gap the five-run ratio ranged from 10 to 18 because only 274 no-order samples per run remain. For scale, a deliberately harsh cold-cache case, a 4~MiB walk before every tick over the first 40{,}000 inputs, gave a no-order p50 of 708 to 720~ns and an order p50 of 1.42 to 1.55~\textmu s over five runs. The idle-gap result cannot be attributed to the benchmark's own eviction because the spin touches no memory.
+
+\section{Warming Test and What Is Not Shown}
+\label{sec:warming}
+The \emph{Warmed} column of Table~\ref{tab:spacing} gives the no-order p50 with shadow warming. Warming recovers part of the penalty only at long gaps (1~ms: from 531 to 394~ns; 10~ms: from 2.74 to 1.19~\textmu s) and none at 20 and 100~\textmu s. Code-path warming alone therefore does not remove the effect. The remaining penalty is consistent with decay of the live book's data in cache, or with predictor state specific to that data, but this was not isolated.
+
+State decay in caches, branch predictors or translation buffers, descheduling or noisy neighbors on the shared virtual machine, and frequency or idle-state effects are all consistent with the data. The p50 is robust to rare descheduling, which argues against pure scheduler noise, but a bare-metal replication with performance counters is required to attribute the effect. The spin loop is itself code and could perturb predictor or frequency state.
+
+\section{Cross-Host Replication and Book Baseline}
+\label{sec:host}
+Hot-cache order-tick p50 ranged \HotMedianRange~ns on Host A and \HostBHotMedianRange~ns on Host B. The p99 ranged \HotPninetyRange~ns versus \HostBHotPninetyRange~ns, and sustained throughput \ThroughputRange\ versus \HostBThroughputRange\ million inputs per second. Absolute figures therefore differ across hosts by roughly 1.6 times at the median and 2 times in throughput even though both are shared cloud virtual machines, so they are host-specific. They are also best-case, back-to-back numbers and should be read together with Section~\ref{sec:spacing}.
+
+An offline operation benchmark compares the flat book with an independent \texttt{std::map}/\texttt{std::list} reference over five seeded tapes of 200{,}000 timed mixed operations after 20{,}000 warm-up operations, with a target of 5{,}000 resting orders. Return values and periodic state digests must match before timing, and final digests must match. Execution order alternates across seeds. The median speed ratio was \BookSpeedup\ on Host A and \HostBBookSpeedup\ on Host B, so this relative result was stable across hosts. This is a book-update baseline, not a comparison against a tuned third-party engine.
+
+\section{Synthetic Strategy Ablations}
+\label{sec:ablation}
+\subsection{Design and statistics}
+The primary run uses 16 synthetic markets (seeds 1000 to 1015) of 200{,}000 requests each, and a fixed confirmation run uses seeds 5000 to 5015. Variants remove the imbalance lean, widen the quotes, remove the inventory skew or strengthen it. All variants see the same markets. For paired differences $d_i$ we compute the mean $\bar d$, the standard error $s_d/\sqrt n$ and a Student-$t$ mean interval, together with exact two-sided binomial sign tests that exclude ties and market-level bootstrap intervals. The Holm procedure~\cite{holm1979} controls the four-comparison family separately for the primary and confirmation experiments. Mean intervals and sign tests answer different questions and need not agree. Fills are not independent replicates, so paired markets are the sampling units.
+
+\subsection{Primary and confirmation results}
+\begin{table}[t]
+\caption{Paired synthetic profit-and-loss differences versus the base strategy, in generator currency units over the simulated episode. Wins and losses count markets. The Holm $p$ is the adjusted exact sign-test probability. Source: \texttt{paired\_statistics.csv}.}
+\label{tab:paired}
+\centering\footnotesize
+\resizebox{\columnwidth}{!}{\input{paired_full}}
+\end{table}
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{figures/ablation.pdf}
+\caption{Primary synthetic ablation means and standard errors across 16 markets. Source: \texttt{primary.json}.}
+\label{fig:ablation}
+\end{figure}
+Removing the imbalance lean or widening the quotes reduces simulated profit in all 16 markets in both runs, consistent with the informed flow built into the generator. Strengthening the inventory skew also reduces profit. Removing the inventory skew raises mean profit in both runs (differences of 7.45 and 8.71) while holding positions up to the cap of 40, against 7 to 12 for the other variants, so much of the gain is inventory exposure. Its mean interval excludes zero in both runs, but the sign test is not significant in the primary run after correction ($p=0.21$) and is in the confirmation run ($p=0.004$). This is an example of the disagreement between interval and sign-test questions noted above, and it shows why mean profit alone is not evidence of a better strategy.
+
+\subsection{Regimes, delay, queue and fees}
+\begin{table}[t]
+\caption{Mean paired difference versus the base in seven settings of the same generator, with wins and losses over eight markets in parentheses. These are not seven empirical datasets. With eight markets the smallest attainable Holm-adjusted sign-test probability in the 28-comparison family is 0.22, so no regime-level comparison is significant after correction. Source: \texttt{regime\_statistics.csv}.}
+\label{tab:regime}
+\centering\footnotesize
+\resizebox{\columnwidth}{!}{\input{regime_table}}
+\end{table}
+Table~\ref{tab:regime} shows that widening the quotes is negative in all seven settings and that removing the imbalance lean is negative in six of seven and positive in the setting named informed. Removing the inventory skew changes sign across settings. Because eight markets cannot reach significance in a 28-comparison family, we report these as consistent in direction, not as established.
+
+\begin{table}[t]
+\caption{Mean synthetic profit and loss by variant under delay, queue-penalty and fee scenarios (eight markets of 40{,}000 requests). Delay applies to each of three hops, so 100~\textmu s adds 300~\textmu s across them before jitter. Source: \texttt{sensitivity\_statistics.csv}.}
+\label{tab:sens}
+\centering\footnotesize
+\resizebox{\columnwidth}{!}{\input{sens_table}}
+\end{table}
+Table~\ref{tab:sens} gives the sensitivity results. The base strategy retains 61\% of its profit at 100~\textmu s per hop and 71\% at a queue penalty of 100\%. At a fee of 5 basis points per fill every strategy's profit falls (the base strategy's turns negative), so the synthetic profits are small relative to plausible fees. These are sensitivities of the simulator, not measurements of a real venue.
+
+\subsection{Held-out selection}
+A small grid over imbalance lean and inventory skew was ranked on training seeds 55000 to 55007 with an inventory penalty of one fixed before selection. The two retained candidates were run on held-out seeds 155000 to 155007. The best candidate on training data was the base configuration itself, so the held-out difference is zero in all eight markets. The other retained candidate lost 2.41 on average in all eight markets. The grid was not adjusted after inspecting held-out outputs. The holdout assesses seed generalization within one generator and not generalization to market data.
+
+\section{Live-Feed Observations}
+\label{sec:live}
+The repository documents a live paper-mode session on a public BTC-USD level-2 feed, with captures of 60 to 90 seconds. Replaying the same 60-second capture with different gaps between messages gave a per-message p50 of 18.4~\textmu s back to back and 63.5~\textmu s at the recorded spacing of about 57~ms, roughly 3.5 times. Spinning instead of sleeping between messages did not change this. That workload includes message parsing and conversion, which dominate (the pipeline itself costs about 1.3~\textmu s per packet), so absolute values are not comparable to Table~\ref{tab:spacing}. We report it because the direction agrees. \textbf{These observations were taken by the author on a different shared two-core virtual machine (the repository's results page describes a 2.1~GHz Xeon for its runs of that period), the capture is not in the repository, and they were not reproduced by the pipeline of this article.} They are corroboration and not evidence.
+
+\section{Discussion}
+\label{sec:discussion}
+\textbf{Practical implication.} A reader of a back-to-back tick-to-trade figure should ask what the latency is when ticks are spaced. We suggest reporting, alongside the back-to-back figure, the latency at one or more spaced gaps with a matched control, and stating the host, the sample counts and how the idle time is produced. The gap-sweep option added to the benchmark makes this a single command.
+
+\textbf{Threats to validity.} The mechanism is measured and not explained, and the warming test narrows but does not settle the cause. Two shared cloud virtual machines with five sequential runs each, no isolation and no performance counters do not establish portability, and there is no bare-metal result. A spin loop is one model of idle time, and real feeds interleave other code and interrupts. Order-tick statistics at large gaps rest on few samples. The recorded session and strategy results are synthetic. The map/list reference is deliberately simple. Several references were verified against bibliographic records and not full texts, and a systematic search of the low-latency systems literature for prior controlled spacing measurements was limited to the sources we could access. Nothing here measures network, interface, kernel or exchange latency, real fills, market impact or profitability.
+
+\section{Conclusion}
+\label{sec:conclusion}
+Back-to-back replay is a best case. In a verified, pinned pipeline on a shared virtual machine, adding idle time between ticks raised the median latency of ticks that send no order by 2.9 times at 100~\textmu s, 5 times at 1~ms and 14 times at 10~ms, and running the same code path on a shadow instance recovered only part of that. The finding is a caution for how tick-to-trade latency is reported, not a claim about exchange latency. Bare-metal replication with performance counters and independent reproduction of the artifact are the most valuable next steps.
+
+\section*{Data and Code Availability}
+The pipeline, tests, experiment drivers, raw outputs, hashes and manuscript generator are in the repository branch accompanying this article. The reproduction command is \texttt{bash research/reproduce.sh}, which builds, tests, runs the experiments, regenerates figures and tables and compiles the manuscript. The spacing study is \texttt{research/run\_spacing\_study.py} followed by \texttt{research/analyze\_spacing.py}. No exchange credentials or orders are used.
+
+\section*{Acknowledgment}
+\textbf{Disclosure of AI use.} The C++ source, tests, experiment scripts and portions of this article's text, tables and figures were produced with the assistance of Anthropic's Claude, including Claude Code, under the author's direction. [Author to confirm which sections used AI-generated content and at what level, as IEEE policy requires.] The author reviewed the results and is responsible for the content.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\begin{IEEEbiographynophoto}{Rajvardhan Jadhav}
+holds a B.Tech. degree in computer science from the National Institute of Technology Warangal, India, and is pursuing the M.S. degree in quantitative finance and risk management at the Fox School of Business, Temple University, Philadelphia, PA, USA, with expected graduation in May 2027. His interests include quantitative research and risk modeling.
+\end{IEEEbiographynophoto}
+
+\EOD
+
+\end{document}

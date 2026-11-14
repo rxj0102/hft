@@ -1,0 +1,33 @@
+hft_lab: 8 markets (seeds 55000..55007) x 40000 requests, 7 variants; md 5 us, ingress 10 us, egress 10 us, jitter 2 us, queue penalty 0%
+risk limits derived from the variants: max order qty 100, max position 80 (the strategy cap should bind first)
+
+search: 6 grid points plus the base, trained on 8 markets; objective = mean PnL - 1 x mean largest position
+training results, best 2 of 6 by the objective (the base is row 0):
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +3.48      0.24        +1.58       +1.90        108    6.1%         9
+alpha16=16_skew16=2               +3.48      0.24        +1.58       +1.90        108    6.1%         9
+alpha16=8_skew16=2                +1.50      0.06        +0.93       +0.57         61    4.8%         7
+
+held-out markets (seeds 155000..155007), chosen variants and base:
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +4.08      0.22        +1.80       +2.28        116    6.4%        11
+alpha16=16_skew16=2               +4.08      0.22        +1.80       +2.28        116    6.4%        11
+alpha16=8_skew16=2                +1.67      0.09        +1.13       +0.54         69    5.3%         8
+
+paired against base on the held-out markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+alpha16=16_skew16=2               +0.00      0.00   +0.00      0/0/8    1.0000        +0.00        +0.00
+alpha16=8_skew16=2                -2.41      0.16  -15.27      0/8/0    0.0078        -0.66        -1.74
+
+chosen variant               train gain    test gain     retained (objective gain over base)
+alpha16=16_skew16=2               +0.00        +0.00          n/a
+alpha16=8_skew16=2                -0.22        +0.72          n/a
+average of the chosen: train gain -0.11, held-out gain +0.36, shrinkage (winner's curse) -0.47
+grid edge: alpha16=16_skew16=2 sits at alpha16 (largest), skew16 (largest); the best value may lie beyond the grid, so widen it there
+grid edge: alpha16=8_skew16=2 sits at skew16 (largest); the best value may lie beyond the grid, so widen it there
+
+Read this with care: the held-out markets were not used to choose, but this is one split from one generator, and a
+gain here is still a gain on simulated fills. If the gain shrinks a lot or turns negative, the training result was
+mostly selection. Do not rerun with the held-out seeds as training after looking: that spends them.
+
+run digest 591227822b7e2ff3 (changes if any run's result changes)

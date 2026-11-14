@@ -83,6 +83,7 @@ check("flat (kill switch on)" in out, "pipe: flat, kill switch on\n" + out)
 proc = subprocess.Popen([BIN, "--report-s", "1000"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 proc.stdin.write(snap(2) + upd(3, "buy", "100.00", "5"))
 proc.stdin.close()
+proc.stdin = None  # communicate must not flush an already closed pipe
 out, err = proc.communicate(timeout=10)
 check(proc.returncode == 0 and "input ended" in out and "1 ended: shutdown" in out, "pipe: EOF is a shutdown\n" + out)
 check("(kill switch on)" not in out, "pipe: EOF does not latch the kill switch\n" + out)
@@ -94,6 +95,7 @@ proc.stdin.write(snap(2) + upd(3, "buy", "100.00", "5"))
 proc.stdin.flush()
 time.sleep(1.2)  # nothing arrives; stdin stays open
 proc.stdin.close()
+proc.stdin = None  # communicate must not flush an already closed pipe
 out, err = proc.communicate(timeout=10)
 check("1 stale-feed pulls" in out and "stale feed" in out, "pipe: silence on an open pipe pulls the quotes\n" + out)
 
@@ -107,6 +109,7 @@ for i in range(6):
     proc.stdin.write(beat(10 + i))
     proc.stdin.flush()
 proc.stdin.close()
+proc.stdin = None  # communicate must not flush an already closed pipe
 out, err = proc.communicate(timeout=10)
 check("0 stale-feed pulls" in out, "pipe: heartbeats keep the feed alive\n" + out)
 
@@ -122,6 +125,7 @@ proc.stdin.flush()
 time.sleep(0.5)
 check(os.path.exists(flag), "pipe: leaving the window asks for a resubscribe (file written)")
 proc.stdin.close()
+proc.stdin = None  # communicate must not flush an already closed pipe
 out, err = proc.communicate(timeout=10)
 check("1 ended: left price window" in out and "1 resubscribe requests" in out, "pipe: ended by the window\n" + out)
 if os.path.exists(flag):
@@ -254,6 +258,7 @@ def slow_reader_run(text):
     data = b""
     with os.fdopen(r, "rb") as f:
         data = f.read()
+    proc.stdin = None  # the pipe was explicitly closed above
     out, err = proc.communicate(timeout=60)
     os.remove(path)
     return proc.returncode, [json.loads(l) for l in data.decode().splitlines()]
@@ -390,6 +395,7 @@ def run_external(mode, feed_text, flatten_s="2", close_exchange_early=False, pac
         proc.stdin.close()
     except BrokenPipeError:
         pass
+    proc.stdin = None  # the pipe was explicitly closed above
     out, err = proc.communicate(timeout=60)
     ex.th.join(timeout=10)
     return proc.returncode, out, ex
