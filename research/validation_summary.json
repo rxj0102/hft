@@ -1,0 +1,10 @@
+{
+  "ctest_passed": 19,
+  "python_ci": "all steps passed",
+  "fault_drills_passed": 28,
+  "analysis_tests_passed": 3,
+  "optional_skip": "bridge recorded-capture case: no data/ capture supplied",
+  "replay": "all five timing runs OK",
+  "deterministic_primary_repeat": "identical JSON",
+  "pdf": "3 pages; no unresolved citations or overfull boxes"
+}

@@ -1,0 +1,50 @@
+hft_lab: 8 markets (seeds 35000..35007) x 40000 requests, 5 variants; queue penalty sweep over 3 values; md 5 us, ingress 10 us, egress 10 us, jitter 2 us
+queue penalty p: every order is treated as if an extra p percent of its level's quantity were ahead of it when it joined, and only trades work that off
+(0 is the exact queue the tape shows); --queue-penalty-pct is replaced by each value
+
+queue penalty 0 %
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +3.80      0.35        +1.65       +2.16        108    6.1%        10
+noalpha                           +0.25      0.07        +0.61       -0.37         42    3.4%         9
+wide                              +0.08      0.07        +0.07       +0.01          4    0.3%         3
+noskew                            +6.21      2.00        +2.40       +3.80        156    7.7%        39
+strongskew                        +2.62      0.20        +1.30       +1.32         96    6.4%         6
+
+queue penalty 50 %
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +3.17      0.29        +1.27       +1.90         82    4.6%         9
+noalpha                           +0.19      0.06        +0.39       -0.21         27    2.2%         9
+wide                              +0.08      0.09        +0.07       +0.01          4    0.3%         3
+noskew                            +4.84      1.77        +1.93       +2.90        124    6.2%        40
+strongskew                        +2.33      0.20        +1.10       +1.23         80    5.0%         6
+
+queue penalty 100 %
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|
+base                              +2.71      0.31        +1.08       +1.63         74    4.1%         9
+noalpha                           +0.31      0.05        +0.33       -0.02         24    1.9%         8
+wide                              +0.09      0.10        +0.07       +0.01          4    0.3%         3
+noskew                            +4.19      1.42        +1.68       +2.51        110    5.5%        37
+strongskew                        +2.16      0.18        +0.98       +1.18         68    4.4%         6
+
+mean PnL by queue penalty (percent)
+variant                            0        50       100       kept
+base                           +3.80     +3.17     +2.71        71%
+noalpha                        +0.25     +0.19     +0.31       126%
+wide                           +0.08     +0.08     +0.09       109%
+noskew                         +6.21     +4.84     +4.19        68%
+strongskew                     +2.62     +2.33     +2.16        82%
+kept = mean PnL at the largest penalty over mean PnL at the smallest (n/a when the smallest made no money;
+unstable when it made very little).
+
+difference from the base by queue penalty (variant minus base)
+variant                            0        50       100 better in     worst
+noalpha                        -3.56     -2.98     -2.40    0/3        -3.56
+wide                           -3.72     -3.09     -2.62    0/3        -3.72
+noskew                         +2.40     +1.67     +1.48    3/3        +1.48
+strongskew                     -1.19     -0.84     -0.55    0/3        -1.19
+
+Read this with care: the queue penalty is a stress on one assumption of the fill model (where we stand in the queue), not a
+measurement of a real venue's queue. A variant whose PnL falls fast as the penalty grows depends on fills that a deeper
+queue would take away. Every value uses the same seeds, so the columns are paired by market but not tested.
+
+run digest 399fcc7aebd7fe92 (changes if any run's result changes)

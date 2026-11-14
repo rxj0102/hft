@@ -1,0 +1,44 @@
+Internal ctest changing into directory: /workspace/hft/build/release
+Test project /workspace/hft/build/release
+      Start  8: test_sim_gate
+      Start  7: test_sim
+ 1/19 Test  #7: test_sim .........................   Passed   70.60 sec
+      Start 13: test_bt_gate
+ 2/19 Test #13: test_bt_gate .....................   Passed    8.94 sec
+      Start 15: test_l2
+ 3/19 Test #15: test_l2 ..........................   Passed    8.19 sec
+      Start 11: test_gw_gate
+ 4/19 Test #11: test_gw_gate .....................   Passed    4.42 sec
+      Start 14: test_bt
+ 5/19 Test #14: test_bt ..........................   Passed    3.04 sec
+      Start  6: test_book_gate_10m
+ 6/19 Test  #6: test_book_gate_10m ...............   Passed    4.29 sec
+      Start  4: test_md_gate
+ 7/19 Test  #4: test_md_gate .....................   Passed    5.30 sec
+      Start 19: test_lab
+ 8/19 Test #19: test_lab .........................   Passed    3.36 sec
+      Start 16: test_live
+ 9/19 Test #16: test_live ........................   Passed    2.14 sec
+      Start 18: test_t2t_gate
+10/19 Test #18: test_t2t_gate ....................   Passed    1.85 sec
+      Start 17: test_t2t
+11/19 Test #17: test_t2t .........................   Passed    0.88 sec
+      Start 10: test_gw
+12/19 Test #10: test_gw ..........................   Passed    1.05 sec
+      Start  5: test_book
+13/19 Test  #5: test_book ........................   Passed    0.74 sec
+      Start  3: test_md
+14/19 Test  #3: test_md ..........................   Passed    0.43 sec
+      Start 12: test_oms_gate
+15/19 Test #12: test_oms_gate ....................   Passed    0.93 sec
+      Start  9: test_oms
+16/19 Test  #9: test_oms .........................   Passed    0.15 sec
+      Start  1: test_core
+17/19 Test  #1: test_core ........................   Passed    0.05 sec
+      Start  2: test_phase1
+18/19 Test  #2: test_phase1 ......................   Passed    0.05 sec
+19/19 Test  #8: test_sim_gate ....................   Passed  263.39 sec
+
+100% tests passed, 0 tests failed out of 19
+
+Total Test time (real) = 263.40 sec

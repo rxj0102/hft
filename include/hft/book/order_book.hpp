@@ -142,7 +142,7 @@ class OrderBook {
   // by price distance: an empty level inside the window contributes zero and the
   // window stops at the edge of the grid. Same answer as summing level_qty()
   // over those prices, without converting each price back to a level.
-  Qty depth(Side side, int n) const noexcept {
+  [[gnu::always_inline]] Qty depth(Side side, int n) const noexcept {
     const std::uint32_t b = best_[side_idx(side)];
     if (b == kNone || n <= 0) return 0;
     const Level* lv = levels_[side_idx(side)];

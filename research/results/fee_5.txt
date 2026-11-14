@@ -1,0 +1,25 @@
+hft_lab: 8 markets (seeds 45000..45007) x 40000 requests, 5 variants; md 5 us, ingress 10 us, egress 10 us, jitter 2 us, queue penalty 0%
+risk limits derived from the variants: max order qty 100, max position 80 (the strategy cap should bind first)
+fees: 5 bps of notional on every fill (all fills are maker fills here); PnL is after fees, edge is not
+
+variant                        PnL mean     +- se    edge mean   inventory  fills/mkt   fill%  max|pos|   fees mean
+base                              -7.17      0.29        +1.67       +2.11        114    6.5%        10       +10.96
+noalpha                           -4.11      0.27        +0.68       -0.46         44    3.5%         8        +4.32
+wide                              -0.52      0.14        +0.15       +0.05          7    0.6%         5        +0.72
+noskew                            -7.57      1.94        +2.17       +3.94        140    7.3%        38       +13.68
+strongskew                        -7.63      0.35        +1.50       +1.28        106    6.8%         6       +10.42
+
+paired against base, same markets (variant minus base)
+variant                       dPnL mean     +- se       t      W/L/T    sign p   dEdge mean    dInv mean
+noalpha                           +3.07      0.31   +9.84      8/0/0    0.0078        -1.00        -2.58
+wide                              +6.65      0.34  +19.67      8/0/0    0.0078        -1.52        -2.07
+noskew                            -0.39      1.96   -0.20      4/4/0    1.0000        +0.50        +1.83
+strongskew                        -0.46      0.33   -1.39      4/4/0    1.0000        -0.17        -0.83
+
+Read this with care: the fills are simulated (queue model, no market impact), the markets come from one synthetic
+generator, and 4 comparisons were made without adjusting p for that. A small p here says a variant beat the base on
+these generated markets, not that it would make money anywhere. PnL = edge + inventory: a gain that sits in the inventory
+column is the price drifting under a position, which is luck as much as skill. With n markets the smallest possible sign p
+is 2/2^n (0.00781 here).
+
+run digest 5c0f39de2bf7b016 (changes if any run's result changes)

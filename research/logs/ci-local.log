@@ -1,0 +1,836 @@
+==== syntax
+==== pnl report tests
+two samples in the same millisecond: the later line wins, whatever the values
+  ok   a mid logged after a fill in the same ms is the last mid
+  ok   of two mid lines with one timestamp the later line is the last mid
+  ok   a fill's own mid, logged after a mid line in the same ms, is the last mid
+a round trip, by hand
+  ok   two fills
+  ok   volume 140.0200
+  ok   realised 0.4 x (100.30 - 99.90) = 0.16: 0.160000
+  ok   unrealised 0.6 x (100.50 - 99.90) = 0.36
+  ok   total 0.52 both ways
+  ok   edge 0.10 + 0.04 = 0.14
+  ok   edge in bps, weighted by notional: 9.9943
+  ok   1 s markout: 20.0001 bps
+  ok   5 s markout (the mid moved to 100.10 before the second fill's horizon): 24.9851
+  ok   30 s markout: 19.9801
+  ok   inventory: max 1.0, time-weighted mean 0.62051
+  ok   span, no gaps, ends 0.6 long
+  ok   1 s markout weighted by notional: 24.2822
+adverse selection and fees
+  ok   a buy followed by a fall: -50 bps at 1 s
+  ok   and at 5 s the mid at that time is the last one before it (99.50 = 99.50): -50 bps
+  ok   10 bps fee on 100 of notional is 0.10; total -1.1000
+  ok   a horizon the log does not reach gives no markout (nothing invented)
+crossing zero, carried inventory
+  ok   long 1 at 100, sell 1.5 at 101: realised 1.00, short 0.5 from 101 marked at 100.50 gives 0.25, total 1.25 (1.0000 / 0.2500 / 1.2500)
+  ok   short 1 at 100, buy back 0.5 at 99: realised 0.50, the rest (short 0.5 from 100, mid 99.00) 0.50, total 1.00 (0.5000 / 1.0000)
+  ok   the mid only gets logged when it changes: a quiet log still reaches the horizon, the last mid holds
+  ok   started with 1.0, valued at the first fill's mid (100.00): total 1.10 (1.1000)
+what is not trusted
+  ok   a fill the session ignored is not counted; unreadable lines are counted (2 fills, 3 bad)
+  ok   a position that disagrees with the fills is flagged (1)
+  ok   no fills: nothing to report
+  ok   a fill without a mid has no edge
+maker and taker rates
+  ok   maker 0, taker 10 bps on 100 of notional each: fee 0.10 (0.1000)
+  ok   the breakdown splits the fills: {'maker': {'n': 1, 'volume': 100.0, 'fees': 0.0, 'bps': 0.0}, 'taker': {'n': 1, 'volume': 100.0, 'fees': 0.1, 'bps': 10.0}, 'unmarked': {'n': 0, 'volume': 0.0, 'fees': 0.0, 'bps': None}}
+  ok   and records the rate each kind was charged: {'maker': {'n': 1, 'volume': 100.0, 'fees': 0.0, 'bps': 0.0}, 'taker': {'n': 1, 'volume': 100.0, 'fees': 0.1, 'bps': 10.0}, 'unmarked': {'n': 0, 'volume': 0.0, 'fees': 0.0, 'bps': None}}
+  ok   an explicit zero maker rate is used, not replaced by --fee-bps
+  ok   a negative maker rate is a rebate: fee 0.10 - 0.05 = 0.05 (0.0500)
+  ok   and the cash cross-check still agrees
+  ok   no per-liquidity rates: --fee-bps applies to both (0.0800)
+  ok   only a taker rate: the maker fill falls back to --fee-bps (0.1400)
+  ok   only a maker rate: the taker fill falls back to --fee-bps (0.0400)
+  ok   a fill with no liquidity mark uses --fee-bps, not a guess (0.0400)
+  ok   an unknown mark counts as unmarked
+  ok   explicit zero rates charge nothing
+the command line
+  ok   text report: == PnL and fill quality (1 fills over 9 s) |   volume 100.00 quote units in 1 buys
+  ok   json report
+  ok   flags reach the report, with the breakdown: 0.00 bps notional-weighted, 0% of 2 fills went against us |   markout 5s: no fill had a mid sample that far ahead |   markout 30s: no fill had a mid sample that far ahead |   consistency: the engine's position matched the sum of the fills after every fill | 
+  ok   and the effective rate over all volume (0.05 on 200 is 2.5 bps)
+  ok   the maker and taker flags are not swapped
+  ok   with only --fee-bps both kinds pay it (fee 0.08)
+  ok   an empty log says so
+test_pnl: all checks passed
+==== strategy lab tests
+option checking
+  ok   exit 1 and usage for unknown option
+  ok   exit 1 and usage for missing value
+  ok   exit 1 and usage for non-numeric requests
+  ok   exit 1 and usage for requests below the minimum
+  ok   exit 1 and usage for zero markets
+  ok   exit 1 and usage for too many markets
+  ok   exit 1 and usage for negative seed
+  ok   exit 1 and usage for latency out of range
+  ok   exit 1 and usage for penalty out of range
+  ok   exit 1 and usage for unknown strategy parameter
+  ok   exit 1 and usage for parameter out of range
+  ok   exit 1 and usage for bad variant name
+  ok   exit 1 and usage for variant named base collides
+  ok   exit 1 and usage for duplicate names
+  ok   exit 1 and usage for sweep without values
+  ok   exit 1 and usage for sweep with empty value list
+  ok   exit 1 and usage for sweep with empty key
+  ok   exit 1 and usage for sweep with an empty value
+  ok   exit 1 and usage for sweep with a bad value
+  ok   exit 1 and usage for regimes without a value
+  ok   exit 1 and usage for empty regimes
+  ok   exit 1 and usage for unknown regime
+  ok   exit 1 and usage for trailing comma in regimes
+  ok   exit 1 and usage for repeated regime
+  ok   exit 1 and usage for regime names are case sensitive
+  ok   exit 1 and usage for regimes with a grid
+  ok   exit 1 and usage for latency sweep without a value
+  ok   exit 1 and usage for empty latency sweep
+  ok   exit 1 and usage for non-numeric latency
+  ok   exit 1 and usage for repeated latency
+  ok   exit 1 and usage for latencies not increasing
+  ok   exit 1 and usage for negative latency
+  ok   exit 1 and usage for latency out of range
+  ok   exit 1 and usage for too many latencies
+  ok   exit 1 and usage for latency sweep with regimes
+  ok   exit 1 and usage for latency sweep with a grid
+  ok   exit 1 and usage for latency axis without a sweep
+  ok   exit 1 and usage for queue sweep without a value
+  ok   exit 1 and usage for empty queue sweep
+  ok   exit 1 and usage for non-numeric queue penalty
+  ok   exit 1 and usage for repeated queue penalty
+  ok   exit 1 and usage for queue penalties not increasing
+  ok   exit 1 and usage for negative queue penalty
+  ok   exit 1 and usage for queue penalty out of range
+  ok   exit 1 and usage for too many queue penalties
+  ok   exit 1 and usage for queue sweep with latency sweep
+  ok   exit 1 and usage for queue sweep with regimes
+  ok   exit 1 and usage for queue sweep with a grid
+  ok   exit 1 and usage for latency axis with a queue sweep
+  ok   exit 1 and usage for unknown latency axis
+  ok   exit 1 and usage for latency axis is case sensitive
+  ok   exit 1 and usage for fee without a value
+  ok   exit 1 and usage for non-numeric fee
+  ok   exit 1 and usage for fee above the range
+  ok   exit 1 and usage for rebate below the range
+regimes
+  ok   without --regimes the output does not mention regimes
+  ok   one regime: labelled, no summary
+  ok   and the default regime's table equals the table without the flag
+  ok   three regimes, each with a heading
+  ok   the header lists the regimes
+  ok   every regime gets its own paired comparison
+  ok   json: regimes in the order given
+  ok   json: top-level variants are the first regime's
+  ok   json: the regimes give different results
+  ok   json: every regime has both variants on 4 markets
+  ok   across table: the per-regime differences are recomputed from the json: [2.01, 1.21, -1.37] vs [2.01375, 1.2124999999999997, -1.3699999999999999]
+  ok   across table: better-in count and worst: ['2/3', '-1.37']
+  ok   event files carry the regime name, so none is overwritten (24 files)
+  ok   the run digest repeats
+  ok   the digest depends on the order the regimes were run
+latency sweep
+  ok   runs, and the header says what was swept
+  ok   a table for each delay
+  ok   the latency sweep explains itself in latency terms
+  ok   json: axis and delays in order
+  ok   json: both variants on 4 markets at every delay
+  ok   json: the delays give different results
+  ok   mean PnL row for base recomputed from the json: [1.71, 1.74, 1.45] vs [1.71, 1.73625, 1.45125]
+  ok   kept for base: 85%
+  ok   mean PnL row for noskew recomputed from the json: [4.1, 3.42, 1.75] vs [4.09625, 3.4225, 1.7475]
+  ok   kept for noskew: 43%
+  ok   differences from the base recomputed from the json: ['+2.39', '+1.69', '+0.30'] vs [2.38625, 1.68625, 0.2962500000000001]
+  ok   better-in and worst: ['3/3', '+0.30']
+  ok   event files carry the delay (24 files)
+  ok   the digest repeats
+  ok   base only: no difference table; one delay is allowed
+  ok   md only, ingress only and all three give three different results
+  ok   json records the axis
+  ok   the difference table has no row for the base
+  ok   the axis without a sweep says why
+  ok   a sweep point equals the plain run with those delays
+  ok   fees apply in a sweep: pnl = edge + inventory - fees at every delay
+  ok   the other hops keep their configured delays: ['axis egress: report return is set to each delay in turn; the others stay as given (md 7 us, ingress 10 us, egress 10 us)']
+queue penalty sweep
+  ok   runs, and the header says what was swept
+  ok   a table for each value
+  ok   the queue sweep explains itself in queue terms
+  ok   and does not use the latency sweep's wording
+  ok   no latency wording in a queue sweep
+  ok   json: queue_penalties with pct, no latency keys
+  ok   json: the penalties give different results
+  ok   mean PnL row for base recomputed from the json: [1.79, 1.47, 0.9] vs [1.78625, 1.47, 0.9037499999999999]
+  ok   kept for base: 51%
+  ok   mean PnL row for noskew recomputed from the json: [3.8, 2.12, 1.51] vs [3.8, 2.12375, 1.51375]
+  ok   kept for noskew: 40%
+  ok   differences from the base recomputed from the json: ['+2.01', '+0.65', '+0.61'] vs [2.01375, 0.6537499999999999, 0.6100000000000001]
+  ok   better-in and worst: ['3/3', '+0.61']
+  ok   the difference table has no row for the base
+  ok   event files carry the penalty (24 files)
+  ok   the digest repeats
+  ok   a sweep point equals the plain run with that penalty
+  ok   base only: no difference table; one value is allowed
+  ok   fees apply in a queue sweep: pnl = edge + inventory - fees at every value
+  ok   the configured latencies are kept: 000 requests, 1 variants; queue penalty sweep over 2 values; md 7 us, ingress 10 us, egress 10 us, jitter 2 us
+fees
+  ok   fee runs finish
+  ok   with no fee the table has no fee column
+  ok   with a fee the table says so
+  ok   the json records the rate
+  ok   the run digest is about the simulation, so a fee does not change it
+  ok   pnl = edge + inventory - fees in every run; a rebate is the negative of the fee; edge is gross
+  ok   the fee column holds the mean fee of the row: [['base', '+0.92', '0.02', '+0.69', '+1.10', '46', '5.1%', '7', '+0.87']]
+  ok   a rebate gets the header note too
+  ok   a fee of -100 bps is inside the range
+  ok   a fee of 1000 bps is inside the range
+  ok   a grid run shows the fee column for the training table and the held-out table
+  ok   held-out rows are after fees too
+a run, twice
+  ok   exit 0 (stderr: )
+  ok   same arguments, byte-identical report (events and json do not change it)
+  ok   header counts markets, seeds and variants
+  ok   variants listed in order: base noalpha same skew16=0 skew16=4
+  ok   a copy of the base has zero difference, 0 wins 0 losses 4 ties, p 1
+  ok   paired line for noalpha
+  ok   says what the smallest sign p is with 4 markets (0.125)
+  ok   run digest printed
+  ok   the printed paired difference and its se match the json for noalpha
+  ok   json: markets and variants
+  ok   json: one entry per market
+  ok   json: the copy has identical per-run digests
+  ok   json: a different strategy has different digests
+  ok   json: vs_base mean matches the per-market numbers
+  ok   json: wins, losses and ties add up
+event logs read by pnl_report
+  ok   one event file per variant and market
+  ok   all 20 runs: pnl_report's PnL, cash-flow PnL, edge, fill count and position match the lab's own report
+the report from the command line
+  ok   pnl_report --qty-scale 1 reads a lab log
+setup failures
+  ok   an events directory that does not exist: exit 2
+  ok   an unwritable json path: exit 2
+held-out grid search: option checking
+  ok   exit 1 and usage for grid with --variant
+  ok   exit 1 and usage for grid with --sweep
+  ok   exit 1 and usage for grid axis without values
+  ok   exit 1 and usage for repeated grid axis
+  ok   exit 1 and usage for unknown grid parameter
+  ok   exit 1 and usage for top 0
+  ok   exit 1 and usage for top 21
+  ok   exit 1 and usage for non-numeric risk penalty
+  ok   exit 1 and usage for negative risk penalty
+  ok   exit 1 and usage for zero test markets
+  ok   exit 1 and usage for overlapping seeds (test starts inside training)
+  ok   exit 1 and usage for overlapping seeds (test ends inside training)
+  ok   exit 1 and usage for --top without --grid
+  ok   exit 1 and usage for --risk-penalty without --grid
+  ok   exit 1 and usage for --test-markets without --grid
+  ok   exit 1 and usage for --test-seed without --grid
+  ok   touching but disjoint seed ranges are fine (1000..1002 and 1003)
+  ok   test range ending just before the training range is fine (1002..1004 and 1005..)
+held-out grid search: a run
+  ok   exit 0 (stderr: )
+  ok   same arguments, same report
+  ok   search header
+  ok   default held-out seeds start 100000 above the training seeds
+  ok   says how many were kept
+  ok   json: 5 trained variants, 2 selected, 3 held-out rows
+  ok   json: held-out rows are the base then the selected, in order
+  ok   json: 3 training and 2 held-out markets per row
+  ok   json: held-out settings
+  ok   the selected are the two best by training mean PnL, recomputed from the json
+  ok   report lists the chosen
+  ok   penalty 0: train gain, held-out gain and retained are what the json says
+  ok   penalty 0: the average line is the mean of the table, and the shrinkage is train minus held-out
+  ok   the held-out markets are different markets from the training ones (no shared run digests)
+  ok   penalty 20: train gain, held-out gain and retained are what the json says
+  ok   penalty 20: the average line is the mean of the table, and the shrinkage is train minus held-out
+  ok   the grid-edge warning appears exactly when a chosen value is the smallest or largest on its axis
+  ok   event files: 15 training and 6 held-out, held-out ones prefixed test_
+held-out grid search: settings
+  ok   --top larger than the grid is clipped to the grid
+  ok   the default number of held-out markets is the training count
+  ok   --test-seed and --test-markets are used
+  ok   a one-value axis never counts as an edge
+  ok   the risk penalty is applied to the ranking (recomputed from the json)
+  ok   and the penalty changes the order here (so the check means something)
+  ok   the penalty is shown in the header
+a run that cannot finish is reported, not hung
+  ok   livelocked variant: exit 3 naming the variant
+  ok   the report is still printed
+  ok   the same requote setting with pacing is fine
+the other settings change results
+  ok   latency, queue penalty and seed each change the result
+  ok   --md-us changes the result
+  ok   --egress-us changes the result
+  ok   --jitter-us changes the result
+  ok   --ingress-us changes the result
+  ok   risk limit follows the largest max_pos
+  ok   risk limit floor with defaults
+  ok   header shows the settings
+
+test_lab: all checks passed
+==== capture script tests
+test_capture: all checks passed
+==== live tool tests
+test_live_tool: all checks passed
+==== replay tool tests
+  ok   identical in the window; two far asks reported as outside, not as absent ((16, 16, 0, 0) 2)
+  ok   the note says they are not compared
+  ok   with nothing outside the window there is no note
+  ok   a differing size inside the window is counted as differing ((15, 16, 1, 0))
+  ok   a missing level inside the window is counted as absent ((16, 17, 0, 1))
+  ok   differing, absent and outside together ((15, 17, 1, 1) 1)
+  ok   a snapshot 7 s after the segment ended is not comparable (p99.9    17096  max     17096 ns |   mean 613.3 ns per feed message applied (31 messages in 8 packets) |   exchange snapshot check: not comparable. The replay segment ended 7.0 s before the exchange snapshot was taken |   (the price left the window), so the replayed book is the book of an earlier moment. | )
+  ok   a snapshot one second after the end is compared ((9, 9, 0, 0))
+  ok   a segment that did not end is compared however late the snapshot ((16, 16, 0, 0))
+  ok   without --verify nothing is compared
+  ok   a missing capture is refused
+test_replay_cli: all checks passed
+==== order bridge tests
+signing and units
+  ok   signature equals openssl HMAC-SHA256 over timestamp+method+path+body
+  ok   method is upper-cased before signing
+  ok   a different body gives a different signature
+  ok   price 819080300 -> 81908.03
+  ok   a price off the cent is refused
+  ok   5 lots -> 0.00005
+  ok   123456 lots -> 1.23456
+  ok   zero size refused
+guards: URL, keys
+  ok   refused: https://api.exchange.coinbase.com
+  ok   refused: https://api-public.sandbox.exchange.coinbase.com.evil.com
+  ok   refused: http://api-public.sandbox.exchange.coinbase.com
+  ok   refused: http://10.0.0.5:80 (test mode)
+  ok   refused: https://127.0.0.1:9 (test mode)
+  ok   the sandbox URL is accepted
+  ok   production URL: exit 2
+  ok   missing keys: exit 2, names the variables
+  ok   no request reached the exchange in either case
+order flow: place, replace, cancel, coalesce, flat at EOF
+  ok   started
+  ok   orders already on the account are cancelled at start
+  ok   two orders reach the exchange
+  ok   prices and sizes are in dollars and coins
+  ok   each has its own client_oid
+  ok   the exchange ends at the last price (81000.00 - 0.60)
+  ok   60 replaces became 2 requests (coalesced)
+  ok   cancel removes the order
+  ok   end of input: cancel-all, nothing left working, exit 0 (rc=0)
+  ok   exit_flat logged
+pacing: --rate 8 holds under a stream of changes
+  ok   at most 9 requests in any second (limit set 8, exchange allows 15)
+  ok   and it kept working (12 POSTs)
+a replace is a cancel then a new order, never the reverse
+  ok   DELETE 0 before POST 1
+  ok   one order afterwards, not two
+segment end clears the segment; a cancel goes before a new order that is waiting
+  ok   segment end: the orders are cancelled without any cancel lines
+  ok   a new segment may reuse id 1
+  ok   first request after the batch: ['DELETE', 'POST', 'POST']
+SIGTERM and SIGKILL
+  ok   SIGTERM: flat, exit 0
+  ok   SIGKILL: the order is still resting (expected, nothing can run)
+  ok   the next start cancels it
+exchange misbehaviour
+  ok   401 at start: exit 4 (rc=4)
+  ok   wrong passphrase: exit 4 (rc=4)
+  ok   403 at start: exit 4 (rc=4)
+  ok   5xx forever: exit 1 after 3 errors, restartable (rc=1, 7.2 s)
+  ok   5xx in mid-run: gives up by itself with exit 1 (rc=1, 7.3 s)
+  ok   the errors were counted
+  ok   clock 100 s off the exchange: exit 4, no order sent (rc=4)
+  ok   429s seen (2) and all three orders placed after backing off
+  ok   the exchange refused 2 requests, not a stream of them
+  ok   each 429 pauses at least a second: [1.0, 1.0]
+  ok   and flat afterwards
+  ok   refused once, not retried unchanged (1 POSTs)
+  ok   a new price is tried and rests
+  ok   unknown outcome -> cancel by client_oid
+  ok   nothing left on the exchange
+  ok   order_vanished logged
+  ok   wanted order placed again (the strategy still wants it)
+  ok   a stray order is cancelled
+local limits and secrets
+  ok   max-open 2 holds (2 resting)
+  ok   the $810 order was not sent
+  ok   and no refused order cost a request (2 POSTs)
+  ok   key, secret and passphrase appear in neither log, stderr nor metrics
+  ok   metrics file written
+closed loop: every request gets exactly one report
+  ok   two orders: two accepted reports
+  ok   accepted carries segment, price, size, side: {'t': 'rep', 'seg': 1, 'rt': 'accepted', 'id': 1, 'px': 810000000, 'qty': 5, 'leaves': 5, 'reason': 'none', 'side': 'buy'}
+  ok   and both rest on the exchange
+  ok   replace -> replaced
+  ok   replaced carries the new price and open size: {'t': 'rep', 'seg': 1, 'rt': 'replaced', 'id': 1, 'px': 809900000, 'qty': 7, 'leaves': 7, 'reason': 'none', 'side': 'buy'}
+  ok   as a cancel and then a new order: ['DELETE', 'POST']
+  ok   and the exchange shows the new price
+  ok   cancel -> canceled
+  ok   canceled carries the removed size: {'t': 'rep', 'seg': 1, 'rt': 'canceled', 'id': 1, 'px': 809900000, 'qty': 7, 'leaves': 0, 'reason': 'user', 'side': 'buy'}
+  ok   one order left
+  ok   unknown order: cancel_rejected and replace_rejected
+  ok   6 requests, 6 reports
+  ok   end of input: flat, exit 0
+closed loop: refusals and losses
+  ok   post-only cross -> rejected
+  ok   reason cross: {'t': 'rep', 'seg': 1, 'rt': 'rejected', 'id': 1, 'px': 810000000, 'qty': 5, 'leaves': 0, 'reason': 'cross', 'side': 'buy'}
+  ok   not retried
+  ok   a valid order is accepted
+  ok   beyond --max-open -> rejected, nothing sent
+  ok   reason badqty, no request: {'t': 'rep', 'seg': 1, 'rt': 'rejected', 'id': 3, 'px': 0, 'qty': 0, 'leaves': 0, 'reason': 'badqty', 'side': 'buy'}
+  ok   beyond --max-notional -> rejected
+  ok   nothing resting
+  ok   replace refused by post-only -> canceled (the order is gone)
+  ok   reason cross, exchange empty
+  ok   lost reply -> rejected(other): [('rejected', 1, 'cross'), ('accepted', 2, 'none'), ('rejected', 3, 'badqty'), ('canceled', 2, 'user'), ('rejected', 4, 'badqty'), ('accepted', 5, 'none'), ('canceled', 5, 'cross'), ('rejected', 6, 'other')]
+  ok   and the order that may have been created was cancelled by client id
+  ok   exit 0
+closed loop: fills and orders that leave
+  ok   partial fill is found by the sync
+  ok   fill: 4 lots, 6 left: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 4, 'leaves': 6, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   a post-only order that rests and fills is marked maker: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 4, 'leaves': 6, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   and reported once, not at every sync
+  ok   a second partial fill
+  ok   3 lots, 3 left: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 3, 'leaves': 3, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   cancel of the part-filled order
+  ok   the cancel removes the 3 lots that were left: {'t': 'rep', 'seg': 1, 'rt': 'canceled', 'id': 1, 'px': 810000000, 'qty': 3, 'leaves': 0, 'reason': 'user', 'side': 'buy'}
+  ok   an order filled in one go
+  ok   10 lots, nothing left: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 10, 'leaves': 0, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   every fill of these post-only orders is marked maker
+  ok   cancelling a filled order is refused
+  ok   an order cancelled elsewhere is reported cancelled
+  ok   cancelled: {'t': 'rep', 'seg': 1, 'rt': 'canceled', 'id': 2, 'px': 810200000, 'qty': 10, 'leaves': 0, 'reason': 'other', 'side': 'sell'}
+  ok   filled while being cancelled: resolved
+  ok   a stray order is cancelled
+  ok   exit 0
+  ok   segment end: an orphan is cancelled
+  ok   without a report
+  ok   exit 0
+closed loop: slow exchange, several segments
+  ok   same id in two segments: two accepted, each tagged
+  ok   segments 1 and 2
+  ok   a replace takes three round trips: cancel, a look at what traded, new order (0.48 s at 0.15 s each way)
+  ok   reports in request order: [(1, 1, 'accepted'), (2, 1, 'accepted'), (2, 1, 'replaced')]
+  ok   flat
+websocket fills
+  ok   the bridge authenticates and subscribes (the fake checks the signature itself)
+  ok   order accepted
+  ok   a partial fill is reported without waiting for a sync
+  ok   4 lots, 6 left, at the match price: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 4, 'leaves': 6, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   in 20 ms
+  ok   the rest
+  ok   6 lots, nothing left: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 6, 'leaves': 0, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   websocket fills are marked maker
+  ok   a filled order cannot be cancelled
+  ok   and nothing is reported twice
+  ok   second order
+  ok   unknown orders, a size that is not a number, a negative size and a zero price report nothing
+  ok   and are counted (1.0 unknown, 3.0 bad)
+  ok   metrics: two websocket fills, subscribed (fills 2.0, subscribed 1.0)
+  ok   no cancel was sent for the order that had filled
+  ok   a match larger than the order
+  ok   is capped at the order's size: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 2, 'px': 809900000, 'qty': 10, 'leaves': 0, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   frames that are not JSON, not an object, or have no fields do not stop the bridge
+  ok   and the first two are counted (2.0)
+  ok   an id used again
+  ok   gets a fill
+  ok   of its own 4 lots, not of the earlier order's tally: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 809700000, 'qty': 4, 'leaves': 6, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   a match that names our order as the taker counts as well
+  ok   2 lots: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 809700000, 'qty': 2, 'leaves': 4, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}
+  ok   exit 0
+  ok   the sync finds the fill when the socket is silent
+  ok   and the late event adds nothing: [{'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 4, 'leaves': 6, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}]
+  ok   it is counted as already reported
+  ok   a later fill comes from the socket
+  ok   7 lots in all, each once: [(4, 6), (3, 3)]
+  ok   a lost event is made up by the sync
+  ok   9 lots matched, 9 reported, 1 left: [(4, 6), (3, 3), (1, 2), (1, 1)]
+  ok   cancel answered
+  ok   the fill that raced the cancel is reported first, then the cancel for what was left: [('fill', 4, 6), ('canceled', 6, 0)]
+  ok   cancel answered
+  ok   4 lots from the socket, 3 from the record, 3 cancelled: [('fill', 4, 6), ('fill', 3, 3), ('canceled', 3, 0)]
+  ok   cancel answered
+  ok   fill, then cancel refused: [('fill', 10, 0), ('cancel_rejected', 0, 0)]
+  ok   replace answered
+  ok   the fill that raced the replace is reported before it: [('fill', 4, 6), ('replaced', 10, 10)]
+  ok   an order cancelled elsewhere is reported from the done event (sync is 600 s away)
+  ok   an authentication error is logged: ['Authentication Failed']
+  ok   the REST sync still finds the fill
+  ok   and the bridge keeps trying to subscribe (2 refusals)
+  ok   with growing pauses (1, 2, 4 s): 3 attempts in 6.5 s, not one a second
+  ok   metrics say not subscribed, with the errors counted
+  ok   exit 0
+  ok   connection closed by the exchange
+  ok   the bridge resubscribes
+  ok   and the fill from the gap is found by the sync that follows
+  ok   4 lots: [{'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 4, 'leaves': 6, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}]
+  ok   metrics count the reconnection (2.0 connects)
+websocket options
+  ok   --ws-fills without --loop: exit 2 (order_bridge: --ws-fills needs --loop)
+  ok   a production socket in test mode: exit 2 (order_bridge: --test-exchange only allows ws://127.0.0.1:PORT or ws://localhost:)
+  ok   a foreign host in test mode: exit 2 (order_bridge: --test-exchange only allows ws://127.0.0.1:PORT or ws://localhost:)
+  ok   outside test mode wss://ws-feed.exchange.coinbase.com is refused (exit 2)
+  ok   outside test mode wss://evil.example.com is refused (exit 2)
+a fill around a cancel or replace is never lost (no websocket: the exchange's own record decides)
+  ok   can answered
+  ok   the 4 lots are reported before the canceled: [('fill', 4, 6), ('canceled', 6, 0)]
+  ok   at the order's limit price
+  ok   marked maker
+  ok   and counted
+  ok   exit 0
+  ok   rep answered
+  ok   the 4 lots are reported before the replaced: [('fill', 4, 6), ('replaced', 10, 10)]
+  ok   at the order's limit price
+  ok   marked maker
+  ok   and counted
+  ok   exit 0
+  ok   an order that the record says is filled completely: the cancel is refused
+  ok   after a fill capped at the order's size: [{'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 10, 'leaves': 0, 'reason': 'none', 'side': 'buy', 'liq': 'maker'}]
+  ok   and marked maker
+  ok   hide_done: the cancel is still answered
+  ok   with the whole order as left: {'t': 'rep', 'seg': 1, 'rt': 'canceled', 'id': 1, 'px': 810000000, 'qty': 10, 'leaves': 0, 'reason': 'user', 'side': 'buy'}
+  ok   unverified cancels counted: 0.0
+  ok   fail_get_order: the cancel is still answered
+  ok   with the whole order as left: {'t': 'rep', 'seg': 1, 'rt': 'canceled', 'id': 1, 'px': 810000000, 'qty': 10, 'leaves': 0, 'reason': 'user', 'side': 'buy'}
+  ok   unverified cancels counted: 1.0
+closing orders: an immediate-or-cancel order, checked against the exchange's own quote, answered from its record
+  ok   a sell through the bid is answered
+  ok   accepted, then filled in full: [('accepted', 5, 5), ('fill', 5, 0)]
+  ok   at the price it traded (the touch), not at the limit: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 5, 'leaves': 0, 'reason': 'none', 'side': 'sell', 'liq': 'taker'}
+  ok   an immediate-or-cancel fill is marked taker: {'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 5, 'leaves': 0, 'reason': 'none', 'side': 'sell', 'liq': 'taker'}
+  ok   the exchange saw one immediate-or-cancel order: [('sell', 80990.0, 5e-05, 5e-05)]
+  ok   and nothing rests
+  ok   a partial fill: the rest is cancelled
+  ok   3 filled, 2 cancelled: [(2, 'accepted', 5, 5), (2, 'fill', 3, 2), (2, 'canceled', 2, 0)]
+  ok   a buy trades at the ask
+  ok   the partial immediate-or-cancel fill is taker too
+  ok   only fill reports carry a liquidity mark
+  ok   an order that does not reach the touch is cancelled whole
+  ok   with no fill: [('accepted', 4), ('canceled', 4)]
+  ok   counted
+  ok   exit 0
+  ok   a price far from the exchange's mid is rejected
+  ok   as a bad price, and never sent: {'t': 'rep', 'seg': 1, 'rt': 'rejected', 'id': 1, 'px': 800000000, 'qty': 5, 'leaves': 0, 'reason': 'badprice', 'side': 'sell'}
+  ok   an order over the notional cap is rejected
+  ok   as a bad size, and never sent
+  ok   a market order is not carried out: rejected, not sent
+  ok   nor a plain limit order
+  ok   --ioc-band-bps 200 lets a price 123 bps away through
+  ok   an unusable quote: rejected, not sent
+  ok   and counted
+  ok   a refused POST: rejected, never accepted
+closing orders: the details
+  ok   answered
+  ok   answered
+  ok   both are inside 100 bps of the mid, so both are sent: [(1, 'accepted'), (1, 'canceled'), (2, 'accepted'), (2, 'canceled')]
+  ok   123 bps above the mid is not
+  ok   no type: a resting post-only order
+  ok   filled
+  ok   capped at the order's size, nothing cancelled: [('accepted', 5, 5), ('fill', 5, 0)]
+  ok   the bridge reads it again, then gives up and says so
+  ok   and reports no fill and no cancel: ['accepted']
+  ok   the socket's match is reported (3 of 5 lots)
+  ok   then the record is readable and the rest is cancelled
+  ok   each lot once: [('accepted', 5, 5), ('fill', 3, 2), ('canceled', 2, 0)]
+closing orders: when the record cannot be read, nothing is guessed
+  ok   accepted
+  ok   the bridge gives up after a few reads and says so
+  ok   and sends no fill and no cancel: ['accepted']
+  ok   counted
+  ok   and it is no longer held as working
+  ok   accepted
+  ok   once the record can be read the fill is reported
+  ok   exactly once: ['accepted', 'fill']
+  ok   the socket's match becomes the fill
+  ok   once, at the traded price: [{'t': 'rep', 'seg': 1, 'rt': 'fill', 'id': 1, 'px': 810000000, 'qty': 5, 'leaves': 0, 'reason': 'none', 'side': 'sell', 'liq': 'taker'}]
+  ok   and the order is not also reported cancelled
+account: the base balance is read at start and reported once the hello has arrived
+  ok   the balance is read at start: [{'ts_ms': 1792455708621, 'mono_s': 0.111, 'event': 'account', 'known': True, 'status': 200, 'currency': 'BTC', 'base_balance': '1.0000500000000001'}]
+  ok   and nothing is reported before the hello (the scale is not known yet)
+  ok   after the hello the account is reported
+  ok   in lots (1e-5): [{'t': 'acct', 'ok': 1, 'base_raw': 100005}]
+  ok   a sale trades
+  ok   the exchange's balance fell by the lots sold: 1.00000000
+  ok   and the next bridge reports it: [{'t': 'acct', 'ok': 1, 'base_raw': 100000}]
+  ok   0.0123456 is 1235 lots: [{'t': 'acct', 'ok': 1, 'base_raw': 1235}]
+  ok   fail: the bridge still answers
+  ok   fail: and says it does not know: [{'t': 'acct', 'ok': 0}]
+  ok   fail: logged as unknown
+  ok   fail: the bridge goes on (the engine decides what to do about it)
+  ok   nobase: the bridge still answers
+  ok   nobase: and says it does not know: [{'t': 'acct', 'ok': 0}]
+  ok   nobase: logged as unknown
+  ok   nobase: the bridge goes on (the engine decides what to do about it)
+  ok   a mirror bridge never reads the account
+hft_live --orders-fd into the bridge, on a recorded capture
+  skip (no recorded capture in data/)
+test_bridge: all checks passed
+==== sandbox smoke test (local fake exchange)
+a healthy exchange
+  ok   exit 0 (unt report ok, bridge exit 0, flat at exit True, websocket fills on, 2.2 s | PASS 13 flat         nothing working at the end |  | summary: {"passed": 18, "failed": 0, "calls": 20, "network_errors": 0, "latency_ms_p50": 1, "latency_ms_max": 7, "latency_ms_p90": 4} | report written to /tmp/smk5ij12g5_/r.json | )
+  ok   every step passes: 18 PASS
+  ok   the exchange is flat afterwards
+  ok   orders were placed (8 POSTs)
+  ok   exactly one order is above the ask (the crossing test)
+  ok   every other order is at half the bid or lower (largest 40500.00, bid 81000.00)
+  ok   all post-only, all the minimum size
+  ok   no key, secret or passphrase in the output or the report
+  ok   report has the summary and latencies
+  ok   report records the response shapes
+an exchange that misbehaves
+  ok   a cancel that does nothing: step 9 fails, and the cleanup leaves the exchange flat
+  ok   orders without filled_size: step 7 fails and says why
+  ok   a 500 on the crossing order is not a refusal
+  ok   a replace that the exchange refuses: the bridge step fails
+  ok   an order that appears before the last check: step 13 fails (stray [])
+  ok   an unreadable /accounts: step 5 fails, says what it means, and nothing was traded
+  ok   no entry for the base currency: step 5 fails, says what it means, and nothing was traded
+  ok   a balance that is not a number: step 5 fails, says what it means, and nothing was traded
+the websocket steps
+  ok   a refused socket fails its own step, shows the exchange's message, and the REST steps still run
+  ok   a socket that subscribes but delivers nothing: step 7 says so
+  ok   a done event that is not a cancel after our cancel: step 9 fails
+  ok   --skip-ws: no socket is opened
+  ok   with the socket: the bridge step runs with --ws-fills
+  ok   an unreachable socket fails step 6
+refusals before any request
+  ok   the production URL is refused (exit 2)
+  ok   a missing variable: exit 2, no request sent
+  ok   a secret that is not base64: exit 2
+  ok   a production websocket URL in test mode: exit 2, no request sent
+  ok   a notional cap over 50 USD: exit 2
+things going wrong
+  ok   bad credentials stop at step 5, nothing placed
+  ok   a clock 60 s off stops at step 2
+  ok   an order already working: refused, and left alone
+  ok   with --cancel-existing it proceeds
+  ok   a crossing order that is accepted: fail, and cancelled
+  ok   an order over the notional cap: nothing placed
+  ok   --skip-bridge
+public-only mode: no key, no signed request, no order
+  ok   exit 0 with no environment variables at all (sted: they need a key. |  | summary: {"passed": 5, "failed": 0, "calls": 3, "network_errors": 0, "latency_ms_p50": 1, "latency_ms_max": 2, "latency_ms_p90": 2} | report written to /tmp/smkicfqauja/pub.json | )
+  ok   environment, clock, product, ticker and public feed all pass (5 PASS)
+  ok   the public snapshot was read and compared with the ticker
+  ok   no signed request, no POST, no DELETE reached the exchange
+  ok   one public subscription, no user-channel subscription
+  ok   it says what it did not test
+  ok   the report says public-only
+  ok   the report holds the shape of the snapshot
+  ok   no credential in the report
+  ok   --cancel-existing with --public-only: exit 2, nothing sent
+  ok   --skip-bridge with --public-only: exit 2
+  ok   --skip-ws leaves the feed out, and that is a pass
+  ok   a bad secret in the environment does not matter: it is not read
+  ok   public feed auth_only: step 4 fails (without credentials)
+  ok   public feed bad: step 4 fails (not in the)
+  ok   public feed far: step 4 fails (more than 1 percent)
+  ok   public feed silent: step 4 fails (no snapshot)
+  ok   public feed crossed: step 4 fails (not a valid book)
+  ok   public feed locked: step 4 fails (not a valid book)
+  ok   public feed zero: step 4 fails (not a valid book)
+  ok   public feed badside: step 4 fails (more than 1 percent)
+  ok   public feed badbid: step 4 fails (more than 1 percent)
+  ok   public feed noasks: step 4 fails (not in the)
+  ok   a snapshot 0.2 percent from the ticker passes (the tolerance is not zero)
+  ok   it subscribed to the level2_batch channel and nothing else, without a key
+  ok   --channel picks another public channel
+  ok   the Api guard refuses a signed call in public mode, before it is sent
+  ok   and the same call goes out in the normal mode
+  ok   a product that is not online stops a public run at step 3
+  ok   a ticker of zeros stops a public run at step 4, before the feed
+  ok   a feed that cannot be reached fails step 4
+  ok   against the local fake an environment proxy is not used (REST and websocket)
+  ok   the Api that public_only builds refuses a signed call
+  ok   a clock 60 s off stops a public run at step 2, before the feed
+  ok   the production URL is still refused in public-only mode
+the product reply as the real sandbox sends it (no base_min_size)
+  ok   a reply without base_min_size passes, shows the real values, and says the minimum is unknown
+  ok   with base_min_size present it is shown and used
+  ok   a minimum size above the bridge's 1e-5 lots: DO NOT FIT
+  ok   a minimum size of exactly 0.0001 fits (the limit)
+  ok   a minimum size just above 0.0001 does not fit
+  ok   a size step that 1e-5 is not a multiple of: DO NOT FIT
+  ok   a price step that a cent is not a multiple of: DO NOT FIT
+  ok   HTTP 503 with a well-formed body still fails step 3
+  ok   cancel_only: step 3 fails as not tradable, and the flag is shown
+  ok   auction_mode: step 3 fails as not tradable, and the flag is shown
+  ok   trading_disabled: step 3 fails as not tradable, and the flag is shown
+  ok   limit_only is fine (the bridge sends limit orders), and it is shown
+  ok   a reply without base_increment fails and still shows the values it has
+  ok   the full run works with a reply that has no base_min_size
+test_smoke: all checks passed
+==== fault drills
+drill: drop
+  ok   first segment starts
+  ok   a second segment starts after the connection drop
+  ok   the first segment ended flat on the reconnect marker: [{'ts_ms': 1792455840006, 'mono_s': 0.286, 'event': 'segment_end', 'reason': 'reconnect/marker', 'segment': 1, 'packets': 4, 'flat': 1, 'kill_latched': 0, 'book_matched_model': 1, 'flatten_rounds': 1, 'flatten_sim_ns': 50000, 'open_before_flatten': 2, 'position_lots': 0, 'fills': 0, 'close_attempts': 0, 'closed_lots': 0, 'close_failed': 0, 'close_why_not': ''}]
+  ok   and there were quotes out to take down
+  ok   the supervisor did not need to restart anything
+  ok   supervisor exits 0 on SIGTERM
+drill: silent
+  ok   first segment starts
+  ok   stale feed detected while the connection is still open (0.0 s after the silence began)
+  ok   quotes pulled and flat, kill switch not latched: [{'ts_ms': 1792455841500, 'mono_s': 0.709, 'event': 'segment_end', 'reason': 'stale feed', 'segment': 1, 'packets': 1, 'flat': 1, 'kill_latched': 0, 'book_matched_model': 1, 'flatten_rounds': 2, 'flatten_sim_ns': 50000, 'open_before_flatten': 2, 'position_lots': 0, 'fills': 0, 'close_attempts': 0, 'closed_lots': 0, 'close_failed': 0, 'close_why_not': ''}]
+  ok   and there were quotes out to take down
+  ok   quoting resumes once the feed is back
+  ok   no process restart was needed
+  ok   supervisor exits 0
+drill: kill_capture
+  ok   first segment starts
+  ok   the pair is restarted after kill -9 of the capture
+  ok   hft_live saw end of input and ended flat: [{'ts_ms': 1792455841944, 'mono_s': 0.178, 'event': 'segment_end', 'reason': 'shutdown', 'segment': 1, 'packets': 1, 'flat': 1, 'kill_latched': 0, 'book_matched_model': 1, 'flatten_rounds': 1, 'flatten_sim_ns': 50000, 'open_before_flatten': 2, 'position_lots': 0, 'fills': 0, 'close_attempts': 0, 'closed_lots': 0, 'close_failed': 0, 'close_why_not': ''}]
+  ok   and there were quotes out to take down
+  ok   quoting again in the new run
+  ok   hft_live exited 0 (clean) when its input vanished
+  ok   supervisor exits 0
+drill: kill_live
+  ok   first segment starts
+  ok   the pair is restarted after kill -9 of hft_live
+  ok   recorded as killed by signal 9: [{'ts_ms': 1792455843548, 'event': 'pair_stopped', 'run': 1, 'ran_s': 0.3, 'why': 'live_exited', 'live': {'returncode': -9, 'signal': 9}, 'capture': {'returncode': -15, 'signal': 15}, 'bridge': None}]
+  ok   quoting again in the new run
+  ok   exactly one restart
+  ok   the old capture process did not outlive its reader
+  ok   supervisor exits 0
+drill: hang
+  ok   first segment starts
+  ok   the watchdog notices the stopped process (2.9 s)
+  ok   the pair is restarted
+  ok   quoting again in the new run
+  ok   the stopped process was killed, not left behind
+  ok   supervisor exits 0
+drill: sigterm
+  ok   first segment starts
+  ok   supervisor exits 0
+  ok   SIGTERM reached hft_live as a kill: flat, switch latched: [{'ts_ms': 1792455848682, 'mono_s': 1.206, 'event': 'segment_end', 'reason': 'kill', 'segment': 1, 'packets': 22, 'flat': 1, 'kill_latched': 1, 'book_matched_model': 1, 'flatten_rounds': 1, 'flatten_sim_ns': 50000, 'open_before_flatten': 2, 'position_lots': 0, 'fills': 0, 'close_attempts': 0, 'closed_lots': 0, 'close_failed': 0, 'close_why_not': ''}]
+  ok   and there were quotes out to take down
+  ok   hft_live recorded the signal
+  ok   and was not restarted
+drill: term_ignored
+  ok   supervisor still exits 0
+  ok   recorded that SIGTERM was ignored
+  ok   and gave up waiting after the grace period (1.1 s)
+  ok   the stuck process was killed with SIGKILL
+drill: capture_dies_live_stuck
+  ok   notices the capture is gone and that hft_live did not follow
+  ok   and restarts the pair
+drill: slow_flapping
+  ok   still supervising after 5 s of spaced-out failures
+  ok   restarted 5 times, more than max-restarts, because they were spread out
+drill: crash_loop
+  ok   gives up with exit 3 (got 3)
+  ok   after 3 restarts: 4 starts
+  ok   backoff grows: [0.2, 0.4, 0.8]
+drill: integrity
+  ok   exit 4 passed on to the operator (got 4)
+  ok   not restarted: a person must look
+drill: bridge_flow
+  ok   the strategy's quotes reach the exchange: 2 resting
+  ok   and stay within max-open
+  ok   supervisor exits 0 on SIGTERM
+  ok   nothing left resting on the exchange
+  ok   bridge reported flat
+  ok   hft_live ended with the kill path and quotes out
+drill: kill_bridge
+  ok   the trio restarts after kill -9 of the bridge
+  ok   the new bridge's first act is cancel-all, and it found [0, 2] stranded orders (2 before the kill)
+      orders stranded for about 0.4 s (kill to cancel-all)
+  ok   quoting resumes on the exchange
+  ok   flat at the end
+drill: kill_live_bridge
+  ok   orders resting before the kill
+  ok   pair stopped
+  ok   hft_live died by SIGKILL; the bridge saw end of input and left cleanly: {'returncode': 0, 'signal': None}
+  ok   bridge cancelled everything before exiting
+  ok   restarted
+  ok   quoting again
+  ok   flat at the end
+drill: exchange_down
+  ok   the bridge gives up on a dead exchange (exit 1)
+  ok   with the restartable code 1
+  ok   and the supervisor does not treat it as fatal
+  ok   when the exchange is back, quoting resumes
+  ok   flat at the end
+drill: bad_credentials
+  ok   supervisor exits 4 (got 4)
+  ok   not restarted: a person must look
+  ok   no order was placed
+drill: bridge_hang
+  ok   the watchdog names the bridge: [{'ts_ms': 1792455878682, 'event': 'watchdog_target', 'run': 1, 'who': 'bridge', 'age_s': 3.0}]
+  ok   trio restarted
+  ok   the stranded orders were cancelled by the new bridge
+  ok   flat at the end
+drill: loop_flow
+  ok   orders rest on the exchange
+  ok   and their acknowledgements reached hft_live (2.0 reports)
+  ok   segment ended
+  ok   flat after real confirmations (224 ms), orders were out: {'ts_ms': 1792455880382, 'mono_s': 0.619, 'event': 'segment_end', 'reason': 'reconnect/marker', 'segment': 1, 'packets': 7, 'flat': 1, 'kill_latched': 0, 'book_matched_model': 1, 'flatten_rounds': 0, 'flatten_sim_ns': 224478761, 'open_before_flatten': 2, 'position_lots': 0, 'fills': 0, 'close_attempts': 0, 'closed_lots': 0, 'close_failed': 0, 'close_why_not': ''}
+  ok   a new segment quotes again
+  ok   no process restart
+  ok   SIGTERM: kill path, flat after confirmations: {'ts_ms': 1792455881251, 'mono_s': 1.488, 'event': 'segment_end', 'reason': 'kill', 'segment': 2, 'packets': 6, 'flat': 1, 'kill_latched': 1, 'book_matched_model': 1, 'flatten_rounds': 0, 'flatten_sim_ns': 382244494, 'open_before_flatten': 2, 'position_lots': 0, 'fills': 0, 'close_attempts': 0, 'closed_lots': 0, 'close_failed': 0, 'close_why_not': ''}
+  ok   nothing left on the exchange
+drill: loop_fill
+  ok   the market trades through one of our orders (buy 100.03)
+  ok   the fill report reached hft_live
+  ok   and its position is +5 lots (metric says 5.0)
+  ok   no restart
+  ok   clean stop, no orders left
+  ok   the segment end records the position it ends with: {'flat': 1, 'position_lots': 5, 'fills': 1}
+drill: loop_fill_ws
+  ok   the bridge subscribed to the user channel
+  ok   the market trades through one of our orders (buy 100.03)
+  ok   hft_live's position is +5 lots 0.32 s after the fill, with the sync a minute away (metric 5.0)
+  ok   no restart
+  ok   clean stop, nothing left, position kept: {'flat': 1, 'position_lots': 5, 'fills': 1}
+drill: loop_ws_refused
+  ok   the socket was refused
+  ok   the fill still reaches hft_live through the sync (position 5.0)
+  ok   clean stop
+drill: loop_slow
+  ok   orders rest on a slow exchange
+  ok   SIGTERM with 0.4 s per request: still flat: [{'ts_ms': 1792455892329, 'mono_s': 4.884, 'event': 'segment_end', 'reason': 'kill', 'segment': 1, 'packets': 31, 'flat': 1, 'kill_latched': 1, 'book_matched_model': 1, 'flatten_rounds': 0, 'flatten_sim_ns': 3177017926, 'open_before_flatten': 2, 'position_lots': 0, 'fills': 0, 'close_attempts': 0, 'closed_lots': 0, 'close_failed': 0, 'close_why_not': ''}]
+  ok   and the flatten took real time (3177 ms)
+  ok   nothing left on the exchange
+drill: loop_dead_at_stop
+  ok   the supervisor does not call that a clean stop (exit 4)
+  ok   the exchange is down, so hft_live cannot call itself flat: [{'ts_ms': 1792455899374, 'mono_s': 5.716, 'event': 'segment_end', 'reason': 'kill', 'segment': 1, 'packets': 13, 'flat': 0, 'kill_latched': 1, 'book_matched_model': 1, 'flatten_rounds': 0, 'flatten_sim_ns': 5002003008, 'open_before_flatten': 2, 'position_lots': 0, 'fills': 0, 'close_attempts': 0, 'closed_lots': 0, 'close_failed': 0, 'close_why_not': ''}]
+  ok   and it stopped trading
+      stop took 6.8 s
+drill: loop_close
+  ok   the fill reached hft_live: position +5 lots
+  ok   supervisor exit 0 (got 0)
+  ok   nothing left resting on the exchange
+  ok   one closing order, against the position: [('sell', 99.7, 5e-05, 5e-05)]
+  ok   the segment ends flat in position: {'position_lots': 0, 'closed_lots': 5, 'close_attempts': 1, 'close_failed': 0}
+  ok   no alarm
+  ok   pnl_report: two fills (the quote and the close), consistent, ends flat, 3 mid samples
+  ok   pnl_report: both PnL figures agree, edge computed (total -0.000001)
+drill: loop_close_no_liquidity
+  ok   the fill reached hft_live: position +5 lots
+  ok   supervisor exit 4 (got 4)
+  ok   nothing left resting on the exchange
+  ok   the position stays and the segment says the close failed: {'position_lots': 5, 'closed_lots': 0, 'close_attempts': 3, 'close_failed': 1, 'close_why_not': 'feed not fresh'}
+  ok   and it is loud: stop_not_flat and position_not_closed
+drill: loop_close_off_market
+  ok   the fill reached hft_live: position +5 lots
+  ok   supervisor exit 4 (got 4)
+  ok   nothing left resting on the exchange
+  ok   the position stays and the segment says the close failed: {'position_lots': 5, 'closed_lots': 0, 'close_attempts': 5, 'close_failed': 1, 'close_why_not': 'attempts used up'}
+  ok   and it is loud: stop_not_flat and position_not_closed
+drill: loop_carry_restart
+  ok   the fill reached hft_live: position +5 lots
+  ok   and the position file says so (5)
+  ok   the pair is restarted
+  ok   the new process quotes with the old position: 5.0
+  ok   a stop closes what the dead process left: exit 0, closing orders [('sell', 99.7, 5e-05, 5e-05)]
+  ok   and the file says flat (0)
+drill: loop_account_mismatch
+  ok   the fill reached hft_live: position +5 lots
+  ok   the file holds position and baseline: ['5', '-5001500', '100000']
+  ok   the supervisor stops and passes exit 4 on: nobody restarts it (rc=4)
+  ok   hft_live logged account_mismatch: ['the account holds 100105 lots of the base currency, the position file implies 100005 (baseline 100000 + position 5)']
+  ok   it was started exactly twice (2)
+  ok   and the second process placed no order
+  ok   nothing left resting on the exchange
+  ok   and the file was not touched: ['5', '-5001500', '100000']
+drill: all checks passed
+ci_local: all steps passed
