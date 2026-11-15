@@ -1,6 +1,6 @@
 # HFT research artifact
 
-Branch: `research/hft-evidence-revision`. The source checkout is preserved; no repository is pushed or paper submitted. Start with `GAP_ANALYSIS.md`, then `EVIDENCE_REPORT.md` and `paper/ieee_paper.pdf`.
+The paper is a draft and has not been submitted. Start with `GAP_ANALYSIS.md`, then `EVIDENCE_REPORT.md` and `paper/ieee_paper.pdf`.
 
 ## Reproduce
 
@@ -13,7 +13,7 @@ python -m pip install -r research/requirements-lock.txt
 bash research/reproduce.sh
 ```
 
-Run from the repository root. The script builds the release preset with four jobs, runs the 19 CTest suites, Python integration suites and 28 fault drills, runs analysis-unit tests, then performs timing/lab experiments sequentially, generates results and compiles the IEEE-format draft. Stop other task-started CPU-heavy jobs before benchmark measurement. Shared-VM background scheduling noise still applies. Required tools and pinned dependencies are recorded; no credentials or exchange connection are needed. Existing scripts use local fake services. An optional recorded-capture bridge case is skipped if data/ has no recording.
+Run from the repository root. The script builds the release preset with four jobs, runs the 19 CTest suites, Python integration suites and the fault drills, runs analysis-unit tests, then performs timing/lab experiments sequentially, generates results and compiles the IEEE-format draft. Stop other task-started CPU-heavy jobs before benchmark measurement. Shared-VM background scheduling noise still applies. Required tools and pinned dependencies are recorded; no credentials or exchange connection are needed. Existing scripts use local fake services. An optional recorded-capture bridge case is skipped if data/ has no recording.
 
 `config.json` prespecifies sample counts, seeds and scope; `run_experiments.py` records full commands, source/binary hashes, compiler/CMake configuration and results. `analysis.py` and `build_report.py` recompute paired mean intervals, exact sign tests, bootstrap intervals and Holm corrections. `paired_statistics.csv` uses a family of four tests per primary/confirmation run, and `regime_statistics.csv` uses a family of 28. The delay axis is **per hop**, across three hops. Every lab result must exit zero; a health failure is not a usable result. A deterministic primary repeat must match the complete original JSON.
 

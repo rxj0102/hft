@@ -1,10 +1,10 @@
 {
   "bench/bench_t2t.cpp": "c1bf1d2e89ce52e95944880b8e1952fa8de3b94bafd29772dd03361e1d35f360",
   "include/hft/core/histogram.hpp": "e484c0e3baa505dea1c5e82e7529f2154df159ae1df48f3f5ed19dcec5043098",
-  "research/EVIDENCE_REPORT.md": "f98ad36d667079a83e4a8184d57ee5de82eb8eb8fedc326bb6769a6663b75d21",
+  "research/EVIDENCE_REPORT.md": "3c888d1db28f2b85aaf5577a354a396b1ef86e2351c5095491f2b23215b5d4ba",
   "research/GAP_ANALYSIS.md": "d232175700ce9e79f48d77157f3052c2ac7b5c923e52d7bcfe1e9a0e27fc4ba8",
   "research/LITERATURE_PROVENANCE.md": "94e37ef0cf44b920ff5e20263f84b10e523f6703f1769c4e2fe1a04e9b4a28df",
-  "research/README.md": "673acf17102d432ef3466a10670527b9377558c5cd3750394dc5eb07e3656da2",
+  "research/README.md": "71ee50e8f6b052db2fcac7b4a1580e995152edfa144eeee4dc16ee1bf6ce8fdb",
   "research/analysis.py": "35c3a81557e9730f293e34cf063f05b2012a46c285df34a76a54c47583aa53d7",
   "research/book_baseline.cpp": "a8e3cf4a759f708f16194ebd62dc40ad15c33c3d364fcaf05a94821954c3e82d",
   "research/build_report.py": "264fe84b5244245e9907d5503ef6e42925ae4ed514c5a543aae5b6e22673131c",
