@@ -37,6 +37,10 @@ add_executable(hft_live src/tools/hft_live.cpp)
 target_link_libraries(hft_live PRIVATE hft_core)
 add_executable(hft_lab src/tools/hft_lab.cpp)
 target_link_libraries(hft_lab PRIVATE hft_core)
+add_executable(hft_itch_check src/tools/hft_itch_check.cpp)
+target_link_libraries(hft_itch_check PRIVATE hft_core)
+add_executable(itch_extract src/tools/itch_extract.cpp)
+target_link_libraries(itch_extract PRIVATE hft_warnings)
 
 # Fuzz targets need clang's libFuzzer runtime: use the "fuzz" preset.
 option(HFT_BUILD_FUZZ "Build libFuzzer targets (requires clang)" OFF)

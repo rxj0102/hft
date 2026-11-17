@@ -415,6 +415,26 @@ static void run_equivalence(std::uint64_t n_events, std::uint64_t seed, std::uin
   }
 }
 
+// A feed's partial cancel (ITCH X) is applied as a same-price replace with the
+// remaining size, which needs the order's price and size and must keep its
+// place in the queue.
+static void test_order_price_qty_and_partial_cancel() {
+  Region r = make_region(1);
+  Arena a(r);
+  OrderBook b;
+  CHECK(b.init(a, small_cfg()));
+  CHECK(b.add(1, Side::Buy, px(10), 100) == BookResult::Ok);
+  CHECK(b.add(2, Side::Buy, px(10), 40) == BookResult::Ok);
+  Price p;
+  Qty q;
+  CHECK(b.order_price_qty(1, p, q) && p == px(10) && q == 100);
+  CHECK(!b.order_price_qty(9, p, q));
+  CHECK(b.replace(1, p, q - 30) == BookResult::Ok);  // cancel 30 of 100
+  CHECK(b.best_bid_qty() == 110);
+  CHECK(b.execute(1, 70) == BookResult::Ok);  // order 1 is still first: it fills completely
+  CHECK(!b.contains(1) && b.contains(2) && b.best_bid_qty() == 40);
+}
+
 int main(int argc, char** argv) {
   const std::uint64_t n = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 1'000'000ULL;
   test_depth_at_grid_edges();
@@ -423,6 +443,7 @@ int main(int argc, char** argv) {
   test_book_basics();
   test_priority();
   test_clear_side_rebase();
+  test_order_price_qty_and_partial_cancel();
   run_equivalence(n, 12345, 4096, 4096, 2500);
   // A second, differently shaped book: tiny window, small capacity, many collisions.
   run_equivalence(n / 4, 987654321, 256, 512, 300);

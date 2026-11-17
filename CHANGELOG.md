@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### A real Nasdaq ITCH day, order by order
+
+- `hft_itch_check` drives the order book with one stock from a Nasdaq TotalView-ITCH 5.0 file (partial cancels as same-price replaces, which keep queue position) and logs the top of book; `itch_extract` cuts a day down to chosen stocks; `scripts/itch_reference_top.py` and `scripts/compare_top.py` give an independent reconstruction and the comparison; `scripts/verify_itch_day.sh` runs it all from the .gz file.
+- On 2019-12-30 the book matched the reference at all 2,582,855 top of book changes for AAPL, MSFT, AMZN, TSLA and QQQ (docs/results/itch_2019-12-30.md).
+- `OrderBook::order_price_qty` (price and remaining size of a resting order), with a test.
+
 ### Phase 53: a case study and a start-here line
 
 - `docs/CASE_STUDY.md` (five-minute summary, five stories, what is not claimed) and a start-here line and docs row in the README. Documentation only; every number was checked against RESULTS.md, REPRODUCIBILITY.md and the ADRs. No code changed.
