@@ -61,6 +61,7 @@ Measured on a second machine (Intel Xeon at 2.8 GHz, 2 vCPU shared VM, gcc 13.3)
 - Nine libFuzzer targets, including one where the fuzz input plays the exchange.
 - Mutation checks at every phase: bugs injected on purpose, and a test had to fail. The first runs always had survivors, and each was either killed with a new test or removed as unobservable. Counts are in [docs/RESULTS.md](docs/RESULTS.md) and the changelog.
 - GitHub Actions with nine jobs (build and test cells, TSan, fuzz smoke, performance gate). It has found real faults that local runs missed, such as a missing Python package in five cells and a race in a test. See [docs/CI.md](docs/CI.md).
+- A real Nasdaq ITCH day (2019-12-30) replayed order by order for five stocks: top of book identical to an independent Python reconstruction at every one of 2.6 million changes ([docs/results/itch_2019-12-30.md](docs/results/itch_2019-12-30.md)).
 - 52 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Build and run
@@ -114,6 +115,6 @@ The smoke test places a few minimum-size orders worth under 5 USD and writes a r
 - Not run against the real sandbox, so nothing about real fills, latencies, rate limits or the real response formats is known. The first real run will find differences.
 - No claim about profitability. The market maker is a mechanism to exercise the engine; the PnL report exists so that a run can be judged, and the strategy lab compares variants only on simulated fills in generated markets.
 - Timings are from a shared VM with hypervisor stalls. No bare-metal run, no NIC or kernel-bypass path, one product, one venue.
-- Recorded exchange data is not committed. Real-data replay is offline and level 2 only.
+- Recorded exchange data is not committed. Real-data replay is offline: level 2 from Coinbase, and one full Nasdaq ITCH day order by order, where the book matched an independent reconstruction at all 2.6 million top of book changes across five stocks ([docs/results/itch_2019-12-30.md](docs/results/itch_2019-12-30.md)). That ITCH check covers the book only, not the rest of the pipeline.
 - Not built: a FIX parser, AVX2 paths, MSan, multi-instrument operation. Nothing places orders on a production exchange, and the bridge refuses any URL but the sandbox.
 - No automatic flatten after a kill unless `--close-position` is on; otherwise that is a human decision (see the runbook).

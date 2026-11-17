@@ -174,6 +174,18 @@ class OrderBook {
     return true;
   }
 
+  // Price and remaining size of a resting order. Lets a feed's partial cancel
+  // (ITCH X: cancel n shares) be applied as a same-price replace, which keeps
+  // queue position.
+  bool order_price_qty(OrderId id, Price& price, Qty& qty) const noexcept {
+    const std::uint32_t idx = map_.find(id);
+    if (idx == kNil) return false;
+    const Order* o = pool_.at_const(idx);
+    price = level_price(o->level);
+    qty = o->qty;
+    return true;
+  }
+
   // Drops every order. Used when a snapshot replaces the whole book. O(levels).
   void clear() noexcept {
     for (int s = 0; s < 2; ++s) {
