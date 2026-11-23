@@ -62,6 +62,7 @@ Measured on a second machine (Intel Xeon at 2.8 GHz, 2 vCPU shared VM, gcc 13.3)
 - Mutation checks at every phase: bugs injected on purpose, and a test had to fail. The first runs always had survivors, and each was either killed with a new test or removed as unobservable. Counts are in [docs/RESULTS.md](docs/RESULTS.md) and the changelog.
 - GitHub Actions with nine jobs (build and test cells, TSan, fuzz smoke, performance gate). It has found real faults that local runs missed, such as a missing Python package in five cells and a race in a test. See [docs/CI.md](docs/CI.md).
 - A real Nasdaq ITCH day (2019-12-30) replayed order by order for five stocks: top of book identical to an independent Python reconstruction at every one of 2.6 million changes ([docs/results/itch_2019-12-30.md](docs/results/itch_2019-12-30.md)).
+- Order flow imbalance on that day, after Cont, Kukanov and Stoikov (2014): it explains 50% to 82% of 10 second mid price changes, as in the paper, but at most 2.6% of the next interval's change, and the queue imbalance the market maker leans on explains at most 0.8% ([docs/results/ofi_2019-12-30.md](docs/results/ofi_2019-12-30.md)).
 - 52 architecture decision records, including rejected options: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Build and run
